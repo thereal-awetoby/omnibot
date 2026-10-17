@@ -1,6 +1,7 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import {
-  upsertUser, getTradeWallet, saveTradeWallet, encryptSecret, decryptSecret,
+  upsertUser, getTradeWallet, listTradeWallets, saveTradeWallet, setActiveWallet,
+  encryptSecret, decryptSecret,
 } from '@omnibot/shared';
 import {
   createWallet, parseImport, secretToBase58, keypairFromBytes, getSolBalance,
@@ -9,15 +10,17 @@ import {
 if (!process.env.TRADE_BOT_TOKEN) throw new Error('TRADE_BOT_TOKEN is not set');
 const bot = new Bot(process.env.TRADE_BOT_TOKEN);
 
-// Users currently being asked to paste a key/seed. In-memory is fine for Phase 0.
+// Users currently being asked to paste a key/seed. In-memory is fine for now.
 const awaitingImport = new Set();
 
+const MAX_WALLETS = 10;
 const SCAN_USERNAME = process.env.SCAN_BOT_USERNAME || 'OmniScanBot';
 const LAUNCH_USERNAME = process.env.LAUNCH_BOT_USERNAME || 'OmniLaunchBot';
 
 // Telegram monospace text: tap (or click) to copy.
 const code = (s) => `<code>${s}</code>`;
 const HTML = { parse_mode: 'HTML' };
+const short = (a) => `${a.slice(0, 4)}…${a.slice(-4)}`;
 
 const noWalletKeyboard = () =>
   new InlineKeyboard().text('Create wallet', 'create').text('Import wallet', 'import');
@@ -25,12 +28,16 @@ const noWalletKeyboard = () =>
 const mainKeyboard = () =>
   new InlineKeyboard()
     .text('Balance', 'balance').text('Deposit', 'deposit').row()
-    .text('Export key', 'exportkey').row()
+    .text('Wallets', 'wallets').text('Export key', 'exportkey').row()
     .url('Omni Scan', `https://t.me/${SCAN_USERNAME}`)
     .url('Omni Launch', `https://t.me/${LAUNCH_USERNAME}`);
 
 bot.use(async (ctx, next) => {
-  if (ctx.from) await upsertUser({ id: ctx.from.id, username: ctx.from.username });
+  if (ctx.from) {
+    await upsertUser({ id: ctx.from.id, username: ctx.from.username });
+    // Running any /command cancels a pending "paste your key" prompt.
+    if (ctx.message?.text?.startsWith('/')) awaitingImport.delete(ctx.from.id);
+  }
   await next();
 });
 
@@ -42,20 +49,48 @@ async function showHome(ctx) {
       { reply_markup: noWalletKeyboard() }
     );
   }
-  return ctx.reply(`Omni Trade Bot\n\nWallet (tap to copy):\n${code(w.public_key)}`, { ...HTML, reply_markup: mainKeyboard() });
+  return ctx.reply(
+    `Omni Trade Bot\n\nActive wallet: ${w.label}\n${code(w.public_key)} (tap to copy)`,
+    { ...HTML, reply_markup: mainKeyboard() }
+  );
+}
+
+async function showWallets(ctx) {
+  const list = await listTradeWallets(ctx.from.id);
+  if (list.length === 0) {
+    return ctx.reply('No wallets yet.', { reply_markup: noWalletKeyboard() });
+  }
+  const text =
+    'Your wallets (tap a button to switch):\n\n' +
+    list.map((w) => `${w.is_active ? '✅' : '▫️'} ${w.label}\n${code(w.public_key)}`).join('\n\n');
+  const kb = new InlineKeyboard();
+  for (const w of list) {
+    kb.text(`${w.is_active ? '✅ ' : ''}${w.label} · ${short(w.public_key)}`, `sel:${w.id}`).row();
+  }
+  kb.text('+ Create new', 'create').text('+ Import', 'import').row().text('Back', 'home');
+  return ctx.reply(text, { ...HTML, reply_markup: kb });
+}
+
+async function walletCapReached(ctx) {
+  const list = await listTradeWallets(ctx.from.id);
+  if (list.length >= MAX_WALLETS) {
+    await ctx.reply(`You can have up to ${MAX_WALLETS} wallets.`);
+    return true;
+  }
+  return false;
 }
 
 async function doCreate(ctx) {
-  if (await getTradeWallet(ctx.from.id)) return ctx.reply('You already have a wallet. Use /wallet.');
+  if (await walletCapReached(ctx)) return;
   const kp = createWallet();
-  await saveTradeWallet({
+  const label = await saveTradeWallet({
     telegramId: ctx.from.id,
     publicKey: kp.publicKey.toBase58(),
     encryptedSecret: encryptSecret(Buffer.from(kp.secretKey)),
     source: 'created',
   });
   const msg = await ctx.reply(
-    `Wallet created.\n\nAddress (tap to copy):\n${code(kp.publicKey.toBase58())}\n\nPrivate key (tap to copy, shown once, save it now):\n${code(secretToBase58(kp))}\n\nThis message deletes itself in 60 seconds. Never share the key.`,
+    `${label} created and set as active.\n\nAddress (tap to copy):\n${code(kp.publicKey.toBase58())}\n\nPrivate key (tap to copy, shown once, save it now):\n${code(secretToBase58(kp))}\n\nThis message deletes itself in 60 seconds. Never share the key.`,
     HTML
   );
   setTimeout(() => ctx.api.deleteMessage(msg.chat.id, msg.message_id).catch(() => {}), 60_000);
@@ -63,7 +98,7 @@ async function doCreate(ctx) {
 }
 
 async function startImport(ctx) {
-  if (await getTradeWallet(ctx.from.id)) return ctx.reply('You already have a wallet. Use /wallet.');
+  if (await walletCapReached(ctx)) return;
   awaitingImport.add(ctx.from.id);
   return ctx.reply('Paste your private key (base58 or JSON array) or 12/24-word seed phrase. Your message will be deleted right away.');
 }
@@ -72,7 +107,10 @@ async function doExport(ctx) {
   const w = await getTradeWallet(ctx.from.id);
   if (!w) return ctx.reply('No wallet yet.', { reply_markup: noWalletKeyboard() });
   const kp = keypairFromBytes(decryptSecret(w.encrypted_secret));
-  const msg = await ctx.reply(`Private key (tap to copy):\n${code(secretToBase58(kp))}\n\nDeletes in 60 seconds.`, HTML);
+  const msg = await ctx.reply(
+    `${w.label} private key (tap to copy):\n${code(secretToBase58(kp))}\n\nDeletes in 60 seconds.`,
+    HTML
+  );
   setTimeout(() => ctx.api.deleteMessage(msg.chat.id, msg.message_id).catch(() => {}), 60_000);
 }
 
@@ -80,20 +118,21 @@ async function doBalance(ctx) {
   const w = await getTradeWallet(ctx.from.id);
   if (!w) return ctx.reply('No wallet yet.', { reply_markup: noWalletKeyboard() });
   const sol = await getSolBalance(w.public_key);
-  return ctx.reply(`Balance: ${sol.toFixed(4)} SOL`);
+  return ctx.reply(`${w.label} balance: ${sol.toFixed(4)} SOL`);
 }
 
 async function doDeposit(ctx) {
   const w = await getTradeWallet(ctx.from.id);
   if (!w) return ctx.reply('No wallet yet.', { reply_markup: noWalletKeyboard() });
-  return ctx.reply(`Send SOL to (tap to copy):\n${code(w.public_key)}`, HTML);
+  return ctx.reply(`Send SOL to ${w.label} (tap to copy):\n${code(w.public_key)}`, HTML);
 }
 
 bot.command('start', showHome);
 bot.command('help', (ctx) => ctx.reply(
-  '/wallet /createwallet /importwallet /balance /deposit /exportkey /scan /launch'
+  '/wallet /wallets /createwallet /importwallet /balance /deposit /exportkey /scan /launch'
 ));
 bot.command('wallet', showHome);
+bot.command('wallets', showWallets);
 bot.command('createwallet', doCreate);
 bot.command('importwallet', startImport);
 bot.command('balance', doBalance);
@@ -102,29 +141,47 @@ bot.command('exportkey', doExport);
 bot.command('scan', (ctx) => ctx.reply(`https://t.me/${SCAN_USERNAME}`));
 bot.command('launch', (ctx) => ctx.reply(`https://t.me/${LAUNCH_USERNAME}`));
 
+bot.callbackQuery('home', async (ctx) => { await ctx.answerCallbackQuery(); return showHome(ctx); });
+bot.callbackQuery('wallets', async (ctx) => { await ctx.answerCallbackQuery(); return showWallets(ctx); });
 bot.callbackQuery('create', async (ctx) => { await ctx.answerCallbackQuery(); return doCreate(ctx); });
 bot.callbackQuery('import', async (ctx) => { await ctx.answerCallbackQuery(); return startImport(ctx); });
 bot.callbackQuery('balance', async (ctx) => { await ctx.answerCallbackQuery(); return doBalance(ctx); });
 bot.callbackQuery('deposit', async (ctx) => { await ctx.answerCallbackQuery(); return doDeposit(ctx); });
 bot.callbackQuery('exportkey', async (ctx) => { await ctx.answerCallbackQuery(); return doExport(ctx); });
+bot.callbackQuery(/^sel:(\d+)$/, async (ctx) => {
+  const ok = await setActiveWallet(ctx.from.id, Number(ctx.match[1]));
+  await ctx.answerCallbackQuery({ text: ok ? 'Wallet switched' : 'Wallet not found' });
+  if (ok) return showHome(ctx);
+});
 
 bot.on('message:text', async (ctx) => {
   if (!awaitingImport.has(ctx.from.id)) return;
   awaitingImport.delete(ctx.from.id);
   // Delete the message containing the secret immediately.
   await ctx.deleteMessage().catch(() => {});
+
+  let kp;
   try {
-    const kp = parseImport(ctx.message.text);
-    await saveTradeWallet({
+    kp = parseImport(ctx.message.text);
+  } catch {
+    return ctx.reply('Could not read that key or seed phrase. Run /importwallet to try again.');
+  }
+
+  try {
+    const label = await saveTradeWallet({
       telegramId: ctx.from.id,
       publicKey: kp.publicKey.toBase58(),
       encryptedSecret: encryptSecret(Buffer.from(kp.secretKey)),
       source: 'imported',
     });
-    await ctx.reply(`Wallet imported.\n\nAddress (tap to copy):\n${code(kp.publicKey.toBase58())}`, HTML);
+    await ctx.reply(
+      `${label} imported and set as active.\n\nAddress (tap to copy):\n${code(kp.publicKey.toBase58())}`,
+      HTML
+    );
     return showHome(ctx);
-  } catch {
-    return ctx.reply('Could not read that key or seed phrase. Run /importwallet to try again.');
+  } catch (err) {
+    if (err.code === '23505') return ctx.reply('That wallet is already in your list.');
+    throw err;
   }
 });
 
