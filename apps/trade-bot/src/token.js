@@ -55,6 +55,45 @@ export async function fetchMarketData(mint, fetchImpl = fetch) {
   };
 }
 
+// pump.fun knows tokens that are still on the bonding curve (not migrated yet), which
+// DexScreener often lacks. Best effort: any failure just means "no data from here".
+export async function fetchPumpData(mint, fetchImpl = fetch) {
+  const res = await fetchImpl(`https://frontend-api-v3.pump.fun/coins/${mint}`, {
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!res.ok) throw new Error(`pump.fun returned HTTP ${res.status}`);
+  const c = await res.json();
+  if (!c?.mint || typeof c.usd_market_cap !== 'number') return null;
+  return {
+    name: c.name,
+    symbol: c.symbol,
+    priceUsd: c.usd_market_cap / 1e9, // pump.fun tokens have a fixed 1B supply
+    liquidityUsd: null,
+    marketCapUsd: c.usd_market_cap,
+    dex: c.complete ? 'pump.fun (migrated)' : 'pump.fun',
+  };
+}
+
+// DexScreener first; if it has nothing (or no market cap), fill the gaps from pump.fun.
+export async function fetchTokenMarket(mint, fetchImpl = fetch) {
+  let dex = null;
+  try { dex = await fetchMarketData(mint, fetchImpl); } catch (e) { console.error('dexscreener error:', e.message); }
+  if (dex && dex.marketCapUsd != null) return dex;
+  let pump = null;
+  try { pump = await fetchPumpData(mint, fetchImpl); } catch (e) { console.error('pump.fun error:', e.message); }
+  if (!dex) return pump;
+  if (!pump) return dex;
+  return { ...dex, marketCapUsd: pump.marketCapUsd, priceUsd: dex.priceUsd ?? pump.priceUsd };
+}
+
+// "3,161,534.990174" -> "3,161,534.99"; tiny amounts keep their precision.
+export function shortNum(s) {
+  const str = String(s);
+  const [whole, frac = ''] = str.split('.');
+  if (whole !== '0') return frac ? `${whole}.${frac.slice(0, 2)}`.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1') : whole;
+  return str;
+}
+
 // Builds the HTML text of the card.
 export function buildTokenCard({ mint, market, mintInfo, wallet, balance, amount, quote, quoteError }) {
   const symbol = market?.symbol ? `$${esc(market.symbol)}` : 'Token';
@@ -83,7 +122,7 @@ export function buildTokenCard({ mint, market, mintInfo, wallet, balance, amount
   if (quote) {
     const impact = quote.priceImpactPct === null ? 'n/a' : `${quote.priceImpactPct.toFixed(2)}%`;
     const warn = quote.priceImpactPct !== null && Math.abs(quote.priceImpactPct) >= 5 ? ' ⚠️' : '';
-    lines.push(`Quote: ${esc(amount)} SOL → ~${quote.out} ${market?.symbol ? esc(market.symbol) : 'tokens'}`);
+    lines.push(`Quote: ${esc(amount)} SOL → ~${shortNum(quote.out)} ${market?.symbol ? esc(market.symbol) : 'tokens'}`);
     lines.push(`Price impact: ${impact}${warn} · Route: ${esc(quote.router)}`);
   } else {
     lines.push(`Quote unavailable: ${esc(quoteError ?? 'unknown error')}`);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTokenInput, formatUsd, formatPrice, fetchMarketData, buildTokenCard } from './token.js';
+import { parseTokenInput, formatUsd, formatPrice, fetchMarketData, fetchPumpData, fetchTokenMarket, shortNum, buildTokenCard } from './token.js';
 
 const MINT = 'HF7R3k8129c2Ya4FEwPcqyLXXoHx7hwWGGsM8sAkpump';
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -85,4 +85,36 @@ test('buildTokenCard copes with no market data and a failed quote', () => {
   assert.match(text, /Freeze authority is active/);
   assert.match(text, /Quote unavailable: no route/);
   assert.doesNotMatch(text, /Insufficient/);
+});
+
+test('shortNum trims long decimals', () => {
+  assert.equal(shortNum('3,161,534.990174'), '3,161,534.99');
+  assert.equal(shortNum('1,000'), '1,000');
+  assert.equal(shortNum('0.000123'), '0.000123');
+});
+
+test('fetchPumpData reads a bonding-curve token', async () => {
+  const body = { mint: MINT, name: 'First Gemma Dolphin', symbol: 'BRUSH', usd_market_cap: 11070, complete: false };
+  const m = await fetchPumpData(MINT, mockFetch(200, body));
+  assert.equal(m.symbol, 'BRUSH');
+  assert.equal(m.marketCapUsd, 11070);
+  assert.equal(m.priceUsd, 11070 / 1e9);
+  assert.equal(m.liquidityUsd, null);
+  assert.equal(await fetchPumpData(MINT, mockFetch(200, {})), null);
+});
+
+test('fetchTokenMarket falls back to pump.fun, and survives both sources failing', async () => {
+  const pump = { mint: MINT, name: 'P', symbol: 'PP', usd_market_cap: 5000, complete: false };
+  const route = (dexBody, dexOk = true, pumpOk = true) => async (url) => {
+    const isDex = url.includes('dexscreener');
+    const ok = isDex ? dexOk : pumpOk;
+    return { ok, status: ok ? 200 : 500, json: async () => (isDex ? dexBody : pump) };
+  };
+  assert.equal((await fetchTokenMarket(MINT, route({ pairs: [] }))).symbol, 'PP');
+  const dexNoMc = { pairs: [{ chainId: 'solana', baseToken: { address: MINT, name: 'D', symbol: 'DD' }, priceUsd: '0.000002', liquidity: { usd: 900 } }] };
+  const merged = await fetchTokenMarket(MINT, route(dexNoMc));
+  assert.equal(merged.symbol, 'DD');
+  assert.equal(merged.liquidityUsd, 900);
+  assert.equal(merged.marketCapUsd, 5000);
+  assert.equal(await fetchTokenMarket(MINT, route({}, false, false)), null);
 });

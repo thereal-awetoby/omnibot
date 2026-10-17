@@ -8,7 +8,7 @@ import {
   isValidAddress, getMintInfo,
 } from './wallet.js';
 import { solToLamports, fetchQuote, hasRoute, summarizeQuote } from './jupiter.js';
-import { parseTokenInput, fetchMarketData, buildTokenCard } from './token.js';
+import { parseTokenInput, fetchTokenMarket, buildTokenCard } from './token.js';
 
 if (!process.env.TRADE_BOT_TOKEN) throw new Error('TRADE_BOT_TOKEN is not set');
 const bot = new Bot(process.env.TRADE_BOT_TOKEN);
@@ -17,6 +17,8 @@ const bot = new Bot(process.env.TRADE_BOT_TOKEN);
 const awaitingImport = new Set();
 // Users currently being asked for a new wallet name: userId -> walletId.
 const awaitingRename = new Map();
+// Users typing a custom buy amount or slippage: userId -> { kind: 'amount' | 'slippage', mint }.
+const awaitingCustom = new Map();
 
 const MAX_WALLETS = 10;
 const SCAN_USERNAME = process.env.SCAN_BOT_USERNAME || 'OmniScanBot';
@@ -44,6 +46,7 @@ bot.use(async (ctx, next) => {
     if (ctx.message?.text?.startsWith('/')) {
       awaitingImport.delete(ctx.from.id);
       awaitingRename.delete(ctx.from.id);
+      awaitingCustom.delete(ctx.from.id);
     }
   }
   await next();
@@ -109,6 +112,7 @@ async function doCreate(ctx) {
 async function startImport(ctx) {
   if (await walletCapReached(ctx)) return;
   awaitingRename.delete(ctx.from.id);
+  awaitingCustom.delete(ctx.from.id);
   awaitingImport.add(ctx.from.id);
   return ctx.reply('Paste your private key (base58 or JSON array) or 12/24-word seed phrase. Your message will be deleted right away.');
 }
@@ -124,6 +128,7 @@ async function showRenamePicker(ctx) {
 
 function startRename(ctx, wallet) {
   awaitingImport.delete(ctx.from.id);
+  awaitingCustom.delete(ctx.from.id);
   awaitingRename.set(ctx.from.id, wallet.id);
   return ctx.reply(
     `Send the new name for ${esc(wallet.label)}.\n1-20 characters: letters, numbers, spaces, - _ .\nSend any /command to cancel.`,
@@ -156,20 +161,47 @@ async function applyRename(ctx, walletId, raw) {
 }
 
 const lastCardAt = new Map(); // userId -> timestamp, simple per-user cooldown
-const buyAmount = new Map(); // userId -> chosen SOL amount (string), in memory
-const DEFAULT_AMOUNT = '0.1';
-const AMOUNTS = ['0.05', '0.1', '0.2', '0.5', '1'];
+const prefs = new Map(); // userId -> { amount: '0.1', slippageBps: 1000 }, in memory
+const symbols = new Map(); // mint -> symbol, remembered from the last card shown
+const DEFAULT_PREFS = { amount: '0.1', slippageBps: 1000 };
+const AMOUNT_PRESETS = ['0.05', '0.1', '0.2', '0.3', '0.5'];
+const SLIPPAGE_STEPS = [100, 500, 1000, 2000];
+const GAS_BUFFER_SOL = 0.01;
 
-function tokenKeyboard(mint, amount) {
-  const kb = new InlineKeyboard().text('← Home', 'home').text('↻ Refresh', `q:${amount}:${mint}`).row();
-  for (const a of AMOUNTS) kb.text(`${a === amount ? '✅ ' : ''}${a} SOL`, `q:${a}:${mint}`);
+const getPrefs = (userId) => prefs.get(userId) ?? { ...DEFAULT_PREFS };
+const setPrefs = (userId, patch) => prefs.set(userId, { ...getPrefs(userId), ...patch });
+const pct = (bps) => `${bps / 100}%`;
+
+function tokenKeyboard(mint, p, walletLabel) {
+  const customAmount = !AMOUNT_PRESETS.includes(p.amount);
+  const kb = new InlineKeyboard()
+    .text('← Back', 'home').text('↻ Refresh', `q:${mint}`).row()
+    .text(`✅ ${walletLabel ?? 'No wallet'}`, 'wallets').row()
+    .text('✅ Swap', 'soon:swap').text('Limit', 'soon:limit').text('DCA', 'soon:dca').row();
+  AMOUNT_PRESETS.forEach((a, i) => {
+    kb.text(`${a === p.amount ? '✅ ' : ''}${a} SOL`, `a:${a}:${mint}`);
+    if (i === 2) kb.row();
+  });
+  kb.text(customAmount ? `✅ ${p.amount} SOL ✏️` : 'X SOL ✏️', `xa:${mint}`).row();
+  kb.text(`✅ ${pct(p.slippageBps)} Slippage`, `sl:${mint}`).text('X Slippage ✏️', `xs:${mint}`).row();
+  kb.text(`BUY ${p.amount} SOL`, `buy:${mint}`);
   return kb;
+}
+
+// Pulls the mint info with one retry: the free public RPC sometimes says "busy".
+async function getMintInfoRetry(mint) {
+  try { return await getMintInfo(mint); } catch (err) {
+    if (err.message === 'That address is not a token mint') throw err;
+    await new Promise((r) => setTimeout(r, 700));
+    return getMintInfo(mint);
+  }
 }
 
 // Read-only token card: market data + a real Jupiter quote. Nothing is bought or signed.
 async function showToken(ctx, mint, amountInput, { edit = false } = {}) {
   if (!isValidAddress(mint)) return ctx.reply('That does not look like a valid token address.');
-  const amount = amountInput ?? buyAmount.get(ctx.from.id) ?? DEFAULT_AMOUNT;
+  const p = getPrefs(ctx.from.id);
+  const amount = amountInput ?? p.amount;
   let lamports;
   try { lamports = solToLamports(amount); } catch (e) { return ctx.reply(e.message); }
 
@@ -178,21 +210,23 @@ async function showToken(ctx, mint, amountInput, { edit = false } = {}) {
     if (now - (lastCardAt.get(ctx.from.id) ?? 0) < 1500) return ctx.reply('Slow down a little, try again in a moment.');
     lastCardAt.set(ctx.from.id, now);
   }
-  buyAmount.set(ctx.from.id, amount);
+  setPrefs(ctx.from.id, { amount });
 
   const w = await getTradeWallet(ctx.from.id);
   const [mintR, mktR, balR, orderR] = await Promise.allSettled([
-    getMintInfo(mint),
-    fetchMarketData(mint),
+    getMintInfoRetry(mint),
+    fetchTokenMarket(mint),
     w ? getSolBalance(w.public_key) : Promise.resolve(null),
     fetchQuote({ outputMint: mint, lamports, apiKey: process.env.JUPITER_API_KEY }),
   ]);
 
   if (mintR.status === 'rejected') {
     console.error('mint info error:', mintR.reason?.message);
-    return ctx.reply('That address is not a token (it may be a wallet, or the RPC is busy). Paste a token contract address.');
+    const notToken = mintR.reason?.message === 'That address is not a token mint';
+    return ctx.reply(notToken
+      ? 'That address is not a token mint (it may be a wallet). Paste a token contract address.'
+      : 'Could not read that token right now (the Solana RPC is busy). Paste it again in a few seconds.');
   }
-  if (mktR.status === 'rejected') console.error('market data error:', mktR.reason?.message);
 
   let quote = null;
   let quoteError = null;
@@ -207,9 +241,11 @@ async function showToken(ctx, mint, amountInput, { edit = false } = {}) {
       : e.message;
   }
 
+  const market = mktR.status === 'fulfilled' ? mktR.value : null;
+  if (market?.symbol) symbols.set(mint, market.symbol);
   const text = buildTokenCard({
     mint,
-    market: mktR.status === 'fulfilled' ? mktR.value : null,
+    market,
     mintInfo: mintR.value,
     wallet: w,
     balance: balR.status === 'fulfilled' ? balR.value : null,
@@ -217,12 +253,57 @@ async function showToken(ctx, mint, amountInput, { edit = false } = {}) {
     quote,
     quoteError,
   });
-  const opts = { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: tokenKeyboard(mint, amount) };
+  const opts = { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: tokenKeyboard(mint, getPrefs(ctx.from.id), w?.label) };
   if (edit) {
     try { return await ctx.editMessageText(text, opts); }
     catch (err) { if (/not modified/i.test(err.message)) return; throw err; }
   }
   return ctx.reply(text, opts);
+}
+
+// Step before any real buy: show exactly what will happen and ask for a second tap.
+async function showBuyConfirm(ctx, mint) {
+  const w = await getTradeWallet(ctx.from.id);
+  if (!w) { await ctx.answerCallbackQuery({ text: 'Create a wallet first (/start).', show_alert: true }); return; }
+  const p = getPrefs(ctx.from.id);
+  const bal = await getSolBalance(w.public_key);
+  if (bal < Number(p.amount) + GAS_BUFFER_SOL) {
+    await ctx.answerCallbackQuery({
+      text: `Insufficient balance. You have ${bal.toFixed(4)} SOL; need ${p.amount} SOL + gas. Use Deposit to add SOL.`,
+      show_alert: true,
+    });
+    return;
+  }
+  await ctx.answerCallbackQuery();
+  const sym = symbols.get(mint);
+  const kb = new InlineKeyboard().text('✅ Confirm buy', `cf:${mint}`).text('✖ Cancel', `q:${mint}`);
+  await ctx.editMessageText(
+    `<b>Confirm buy</b>\n\n${esc(p.amount)} SOL → ${sym ? '$' + esc(sym) : 'token'}\n${code(mint)}\n\nSlippage: ${pct(p.slippageBps)}\nWallet: ${esc(w.label)} (${bal.toFixed(4)} SOL)\n\nNothing is bought until you tap Confirm.`,
+    { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: kb }
+  );
+}
+
+// Custom amount / slippage typed by the user. Returns true when handled (done or still waiting).
+async function handleCustomInput(ctx, pending) {
+  const raw = ctx.message.text.trim().replace(/%$/, '');
+  if (pending.kind === 'amount') {
+    let ok = true;
+    try { solToLamports(raw); } catch { ok = false; }
+    if (!ok || Number(raw) > 1000) {
+      await ctx.reply('Send a SOL amount like 0.35 (or any /command to cancel).');
+      return false;
+    }
+    setPrefs(ctx.from.id, { amount: String(Number(raw)) });
+  } else {
+    const n = Number(raw);
+    if (!/^\d+(\.\d+)?$/.test(raw) || n < 0.1 || n > 50) {
+      await ctx.reply('Send a slippage percent between 0.1 and 50, like 3 (or any /command to cancel).');
+      return false;
+    }
+    setPrefs(ctx.from.id, { slippageBps: Math.round(n * 100) });
+  }
+  await showToken(ctx, pending.mint, undefined);
+  return true;
 }
 
 async function doExport(ctx) {
@@ -285,10 +366,41 @@ bot.callbackQuery(/^ren:(\d+)$/, async (ctx) => {
   if (!w) return ctx.reply('Wallet not found.');
   return startRename(ctx, w);
 });
-bot.callbackQuery(/^q:(\d+(?:\.\d+)?):([1-9A-HJ-NP-Za-km-z]{32,44})$/, async (ctx) => {
+const MINT = '([1-9A-HJ-NP-Za-km-z]{32,44})';
+bot.callbackQuery(new RegExp(`^q:${MINT}$`), async (ctx) => {
   await ctx.answerCallbackQuery();
-  return showToken(ctx, ctx.match[2], ctx.match[1], { edit: true });
+  return showToken(ctx, ctx.match[1], undefined, { edit: true });
 });
+bot.callbackQuery(new RegExp(`^a:(\\d+(?:\\.\\d+)?):${MINT}$`), async (ctx) => {
+  await ctx.answerCallbackQuery();
+  setPrefs(ctx.from.id, { amount: ctx.match[1] });
+  return showToken(ctx, ctx.match[2], undefined, { edit: true });
+});
+bot.callbackQuery(new RegExp(`^sl:${MINT}$`), async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const cur = getPrefs(ctx.from.id).slippageBps;
+  const next = SLIPPAGE_STEPS[(SLIPPAGE_STEPS.indexOf(cur) + 1) % SLIPPAGE_STEPS.length];
+  setPrefs(ctx.from.id, { slippageBps: next });
+  return showToken(ctx, ctx.match[1], undefined, { edit: true });
+});
+bot.callbackQuery(new RegExp(`^x([as]):${MINT}$`), async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const kind = ctx.match[1] === 'a' ? 'amount' : 'slippage';
+  awaitingImport.delete(ctx.from.id);
+  awaitingRename.delete(ctx.from.id);
+  awaitingCustom.set(ctx.from.id, { kind, mint: ctx.match[2] });
+  return ctx.reply(kind === 'amount'
+    ? 'Send the SOL amount you want to buy with, like 0.35. Send any /command to cancel.'
+    : 'Send the slippage percent, like 3 (between 0.1 and 50). Send any /command to cancel.');
+});
+bot.callbackQuery(new RegExp(`^buy:${MINT}$`), (ctx) => showBuyConfirm(ctx, ctx.match[1]));
+bot.callbackQuery(new RegExp(`^cf:${MINT}$`), (ctx) =>
+  ctx.answerCallbackQuery({
+    text: 'Live buying is not switched on yet (coming in the next step). Nothing was bought.',
+    show_alert: true,
+  })
+);
+bot.callbackQuery(/^soon:/, (ctx) => ctx.answerCallbackQuery({ text: 'Coming soon.', show_alert: false }));
 bot.callbackQuery('create', async (ctx) => { await ctx.answerCallbackQuery(); return doCreate(ctx); });
 bot.callbackQuery('import', async (ctx) => { await ctx.answerCallbackQuery(); return startImport(ctx); });
 bot.callbackQuery('balance', async (ctx) => { await ctx.answerCallbackQuery(); return doBalance(ctx); });
@@ -306,6 +418,12 @@ bot.on('message:text', async (ctx) => {
     awaitingRename.delete(ctx.from.id);
     const done = await applyRename(ctx, walletId, ctx.message.text);
     if (!done) awaitingRename.set(ctx.from.id, walletId);
+    return;
+  }
+  if (awaitingCustom.has(ctx.from.id)) {
+    const pending = awaitingCustom.get(ctx.from.id);
+    const done = await handleCustomInput(ctx, pending);
+    if (done) awaitingCustom.delete(ctx.from.id);
     return;
   }
   if (!awaitingImport.has(ctx.from.id)) {
