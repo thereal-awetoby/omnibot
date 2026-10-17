@@ -5,7 +5,9 @@ import {
 } from '@omnibot/shared';
 import {
   createWallet, parseImport, secretToBase58, keypairFromBytes, getSolBalance,
+  isValidAddress, getTokenDecimals,
 } from './wallet.js';
+import { solToLamports, fetchQuote, hasRoute, summarizeQuote } from './jupiter.js';
 
 if (!process.env.TRADE_BOT_TOKEN) throw new Error('TRADE_BOT_TOKEN is not set');
 const bot = new Bot(process.env.TRADE_BOT_TOKEN);
@@ -152,6 +154,45 @@ async function applyRename(ctx, walletId, raw) {
   return true;
 }
 
+const lastQuoteAt = new Map(); // userId -> timestamp, simple per-user cooldown
+
+// Read-only: asks Jupiter for a price. Nothing is bought or signed.
+async function doQuote(ctx) {
+  const [mint, amount = '0.1'] = ctx.match.trim().split(/\s+/);
+  if (!mint) return ctx.reply('Usage: /quote <token mint address> [SOL amount]\nExample: /quote <mint> 0.1');
+  if (!isValidAddress(mint)) return ctx.reply('That does not look like a valid token mint address.');
+  let lamports;
+  try { lamports = solToLamports(amount); } catch (e) { return ctx.reply(e.message); }
+
+  const now = Date.now();
+  if (now - (lastQuoteAt.get(ctx.from.id) ?? 0) < 2000) return ctx.reply('Slow down a little, try again in a moment.');
+  lastQuoteAt.set(ctx.from.id, now);
+
+  try {
+    const [order, decimals] = await Promise.all([
+      fetchQuote({ outputMint: mint, lamports, apiKey: process.env.JUPITER_API_KEY }),
+      getTokenDecimals(mint),
+    ]);
+    if (!hasRoute(order)) return ctx.reply('Jupiter found no route for that token (no liquidity, or it is not tradable yet).');
+    const q = summarizeQuote(order, decimals);
+    const impact = q.priceImpactPct === null ? 'n/a' : `${q.priceImpactPct.toFixed(2)}%`;
+    const warn = q.priceImpactPct !== null && Math.abs(q.priceImpactPct) >= 5 ? '\n⚠️ High price impact' : '';
+    return ctx.reply(
+      `Quote (read-only, nothing was bought)\n\n${esc(amount)} SOL → ~${q.out} tokens\n` +
+      (q.minOut ? `Minimum after slippage: ${q.minOut}\n` : '') +
+      `Price impact: ${impact}${warn}\nRoute: ${esc(q.router)}` +
+      (q.feeBps !== null ? ` · Fee: ${q.feeBps} bps` : '') +
+      `\n\nToken (tap to copy):\n${code(mint)}`,
+      HTML
+    );
+  } catch (err) {
+    console.error('quote error:', err.status ?? '', err.message);
+    if (err.status === 429) return ctx.reply('Jupiter is busy (rate limit). Try again in a few seconds.');
+    if (err.status) return ctx.reply(`Jupiter could not quote this: ${err.message}`);
+    return ctx.reply(`Could not get a quote: ${err.message}`);
+  }
+}
+
 async function doExport(ctx) {
   const w = await getTradeWallet(ctx.from.id);
   if (!w) return ctx.reply('No wallet yet.', { reply_markup: noWalletKeyboard() });
@@ -178,7 +219,7 @@ async function doDeposit(ctx) {
 
 bot.command('start', showHome);
 bot.command('help', (ctx) => ctx.reply(
-  '/wallet /wallets /rename /createwallet /importwallet /balance /deposit /exportkey /scan /launch'
+  '/wallet /wallets /rename /createwallet /importwallet /balance /deposit /exportkey /quote /scan /launch'
 ));
 bot.command('wallet', showHome);
 bot.command('wallets', showWallets);
@@ -189,6 +230,7 @@ bot.command('rename', async (ctx) => {
   if (arg) return applyRename(ctx, w.id, arg);
   return startRename(ctx, w);
 });
+bot.command('quote', doQuote);
 bot.command('createwallet', doCreate);
 bot.command('importwallet', startImport);
 bot.command('balance', doBalance);

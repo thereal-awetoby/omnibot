@@ -32,6 +32,18 @@ export function parseImport(input) {
   return Keypair.fromSecretKey(bs58.decode(text));
 }
 
+export function isValidAddress(s) {
+  try { new PublicKey(s); return true; } catch { return false; }
+}
+
+// Number of decimals of an SPL token mint (works for Token-2022 too).
+export async function getTokenDecimals(mint) {
+  const info = await connection.getParsedAccountInfo(new PublicKey(mint));
+  const decimals = info.value?.data?.parsed?.info?.decimals;
+  if (typeof decimals !== 'number') throw new Error('That address is not a token mint');
+  return decimals;
+}
+
 export const secretToBase58 = (kp) => bs58.encode(kp.secretKey);
 export const keypairFromBytes = (bytes) => Keypair.fromSecretKey(Uint8Array.from(bytes));
 

@@ -6,6 +6,6 @@
   "scripts": {
     "trade": "npm run start -w apps/trade-bot",
     "migrate": "npm run migrate -w packages/shared",
-    "test": "npm test -w packages/shared"
+    "test": "npm test -w packages/shared && npm test -w apps/trade-bot"
   }
 }
