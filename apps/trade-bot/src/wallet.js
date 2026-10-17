@@ -44,6 +44,18 @@ export async function getTokenDecimals(mint) {
   return decimals;
 }
 
+// On-chain facts about a token mint: decimals + whether mint/freeze authority are still set.
+export async function getMintInfo(mint) {
+  const info = await connection.getParsedAccountInfo(new PublicKey(mint));
+  const parsed = info.value?.data?.parsed;
+  if (parsed?.type !== 'mint') throw new Error('That address is not a token mint');
+  return {
+    decimals: parsed.info.decimals,
+    mintAuthority: parsed.info.mintAuthority ?? null,
+    freezeAuthority: parsed.info.freezeAuthority ?? null,
+  };
+}
+
 export const secretToBase58 = (kp) => bs58.encode(kp.secretKey);
 export const keypairFromBytes = (bytes) => Keypair.fromSecretKey(Uint8Array.from(bytes));
 

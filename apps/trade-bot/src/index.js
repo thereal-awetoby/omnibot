@@ -5,9 +5,10 @@ import {
 } from '@omnibot/shared';
 import {
   createWallet, parseImport, secretToBase58, keypairFromBytes, getSolBalance,
-  isValidAddress, getTokenDecimals,
+  isValidAddress, getMintInfo,
 } from './wallet.js';
 import { solToLamports, fetchQuote, hasRoute, summarizeQuote } from './jupiter.js';
+import { parseTokenInput, fetchMarketData, buildTokenCard } from './token.js';
 
 if (!process.env.TRADE_BOT_TOKEN) throw new Error('TRADE_BOT_TOKEN is not set');
 const bot = new Bot(process.env.TRADE_BOT_TOKEN);
@@ -154,43 +155,74 @@ async function applyRename(ctx, walletId, raw) {
   return true;
 }
 
-const lastQuoteAt = new Map(); // userId -> timestamp, simple per-user cooldown
+const lastCardAt = new Map(); // userId -> timestamp, simple per-user cooldown
+const buyAmount = new Map(); // userId -> chosen SOL amount (string), in memory
+const DEFAULT_AMOUNT = '0.1';
+const AMOUNTS = ['0.05', '0.1', '0.2', '0.5', '1'];
 
-// Read-only: asks Jupiter for a price. Nothing is bought or signed.
-async function doQuote(ctx) {
-  const [mint, amount = '0.1'] = ctx.match.trim().split(/\s+/);
-  if (!mint) return ctx.reply('Usage: /quote <token mint address> [SOL amount]\nExample: /quote <mint> 0.1');
-  if (!isValidAddress(mint)) return ctx.reply('That does not look like a valid token mint address.');
+function tokenKeyboard(mint, amount) {
+  const kb = new InlineKeyboard().text('← Home', 'home').text('↻ Refresh', `q:${amount}:${mint}`).row();
+  for (const a of AMOUNTS) kb.text(`${a === amount ? '✅ ' : ''}${a} SOL`, `q:${a}:${mint}`);
+  return kb;
+}
+
+// Read-only token card: market data + a real Jupiter quote. Nothing is bought or signed.
+async function showToken(ctx, mint, amountInput, { edit = false } = {}) {
+  if (!isValidAddress(mint)) return ctx.reply('That does not look like a valid token address.');
+  const amount = amountInput ?? buyAmount.get(ctx.from.id) ?? DEFAULT_AMOUNT;
   let lamports;
   try { lamports = solToLamports(amount); } catch (e) { return ctx.reply(e.message); }
 
-  const now = Date.now();
-  if (now - (lastQuoteAt.get(ctx.from.id) ?? 0) < 2000) return ctx.reply('Slow down a little, try again in a moment.');
-  lastQuoteAt.set(ctx.from.id, now);
-
-  try {
-    const [order, decimals] = await Promise.all([
-      fetchQuote({ outputMint: mint, lamports, apiKey: process.env.JUPITER_API_KEY }),
-      getTokenDecimals(mint),
-    ]);
-    if (!hasRoute(order)) return ctx.reply('Jupiter found no route for that token (no liquidity, or it is not tradable yet).');
-    const q = summarizeQuote(order, decimals);
-    const impact = q.priceImpactPct === null ? 'n/a' : `${q.priceImpactPct.toFixed(2)}%`;
-    const warn = q.priceImpactPct !== null && Math.abs(q.priceImpactPct) >= 5 ? '\n⚠️ High price impact' : '';
-    return ctx.reply(
-      `Quote (read-only, nothing was bought)\n\n${esc(amount)} SOL → ~${q.out} tokens\n` +
-      (q.minOut ? `Minimum after slippage: ${q.minOut}\n` : '') +
-      `Price impact: ${impact}${warn}\nRoute: ${esc(q.router)}` +
-      (q.feeBps !== null ? ` · Fee: ${q.feeBps} bps` : '') +
-      `\n\nToken (tap to copy):\n${code(mint)}`,
-      HTML
-    );
-  } catch (err) {
-    console.error('quote error:', err.status ?? '', err.message);
-    if (err.status === 429) return ctx.reply('Jupiter is busy (rate limit). Try again in a few seconds.');
-    if (err.status) return ctx.reply(`Jupiter could not quote this: ${err.message}`);
-    return ctx.reply(`Could not get a quote: ${err.message}`);
+  if (!edit) {
+    const now = Date.now();
+    if (now - (lastCardAt.get(ctx.from.id) ?? 0) < 1500) return ctx.reply('Slow down a little, try again in a moment.');
+    lastCardAt.set(ctx.from.id, now);
   }
+  buyAmount.set(ctx.from.id, amount);
+
+  const w = await getTradeWallet(ctx.from.id);
+  const [mintR, mktR, balR, orderR] = await Promise.allSettled([
+    getMintInfo(mint),
+    fetchMarketData(mint),
+    w ? getSolBalance(w.public_key) : Promise.resolve(null),
+    fetchQuote({ outputMint: mint, lamports, apiKey: process.env.JUPITER_API_KEY }),
+  ]);
+
+  if (mintR.status === 'rejected') {
+    console.error('mint info error:', mintR.reason?.message);
+    return ctx.reply('That address is not a token (it may be a wallet, or the RPC is busy). Paste a token contract address.');
+  }
+  if (mktR.status === 'rejected') console.error('market data error:', mktR.reason?.message);
+
+  let quote = null;
+  let quoteError = null;
+  if (orderR.status === 'fulfilled') {
+    if (hasRoute(orderR.value)) quote = summarizeQuote(orderR.value, mintR.value.decimals);
+    else quoteError = 'no route (no liquidity, or not tradable yet)';
+  } else {
+    const e = orderR.reason;
+    console.error('quote error:', e.status ?? '', e.message);
+    quoteError = e.status === 429 ? 'Jupiter is busy, tap Refresh'
+      : e.status === 401 || e.status === 403 ? 'Jupiter needs an API key (JUPITER_API_KEY in .env)'
+      : e.message;
+  }
+
+  const text = buildTokenCard({
+    mint,
+    market: mktR.status === 'fulfilled' ? mktR.value : null,
+    mintInfo: mintR.value,
+    wallet: w,
+    balance: balR.status === 'fulfilled' ? balR.value : null,
+    amount,
+    quote,
+    quoteError,
+  });
+  const opts = { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: tokenKeyboard(mint, amount) };
+  if (edit) {
+    try { return await ctx.editMessageText(text, opts); }
+    catch (err) { if (/not modified/i.test(err.message)) return; throw err; }
+  }
+  return ctx.reply(text, opts);
 }
 
 async function doExport(ctx) {
@@ -219,7 +251,7 @@ async function doDeposit(ctx) {
 
 bot.command('start', showHome);
 bot.command('help', (ctx) => ctx.reply(
-  '/wallet /wallets /rename /createwallet /importwallet /balance /deposit /exportkey /quote /scan /launch'
+  'Paste a token address to see its card and a quote.\n\n/wallet /wallets /rename /createwallet /importwallet /balance /deposit /exportkey /scan /launch'
 ));
 bot.command('wallet', showHome);
 bot.command('wallets', showWallets);
@@ -230,7 +262,11 @@ bot.command('rename', async (ctx) => {
   if (arg) return applyRename(ctx, w.id, arg);
   return startRename(ctx, w);
 });
-bot.command('quote', doQuote);
+bot.command('quote', (ctx) => {
+  const t = parseTokenInput(ctx.match.trim());
+  if (!t) return ctx.reply('Just paste a token contract address and I will show you the card and a quote.');
+  return showToken(ctx, t.mint, t.amount);
+});
 bot.command('createwallet', doCreate);
 bot.command('importwallet', startImport);
 bot.command('balance', doBalance);
@@ -248,6 +284,10 @@ bot.callbackQuery(/^ren:(\d+)$/, async (ctx) => {
   const w = list.find((x) => x.id === Number(ctx.match[1]));
   if (!w) return ctx.reply('Wallet not found.');
   return startRename(ctx, w);
+});
+bot.callbackQuery(/^q:(\d+(?:\.\d+)?):([1-9A-HJ-NP-Za-km-z]{32,44})$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  return showToken(ctx, ctx.match[2], ctx.match[1], { edit: true });
 });
 bot.callbackQuery('create', async (ctx) => { await ctx.answerCallbackQuery(); return doCreate(ctx); });
 bot.callbackQuery('import', async (ctx) => { await ctx.answerCallbackQuery(); return startImport(ctx); });
@@ -268,7 +308,11 @@ bot.on('message:text', async (ctx) => {
     if (!done) awaitingRename.set(ctx.from.id, walletId);
     return;
   }
-  if (!awaitingImport.has(ctx.from.id)) return;
+  if (!awaitingImport.has(ctx.from.id)) {
+    const t = parseTokenInput(ctx.message.text);
+    if (t) return showToken(ctx, t.mint, t.amount);
+    return;
+  }
   awaitingImport.delete(ctx.from.id);
   // Delete the message containing the secret immediately.
   await ctx.deleteMessage().catch(() => {});
