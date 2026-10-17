@@ -88,3 +88,22 @@ export async function getPumpInitialRealTokens() {
   }
   return cachedInitialRealTokens;
 }
+
+const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+const TOKEN_2022_PROGRAM = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
+
+// Every token the wallet holds (classic + Token-2022): Map(mint -> raw balance as BigInt).
+export async function getTokenBalances(ownerPublicKey) {
+  const owner = new PublicKey(ownerPublicKey);
+  const out = new Map();
+  for (const programId of [TOKEN_PROGRAM, TOKEN_2022_PROGRAM]) {
+    const res = await connection.getParsedTokenAccountsByOwner(owner, { programId });
+    for (const { account } of res.value) {
+      const info = account.data?.parsed?.info;
+      if (!info?.mint) continue;
+      const amt = BigInt(info.tokenAmount?.amount ?? '0');
+      out.set(info.mint, (out.get(info.mint) ?? 0n) + amt);
+    }
+  }
+  return out;
+}

@@ -98,3 +98,58 @@ export async function renameWallet(telegramId, walletId, label) {
   );
   return r.rowCount > 0;
 }
+
+// ---- trades ----
+
+// Records a trade BEFORE it is sent (status 'pending'). Returns the new trade id.
+export async function createTrade({ telegramId, walletId, side, mint, symbol, decimals, slippageBps, solLamports, tokenRaw }) {
+  const { rows } = await query(
+    `INSERT INTO trades (telegram_id, wallet_id, side, mint, symbol, decimals, slippage_bps, sol_lamports, token_raw)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+    [telegramId, walletId, side, mint, symbol ?? null, decimals, slippageBps, String(solLamports), String(tokenRaw)]
+  );
+  return rows[0].id;
+}
+
+// Final state of a trade. Amounts are only overwritten when given (actual amounts from Jupiter).
+export async function finishTrade(id, { status, signature = null, error = null, solLamports = null, tokenRaw = null }) {
+  await query(
+    `UPDATE trades SET status = $2, signature = $3, error = $4,
+       sol_lamports = COALESCE($5::numeric, sol_lamports),
+       token_raw    = COALESCE($6::numeric, token_raw),
+       updated_at = now()
+     WHERE id = $1`,
+    [id, status, signature, error ? String(error).slice(0, 500) : null,
+      solLamports == null ? null : String(solLamports), tokenRaw == null ? null : String(tokenRaw)]
+  );
+}
+
+// Newest first, one page. Includes every status so failed/unknown attempts are visible.
+export async function listTrades(telegramId, walletId, { limit = 8, offset = 0 } = {}) {
+  const { rows } = await query(
+    `SELECT id, side, mint, symbol, decimals, sol_lamports, token_raw, status, signature, error, created_at
+     FROM trades WHERE telegram_id = $1 AND wallet_id = $2
+     ORDER BY id DESC LIMIT $3 OFFSET $4`,
+    [telegramId, walletId, limit, offset]
+  );
+  return rows;
+}
+
+export async function countTrades(telegramId, walletId) {
+  const { rows } = await query(
+    'SELECT count(*)::int AS n FROM trades WHERE telegram_id = $1 AND wallet_id = $2',
+    [telegramId, walletId]
+  );
+  return rows[0].n;
+}
+
+// Successful trades only, oldest first (positions are computed by replaying them in order).
+export async function listSuccessfulTrades(telegramId, walletId) {
+  const { rows } = await query(
+    `SELECT side, mint, symbol, decimals, sol_lamports, token_raw
+     FROM trades WHERE telegram_id = $1 AND wallet_id = $2 AND status = 'success'
+     ORDER BY id ASC`,
+    [telegramId, walletId]
+  );
+  return rows;
+}

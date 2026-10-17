@@ -1,0 +1,15 @@
+{
+  "name": "@omnibot/scan-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=../../.env src/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@omnibot/shared": "*",
+    "grammy": "^1.30.0",
+    "@solana/web3.js": "^1.98.0"
+  }
+}

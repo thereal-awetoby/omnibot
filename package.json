@@ -5,7 +5,8 @@
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "trade": "npm run start -w apps/trade-bot",
+    "scan": "npm run start -w apps/scan-bot",
     "migrate": "npm run migrate -w packages/shared",
-    "test": "npm test -w packages/shared && npm test -w apps/trade-bot"
+    "test": "npm test -w packages/shared && npm test -w apps/trade-bot && npm test -w apps/scan-bot"
   }
 }

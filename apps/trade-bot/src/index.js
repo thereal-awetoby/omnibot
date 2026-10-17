@@ -1,14 +1,17 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import {
   upsertUser, getTradeWallet, listTradeWallets, saveTradeWallet, setActiveWallet, renameWallet,
+  createTrade, finishTrade, listTrades, countTrades, listSuccessfulTrades,
   encryptSecret, decryptSecret, normalizeName, isValidName, esc,
 } from '@omnibot/shared';
 import {
   createWallet, parseImport, secretToBase58, keypairFromBytes, getSolBalance,
-  isValidAddress, getMintInfo, getPumpCurve, getPumpInitialRealTokens,
+  isValidAddress, getMintInfo, getPumpCurve, getPumpInitialRealTokens, getTokenBalances,
 } from './wallet.js';
-import { solToLamports, fetchQuote, hasRoute, summarizeQuote } from './jupiter.js';
-import { parseTokenInput, fetchTokenMarket, buildTokenCard, liquidityFromCurve, solUsdFromQuote, curveProgress } from './token.js';
+import { solToLamports, fetchQuote, fetchOrder, hasRoute, summarizeQuote, formatUnits, SOL_MINT } from './jupiter.js';
+import { prepareSwap, sendSwap } from './swap.js';
+import { computePositions, capToBalance, parseSellAmount, formatSol, pnlPct, formatAge } from './positions.js';
+import { parseTokenInput, fetchTokenMarket, buildTokenCard, liquidityFromCurve, solUsdFromQuote, curveProgress, shortNum } from './token.js';
 
 if (!process.env.TRADE_BOT_TOKEN) throw new Error('TRADE_BOT_TOKEN is not set');
 const bot = new Bot(process.env.TRADE_BOT_TOKEN);
@@ -36,6 +39,7 @@ const mainKeyboard = () =>
   new InlineKeyboard()
     .text('Balance', 'balance').text('Deposit', 'deposit').row()
     .text('Wallets', 'wallets').text('Export key', 'exportkey').row()
+    .text('Positions', 'pos').text('History', 'hist').row()
     .url('Omni Scan', `https://t.me/${SCAN_USERNAME}`)
     .url('Omni Launch', `https://t.me/${LAUNCH_USERNAME}`);
 
@@ -176,7 +180,7 @@ function tokenKeyboard(mint, p, walletLabel) {
   const customAmount = !AMOUNT_PRESETS.includes(p.amount);
   const kb = new InlineKeyboard()
     .text('← Home', 'home').text('↻ Refresh', `q:${mint}`).row()
-    .text('✅ Swap', 'soon:swap').text('Limit order', 'soon:limit').row();
+    .text('💰 Sell', `sm:${mint}`).text('Limit order', 'soon:limit').row();
   AMOUNT_PRESETS.forEach((a, i) => {
     kb.text(`${a === p.amount ? '✅ ' : ''}${a} SOL`, `a:${a}:${mint}`);
     if (i === 2) kb.row();
@@ -322,6 +326,289 @@ async function handleCustomInput(ctx, pending) {
   return true;
 }
 
+// ---------------- live trading: buy, sell, positions, history ----------------
+
+const inFlight = new Set(); // userIds with a trade being sent right now (blocks double taps)
+const pendingSells = new Map(); // userId -> { mint, amountText, expires }
+const SELL_GAS_SOL = 0.003;
+const PAGE = 8;
+const solscanTx = (sig) => `https://solscan.io/tx/${sig}`;
+const symOf = (mint, symbol) => (symbol ? `$${esc(symbol)}` : `<code>${short(mint)}</code>`);
+const noPreview = { link_preview_options: { is_disabled: true } };
+
+// Edit the current message (button taps) or send a new one.
+async function render(ctx, text, kb, edit) {
+  const opts = { ...HTML, ...noPreview, reply_markup: kb };
+  if (edit) {
+    try { return await ctx.editMessageText(text, opts); }
+    catch (err) { if (/not modified/i.test(err.message)) return; /* message gone: fall through */ }
+  }
+  return ctx.reply(text, opts);
+}
+
+const afterTradeKeyboard = (mint) =>
+  new InlineKeyboard().text('📊 Positions', 'pos').text('🪙 Token', `q:${mint}`).row().text('💰 Sell', `sm:${mint}`).text('Home', 'home');
+
+// Runs `fn` as the user's one active trade. Returns false (and tells them) if one is already running.
+async function withTradeLock(ctx, fn) {
+  const id = ctx.from.id;
+  if (inFlight.has(id)) {
+    await ctx.answerCallbackQuery({ text: 'A trade is already being sent. Wait for it to finish.', show_alert: true }).catch(() => {});
+    return;
+  }
+  inFlight.add(id);
+  try { await fn(); }
+  finally { inFlight.delete(id); }
+}
+
+async function recordFinish(tradeId, patch) {
+  try { await finishTrade(tradeId, patch); }
+  catch (e) { console.error(`could not update trade ${tradeId} (${patch.status} ${patch.signature ?? ''}):`, e.message); }
+}
+
+function outcomeText({ verb, r, w, headline }) {
+  if (r.status === 'success') return `${headline}\n\n<a href="${solscanTx(r.signature)}">View transaction</a>`;
+  if (r.status === 'failed') return `❌ <b>${verb} failed</b>\n${esc(r.error)}\n\nIt did not go through.`;
+  return `⚠️ <b>Could not confirm the ${verb.toLowerCase()}</b>\n${esc(r.error)}\n\nIt may have gone through. Check <a href="https://solscan.io/account/${w.public_key}">your wallet</a> or Positions before trying again.`;
+}
+
+async function executeBuy(ctx, mint) {
+  return withTradeLock(ctx, async () => {
+    const userId = ctx.from.id;
+    const w = await getTradeWallet(userId);
+    if (!w) return ctx.answerCallbackQuery({ text: 'Create a wallet first (/start).', show_alert: true });
+    await ctx.answerCallbackQuery();
+    const p = getPrefs(userId);
+    try {
+      const lamports = solToLamports(p.amount);
+      const bal = await getSolBalance(w.public_key);
+      if (bal < Number(p.amount) + GAS_BUFFER_SOL) {
+        return render(ctx, `🔴 Not enough SOL. You have ${bal.toFixed(4)}, need ${esc(p.amount)} + gas. Use Deposit to add SOL.`, new InlineKeyboard().text('Back', `q:${mint}`), true);
+      }
+      await render(ctx, '⏳ Buying…', undefined, true);
+      const mintInfo = await getMintInfoRetry(mint);
+      const keypair = keypairFromBytes(decryptSecret(w.encrypted_secret));
+      let order;
+      try {
+        order = await prepareSwap({ keypair, inputMint: SOL_MINT, outputMint: mint, amount: lamports, slippageBps: p.slippageBps, apiKey: process.env.JUPITER_API_KEY });
+      } catch (e) {
+        return render(ctx, `❌ <b>Buy failed</b>\n${esc(e.message)}\n\nNothing was bought.`, new InlineKeyboard().text('Back', `q:${mint}`), true);
+      }
+      const symbol = symbols.get(mint) ?? null;
+      // Record BEFORE sending so a crash can never leave an untracked trade.
+      const tradeId = await createTrade({
+        telegramId: userId, walletId: w.id, side: 'buy', mint, symbol, decimals: mintInfo.decimals,
+        slippageBps: p.slippageBps, solLamports: lamports, tokenRaw: BigInt(order.outAmount ?? '0'),
+      });
+      const r = await sendSwap({ order, keypair, side: 'buy', apiKey: process.env.JUPITER_API_KEY });
+      const sol = r.amounts?.solLamports ?? lamports;
+      const tok = r.amounts?.tokenRaw ?? BigInt(order.outAmount ?? '0');
+      await recordFinish(tradeId, r.status === 'success'
+        ? { status: 'success', signature: r.signature, solLamports: sol, tokenRaw: tok }
+        : { status: r.status, signature: r.signature, error: r.error });
+      const headline = `✅ <b>Bought ${symOf(mint, symbol)}</b>\n${formatSol(sol)} SOL → ${shortNum(formatUnits(tok, mintInfo.decimals))} ${symbol ? esc(symbol) : 'tokens'}`;
+      return render(ctx, outcomeText({ verb: 'Buy', r, w, headline }), r.status === 'success' ? afterTradeKeyboard(mint) : new InlineKeyboard().text('Back', `q:${mint}`).text('Positions', 'pos'), true);
+    } catch (err) {
+      console.error('buy error:', err.message);
+      return render(ctx, 'Something went wrong before the buy was sent. Nothing was bought. Try again.', new InlineKeyboard().text('Back', `q:${mint}`), true).catch(() => {});
+    }
+  });
+}
+
+// ---- selling ----
+
+async function symbolFor(mint) {
+  if (symbols.has(mint)) return symbols.get(mint);
+  try { const m = await fetchTokenMarket(mint); if (m?.symbol) { symbols.set(mint, m.symbol); return m.symbol; } } catch { /* optional */ }
+  return null;
+}
+
+// Sell-side price check: what the tokens would fetch right now (no taker, nothing is signed).
+async function sellQuote(mint, raw) {
+  const o = await fetchOrder({ inputMint: mint, outputMint: SOL_MINT, amount: raw, apiKey: process.env.JUPITER_API_KEY });
+  return hasRoute(o) ? o : null;
+}
+
+async function showSellMenu(ctx, mint, { edit = false } = {}) {
+  const w = await getTradeWallet(ctx.from.id);
+  if (!w) return ctx.reply('Create a wallet first (/start).', { reply_markup: noWalletKeyboard() });
+  let mintInfo, balances;
+  try { [mintInfo, balances] = await Promise.all([getMintInfoRetry(mint), getTokenBalances(w.public_key)]); }
+  catch (e) { console.error('sell menu error:', e.message); return ctx.reply('Could not read your balance right now (the Solana RPC is busy). Try again in a few seconds.'); }
+  const bal = balances.get(mint) ?? 0n;
+  const symbol = await symbolFor(mint);
+  const back = new InlineKeyboard().text('Back', `q:${mint}`).text('Positions', 'pos');
+  if (bal <= 0n) return render(ctx, `You hold no ${symOf(mint, symbol)} in ${esc(w.label)}.`, back, edit);
+  let worth = 'n/a';
+  try { const o = await sellQuote(mint, bal); if (o) worth = `~${formatSol(BigInt(o.outAmount))} SOL`; } catch { /* price is optional here */ }
+  const kb = new InlineKeyboard();
+  for (const pc of [25, 50, 75, 100]) kb.text(`${pc}%`, `sc:${pc}:${mint}`);
+  kb.row().text('Back', `q:${mint}`).text('Positions', 'pos');
+  return render(ctx, `<b>Sell ${symOf(mint, symbol)}</b>\n<code>${mint}</code>\n\nHolding: ${shortNum(formatUnits(bal, mintInfo.decimals))}  (${worth})\nWallet: ${esc(w.label)}\n\nPick how much to sell. Nothing is sold until you confirm.\nOr use /sell &lt;address&gt; &lt;amount or %&gt;.`, kb, edit);
+}
+
+// Step before any real sell: show exactly what will happen, ask for a second tap.
+async function askSellConfirm(ctx, mint, amountText, { edit = false } = {}) {
+  const w = await getTradeWallet(ctx.from.id);
+  if (!w) return ctx.reply('Create a wallet first (/start).', { reply_markup: noWalletKeyboard() });
+  const p = getPrefs(ctx.from.id);
+  try {
+    const [mintInfo, balances] = await Promise.all([getMintInfoRetry(mint), getTokenBalances(w.public_key)]);
+    const raw = parseSellAmount(amountText, balances.get(mint) ?? 0n, mintInfo.decimals);
+    const symbol = await symbolFor(mint);
+    const o = await sellQuote(mint, raw);
+    if (!o) return render(ctx, `No route to sell ${symOf(mint, symbol)} right now (no liquidity).`, new InlineKeyboard().text('Back', `sm:${mint}`), edit);
+    const q = summarizeQuote(o, 9);
+    pendingSells.set(ctx.from.id, { mint, amountText, expires: Date.now() + 120_000 });
+    const impact = q.priceImpactPct === null ? 'n/a' : `${q.priceImpactPct.toFixed(2)}%${Math.abs(q.priceImpactPct) >= 5 ? ' ⚠️' : ''}`;
+    const kb = new InlineKeyboard().text('✅ Confirm sell', `sx:${mint}`).text('✖ Cancel', `sm:${mint}`);
+    return render(ctx, `<b>Confirm sell</b>\n\n${shortNum(formatUnits(raw, mintInfo.decimals))} ${symbol ? esc(symbol) : 'tokens'} (${esc(amountText)}) → ~${formatSol(BigInt(o.outAmount))} SOL\n<code>${mint}</code>\n\nImpact ${impact}  ·  Slippage ${pct(p.slippageBps)}\nWallet: ${esc(w.label)}\n\nNothing is sold until you tap Confirm. Quote valid for 2 minutes.`, kb, edit);
+  } catch (e) {
+    if (/hold|amount|percent|small|more than/i.test(e.message)) return ctx.reply(e.message);
+    console.error('sell confirm error:', e.message);
+    return ctx.reply('Could not prepare that sell right now. Try again in a few seconds.');
+  }
+}
+
+async function executeSell(ctx, mint) {
+  return withTradeLock(ctx, async () => {
+    const userId = ctx.from.id;
+    const pend = pendingSells.get(userId);
+    pendingSells.delete(userId); // one confirmation = one sell
+    if (!pend || pend.mint !== mint || pend.expires < Date.now()) {
+      return ctx.answerCallbackQuery({ text: 'That confirmation expired. Open Sell again.', show_alert: true });
+    }
+    const w = await getTradeWallet(userId);
+    if (!w) return ctx.answerCallbackQuery({ text: 'Create a wallet first (/start).', show_alert: true });
+    await ctx.answerCallbackQuery();
+    const p = getPrefs(userId);
+    const back = new InlineKeyboard().text('Back', `sm:${mint}`).text('Positions', 'pos');
+    try {
+      await render(ctx, '⏳ Selling…', undefined, true);
+      const [mintInfo, balances, solBal] = await Promise.all([getMintInfoRetry(mint), getTokenBalances(w.public_key), getSolBalance(w.public_key)]);
+      if (solBal < SELL_GAS_SOL) return render(ctx, `🔴 Not enough SOL for network fees (have ${solBal.toFixed(4)}). Deposit a little SOL first.`, back, true);
+      let raw;
+      try { raw = parseSellAmount(pend.amountText, balances.get(mint) ?? 0n, mintInfo.decimals); }
+      catch (e) { return render(ctx, `❌ ${esc(e.message)}`, back, true); }
+      const keypair = keypairFromBytes(decryptSecret(w.encrypted_secret));
+      let order;
+      try {
+        order = await prepareSwap({ keypair, inputMint: mint, outputMint: SOL_MINT, amount: raw, slippageBps: p.slippageBps, apiKey: process.env.JUPITER_API_KEY });
+      } catch (e) {
+        return render(ctx, `❌ <b>Sell failed</b>\n${esc(e.message)}\n\nNothing was sold.`, back, true);
+      }
+      const symbol = await symbolFor(mint);
+      const before = computePositions(await listSuccessfulTrades(userId, w.id)).get(mint)?.realized ?? 0n;
+      const tradeId = await createTrade({
+        telegramId: userId, walletId: w.id, side: 'sell', mint, symbol, decimals: mintInfo.decimals,
+        slippageBps: p.slippageBps, solLamports: BigInt(order.outAmount ?? '0'), tokenRaw: raw,
+      });
+      const r = await sendSwap({ order, keypair, side: 'sell', apiKey: process.env.JUPITER_API_KEY });
+      const sol = r.amounts?.solLamports ?? BigInt(order.outAmount ?? '0');
+      const tok = r.amounts?.tokenRaw ?? raw;
+      await recordFinish(tradeId, r.status === 'success'
+        ? { status: 'success', signature: r.signature, solLamports: sol, tokenRaw: tok }
+        : { status: r.status, signature: r.signature, error: r.error });
+      let headline = `✅ <b>Sold ${symOf(mint, symbol)}</b>\n${shortNum(formatUnits(tok, mintInfo.decimals))} ${symbol ? esc(symbol) : 'tokens'} → ${formatSol(sol)} SOL`;
+      if (r.status === 'success') {
+        try {
+          const after = computePositions(await listSuccessfulTrades(userId, w.id)).get(mint)?.realized ?? 0n;
+          const pnl = after - before;
+          const cost = sol - pnl; // cost basis of the part that was sold
+          const pc = pnlPct(pnl, cost);
+          headline += `\nRealized: ${formatSol(pnl, { withPlus: true })} SOL${pc === null ? '' : ` (${pc >= 0 ? '+' : ''}${pc.toFixed(1)}%)`}`;
+        } catch { /* PnL line is optional */ }
+      }
+      return render(ctx, outcomeText({ verb: 'Sell', r, w, headline }), r.status === 'success' ? afterTradeKeyboard(mint) : back, true);
+    } catch (err) {
+      console.error('sell error:', err.message);
+      return render(ctx, 'Something went wrong before the sell was sent. Nothing was sold. Try again.', back, true).catch(() => {});
+    }
+  });
+}
+
+// ---- positions & history ----
+
+async function showPositions(ctx, { edit = false } = {}) {
+  const w = await getTradeWallet(ctx.from.id);
+  if (!w) return ctx.reply('No wallet yet.', { reply_markup: noWalletKeyboard() });
+  const all = computePositions(await listSuccessfulTrades(ctx.from.id, w.id));
+  const realizedTotal = [...all.values()].reduce((a, x) => a + x.realized, 0n);
+  let open = [...all.values()].filter((x) => x.tokens > 0n);
+
+  let balances = null;
+  if (open.length) {
+    try { balances = await getTokenBalances(w.public_key); } catch (e) { console.error('balances error:', e.message); }
+  }
+  if (balances) open = open.map((x) => capToBalance(x, balances.get(x.mint) ?? 0n)).filter((x) => x.tokens > 0n);
+  open.sort((a, b) => (b.cost > a.cost ? 1 : b.cost < a.cost ? -1 : 0));
+  const shown = open.slice(0, PAGE);
+
+  const quotes = await Promise.allSettled(shown.map((x) => sellQuote(x.mint, x.tokens)));
+  const lines = [`<b>📊 Positions</b>  ·  ${esc(w.label)}`, ''];
+  let totalCost = 0n, totalValue = 0n;
+  const kb = new InlineKeyboard();
+  shown.forEach((x, i) => {
+    const q = quotes[i].status === 'fulfilled' ? quotes[i].value : null;
+    const name = symOf(x.mint, x.symbol);
+    lines.push(`${name}  ·  ${shortNum(formatUnits(x.tokens, x.decimals))}`);
+    if (q) {
+      const value = BigInt(q.outAmount);
+      const pnl = value - x.cost;
+      const pc = pnlPct(pnl, x.cost);
+      totalCost += x.cost; totalValue += value;
+      lines.push(`  Cost ${formatSol(x.cost)} SOL  →  now ~${formatSol(value)} SOL  (${formatSol(pnl, { withPlus: true })}${pc === null ? '' : `, ${pc >= 0 ? '+' : ''}${pc.toFixed(1)}%`})`);
+    } else {
+      lines.push(`  Cost ${formatSol(x.cost)} SOL  ·  current value n/a`);
+    }
+    kb.text(`💰 Sell ${x.symbol ? '$' + x.symbol : short(x.mint)}`, `sm:${x.mint}`);
+    if (i % 2 === 1) kb.row();
+  });
+  if (shown.length % 2 === 1) kb.row();
+  if (shown.length === 0) lines.push('No open positions yet. Paste a token address to buy one.');
+  else {
+    const un = totalValue - totalCost;
+    lines.push('', `Unrealized: ${formatSol(un, { withPlus: true })} SOL (priced where a sell quote was available)`);
+  }
+  if (open.length > shown.length) lines.push(`…and ${open.length - shown.length} more.`);
+  lines.push(`Realized (all trades): ${formatSol(realizedTotal, { withPlus: true })} SOL`);
+  lines.push('', 'Cost basis counts only trades made through this bot. Network fees are not included.');
+  kb.text('↻ Refresh', 'pos').text('History', 'hist').row().text('Home', 'home');
+  return render(ctx, lines.join('\n'), kb, edit);
+}
+
+async function showHistory(ctx, offset = 0, { edit = false } = {}) {
+  const w = await getTradeWallet(ctx.from.id);
+  if (!w) return ctx.reply('No wallet yet.', { reply_markup: noWalletKeyboard() });
+  const [rows, total] = await Promise.all([listTrades(ctx.from.id, w.id, { limit: PAGE, offset }), countTrades(ctx.from.id, w.id)]);
+  const lines = [`<b>🧾 History</b>  ·  ${esc(w.label)}`, ''];
+  if (rows.length === 0) lines.push('No trades yet.');
+  for (const t of rows) {
+    const name = symOf(t.mint, t.symbol);
+    const tokens = `${shortNum(formatUnits(t.token_raw, t.decimals, 2))}`;
+    const link = t.signature ? ` · <a href="${solscanTx(t.signature)}">tx</a>` : '';
+    const when = formatAge(t.created_at);
+    if (t.status === 'success') {
+      const icon = t.side === 'buy' ? '🟢 Buy' : '🔴 Sell';
+      lines.push(t.side === 'buy'
+        ? `${icon} ${name}  ${formatSol(t.sol_lamports)} SOL → ${tokens}  ·  ${when}${link}`
+        : `${icon} ${name}  ${tokens} → ${formatSol(t.sol_lamports)} SOL  ·  ${when}${link}`);
+    } else if (t.status === 'failed') {
+      lines.push(`❌ ${t.side === 'buy' ? 'Buy' : 'Sell'} ${name} failed  ·  ${when}`);
+    } else if (t.status === 'unknown') {
+      lines.push(`⚠️ ${t.side === 'buy' ? 'Buy' : 'Sell'} ${name} unconfirmed (check wallet)  ·  ${when}${link}`);
+    } else {
+      lines.push(`⏳ ${t.side === 'buy' ? 'Buy' : 'Sell'} ${name} pending  ·  ${when}`);
+    }
+  }
+  const kb = new InlineKeyboard();
+  if (offset > 0) kb.text('← Newer', `h:${Math.max(0, offset - PAGE)}`);
+  if (offset + PAGE < total) kb.text('Older →', `h:${offset + PAGE}`);
+  if (offset > 0 || offset + PAGE < total) kb.row();
+  kb.text('Positions', 'pos').text('Home', 'home');
+  return render(ctx, lines.join('\n'), kb, edit);
+}
+
 async function doExport(ctx) {
   const w = await getTradeWallet(ctx.from.id);
   if (!w) return ctx.reply('No wallet yet.', { reply_markup: noWalletKeyboard() });
@@ -346,9 +633,14 @@ async function doDeposit(ctx) {
   return ctx.reply(`Send SOL to ${esc(w.label)} (tap to copy):\n${code(w.public_key)}`, HTML);
 }
 
-bot.command('start', showHome);
+// Deep link from the Scan bot: t.me/<trade bot>?start=buy_<mint> opens that token's card.
+bot.command('start', async (ctx) => {
+  const m = /^buy_([1-9A-HJ-NP-Za-km-z]{32,44})$/.exec(ctx.match.trim());
+  if (m) return showToken(ctx, m[1]);
+  return showHome(ctx);
+});
 bot.command('help', (ctx) => ctx.reply(
-  'Paste a token address to see its card and a quote.\n\n/wallet /wallets /rename /createwallet /importwallet /balance /deposit /exportkey /scan /launch'
+  'Paste a token address to see its card, a quote, and buy.\n\n/sell <address> <amount or %>  (or tap Sell on a card)\n/positions /portfolio /history\n/wallet /wallets /rename /createwallet /importwallet /balance /deposit /exportkey /scan /launch'
 ));
 bot.command('wallet', showHome);
 bot.command('wallets', showWallets);
@@ -364,6 +656,15 @@ bot.command('quote', (ctx) => {
   if (!t) return ctx.reply('Just paste a token contract address and I will show you the card and a quote.');
   return showToken(ctx, t.mint, t.amount);
 });
+bot.command('sell', async (ctx) => {
+  const [mint, amount] = ctx.match.trim().split(/\s+/);
+  if (!mint || !isValidAddress(mint)) return ctx.reply('Usage: /sell <token address> <amount or %>\nExample: /sell <address> 50%');
+  if (!amount) return showSellMenu(ctx, mint);
+  return askSellConfirm(ctx, mint, amount);
+});
+bot.command('positions', (ctx) => showPositions(ctx));
+bot.command('portfolio', (ctx) => showPositions(ctx));
+bot.command('history', (ctx) => showHistory(ctx));
 bot.command('createwallet', doCreate);
 bot.command('importwallet', startImport);
 bot.command('balance', doBalance);
@@ -410,12 +711,16 @@ bot.callbackQuery(new RegExp(`^x([as]):${MINT}$`), async (ctx) => {
     : 'Send the slippage percent, like 3 (between 0.1 and 50). Send any /command to cancel.');
 });
 bot.callbackQuery(new RegExp(`^buy:${MINT}$`), (ctx) => showBuyConfirm(ctx, ctx.match[1]));
-bot.callbackQuery(new RegExp(`^cf:${MINT}$`), (ctx) =>
-  ctx.answerCallbackQuery({
-    text: 'Live buying is not switched on yet (coming in the next step). Nothing was bought.',
-    show_alert: true,
-  })
-);
+bot.callbackQuery(new RegExp(`^cf:${MINT}$`), (ctx) => executeBuy(ctx, ctx.match[1]));
+bot.callbackQuery(new RegExp(`^sm:${MINT}$`), async (ctx) => { await ctx.answerCallbackQuery(); return showSellMenu(ctx, ctx.match[1], { edit: true }); });
+bot.callbackQuery(new RegExp(`^sc:(\\d{1,3}):${MINT}$`), async (ctx) => {
+  await ctx.answerCallbackQuery();
+  return askSellConfirm(ctx, ctx.match[2], `${ctx.match[1]}%`, { edit: true });
+});
+bot.callbackQuery(new RegExp(`^sx:${MINT}$`), (ctx) => executeSell(ctx, ctx.match[1]));
+bot.callbackQuery('pos', async (ctx) => { await ctx.answerCallbackQuery(); return showPositions(ctx, { edit: true }); });
+bot.callbackQuery('hist', async (ctx) => { await ctx.answerCallbackQuery(); return showHistory(ctx, 0, { edit: true }); });
+bot.callbackQuery(/^h:(\d+)$/, async (ctx) => { await ctx.answerCallbackQuery(); return showHistory(ctx, Number(ctx.match[1]), { edit: true }); });
 bot.callbackQuery(/^soon:/, (ctx) => ctx.answerCallbackQuery({ text: 'Coming soon.', show_alert: false }));
 bot.callbackQuery('create', async (ctx) => { await ctx.answerCallbackQuery(); return doCreate(ctx); });
 bot.callbackQuery('import', async (ctx) => { await ctx.answerCallbackQuery(); return startImport(ctx); });
