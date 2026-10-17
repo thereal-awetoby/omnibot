@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTokenInput, formatUsd, formatPrice, fetchMarketData, fetchPumpData, fetchTokenMarket, shortNum, buildTokenCard, parsePumpCurve, liquidityFromCurve, solUsdFromQuote, prettyDex } from './token.js';
+import { parseTokenInput, formatUsd, formatPrice, fetchMarketData, fetchPumpData, fetchTokenMarket, shortNum, buildTokenCard, parsePumpCurve, liquidityFromCurve, solUsdFromQuote, prettyDex, parsePumpGlobal, curveProgress, progressBar, DEFAULT_INITIAL_REAL_TOKENS } from './token.js';
 
 const MINT = 'HF7R3k8129c2Ya4FEwPcqyLXXoHx7hwWGGsM8sAkpump';
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -60,6 +60,7 @@ test('buildTokenCard shows market, safety and trade sections, escapes HTML, warn
   const text = buildTokenCard({
     mint: MINT,
     market: { name: 'Nas<sau>', symbol: 'NASSAU', priceUsd: 0.00000159, liquidityUsd: 1520, marketCapUsd: 1590, dex: 'pump.fun curve' },
+    progress: 0.835,
     mintInfo: { mintAuthority: null, freezeAuthority: null },
     wallet: { label: 'toby test' },
     balance: 0,
@@ -75,6 +76,8 @@ test('buildTokenCard shows market, safety and trade sections, escapes HTML, warn
   assert.match(text, /Liq {2}\$1\.52K/);
   assert.match(text, /0\.2 SOL → ~123,456 NASSAU/);
   assert.match(text, /Slippage 10%/);
+  assert.match(text, /Curve {2}▰▰▰▰▰▰▰▰▱▱ 83\.5%/);
+  assert.doesNotMatch(text, /Source/);
   assert.match(text, /Not enough SOL/);
 });
 
@@ -183,4 +186,33 @@ test('fetchMarketData returns the SOL price when the pair is quoted in SOL, and 
   assert.equal(m.dex, 'pump.fun curve');
   assert.equal(m.liquidityUsd, null);
   assert.equal(prettyDex('pumpswap'), 'PumpSwap');
+});
+
+test('curveProgress and progressBar', () => {
+  const mk = (realTokens, complete = false) => ({ realTokens, realSolLamports: 0n, complete });
+  assert.equal(curveProgress(mk(DEFAULT_INITIAL_REAL_TOKENS)), 0); // nothing bought yet
+  assert.equal(curveProgress(mk(DEFAULT_INITIAL_REAL_TOKENS / 2n)), 0.5);
+  assert.equal(curveProgress(mk(0n)), 1);
+  assert.equal(curveProgress(mk(5n, true)), 1); // graduated
+  assert.equal(curveProgress(null), null);
+  assert.equal(curveProgress(mk(DEFAULT_INITIAL_REAL_TOKENS * 2n)), 0); // never negative
+  assert.equal(curveProgress(mk(100n), 200n), 0.5); // custom initial value
+  assert.equal(progressBar(0), '▱▱▱▱▱▱▱▱▱▱');
+  assert.equal(progressBar(0.835), '▰▰▰▰▰▰▰▰▱▱');
+  assert.equal(progressBar(1), '▰▰▰▰▰▰▰▰▰▰');
+});
+
+test('parsePumpGlobal reads the initial real token reserves and rejects nonsense', () => {
+  const b = Buffer.alloc(200);
+  b.writeBigUInt64LE(793_100_000_000_000n, 89);
+  assert.equal(parsePumpGlobal(b), 793_100_000_000_000n);
+  assert.equal(parsePumpGlobal(Buffer.alloc(200)), null); // zero is not sane
+  assert.equal(parsePumpGlobal(Buffer.alloc(10)), null);
+  assert.equal(parsePumpGlobal(null), null);
+});
+
+test('buildTokenCard shows graduated tokens and hides the curve for normal tokens', () => {
+  const base = { mint: MINT, market: null, mintInfo: { mintAuthority: null, freezeAuthority: null }, wallet: null, balance: null, amount: '0.1', slippageBps: 500, quote: null };
+  assert.match(buildTokenCard({ ...base, progress: 1 }), /Curve {2}graduated/);
+  assert.doesNotMatch(buildTokenCard({ ...base, progress: null }), /Curve/);
 });

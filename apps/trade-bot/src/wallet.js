@@ -1,5 +1,5 @@
 import { Keypair, Connection, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
-import { PUMP_PROGRAM_ID, parsePumpCurve } from './token.js';
+import { PUMP_PROGRAM_ID, PUMP_GLOBAL_ACCOUNT, DEFAULT_INITIAL_REAL_TOKENS, parsePumpCurve, parsePumpGlobal } from './token.js';
 import bs58 from 'bs58';
 import * as bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
@@ -74,4 +74,17 @@ export async function getPumpCurve(mint) {
   const info = await connection.getAccountInfo(pda);
   if (!info || info.owner.toBase58() !== PUMP_PROGRAM_ID) return null;
   return parsePumpCurve(info.data);
+}
+
+let cachedInitialRealTokens = null;
+// How many tokens a fresh pump.fun curve sells (read once, then cached). Falls back to the known value.
+export async function getPumpInitialRealTokens() {
+  if (cachedInitialRealTokens) return cachedInitialRealTokens;
+  try {
+    const info = await connection.getAccountInfo(new PublicKey(PUMP_GLOBAL_ACCOUNT));
+    cachedInitialRealTokens = parsePumpGlobal(info?.data) ?? DEFAULT_INITIAL_REAL_TOKENS;
+  } catch {
+    return DEFAULT_INITIAL_REAL_TOKENS; // do not cache a failure
+  }
+  return cachedInitialRealTokens;
 }

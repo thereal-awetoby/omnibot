@@ -5,10 +5,10 @@ import {
 } from '@omnibot/shared';
 import {
   createWallet, parseImport, secretToBase58, keypairFromBytes, getSolBalance,
-  isValidAddress, getMintInfo, getPumpCurve,
+  isValidAddress, getMintInfo, getPumpCurve, getPumpInitialRealTokens,
 } from './wallet.js';
 import { solToLamports, fetchQuote, hasRoute, summarizeQuote } from './jupiter.js';
-import { parseTokenInput, fetchTokenMarket, buildTokenCard, liquidityFromCurve, solUsdFromQuote } from './token.js';
+import { parseTokenInput, fetchTokenMarket, buildTokenCard, liquidityFromCurve, solUsdFromQuote, curveProgress } from './token.js';
 
 if (!process.env.TRADE_BOT_TOKEN) throw new Error('TRADE_BOT_TOKEN is not set');
 const bot = new Bot(process.env.TRADE_BOT_TOKEN);
@@ -165,7 +165,7 @@ const prefs = new Map(); // userId -> { amount: '0.1', slippageBps: 1000 }, in m
 const symbols = new Map(); // mint -> symbol, remembered from the last card shown
 const DEFAULT_PREFS = { amount: '0.1', slippageBps: 1000 };
 const AMOUNT_PRESETS = ['0.05', '0.1', '0.2', '0.3', '0.5'];
-const SLIPPAGE_STEPS = [100, 500, 1000, 2000];
+const SLIPPAGE_PRESETS = [100, 500, 1000]; // basis points: 1%, 5%, 10%
 const GAS_BUFFER_SOL = 0.01;
 
 const getPrefs = (userId) => prefs.get(userId) ?? { ...DEFAULT_PREFS };
@@ -182,7 +182,8 @@ function tokenKeyboard(mint, p, walletLabel) {
     if (i === 2) kb.row();
   });
   kb.text(customAmount ? `✅ ${p.amount} SOL ✏️` : '✏️ Custom', `xa:${mint}`).row();
-  kb.text(`Slippage ${pct(p.slippageBps)} ⟳`, `sl:${mint}`).text('✏️ Custom', `xs:${mint}`).row();
+  for (const bps of SLIPPAGE_PRESETS) kb.text(`${bps === p.slippageBps ? '✅ ' : ''}${pct(bps)}`, `s:${bps}:${mint}`);
+  kb.text(SLIPPAGE_PRESETS.includes(p.slippageBps) ? '✏️ Slippage' : `✅ ${pct(p.slippageBps)} ✏️`, `xs:${mint}`).row();
   kb.url('📈 Chart', `https://dexscreener.com/solana/${mint}`).url('🔍 Solscan', `https://solscan.io/token/${mint}`).row();
   kb.text(`💼 ${walletLabel ?? 'No wallet'}`, 'wallets').row();
   kb.text(`⚡ BUY ${p.amount} SOL`, `buy:${mint}`);
@@ -214,12 +215,16 @@ async function showToken(ctx, mint, amountInput, { edit = false } = {}) {
   setPrefs(ctx.from.id, { amount });
 
   const w = await getTradeWallet(ctx.from.id);
-  const [mintR, mktR, balR, orderR] = await Promise.allSettled([
+  const [mintR, mktR, balR, orderR, curveR, initR] = await Promise.allSettled([
     getMintInfoRetry(mint),
     fetchTokenMarket(mint),
     w ? getSolBalance(w.public_key) : Promise.resolve(null),
     fetchQuote({ outputMint: mint, lamports, apiKey: process.env.JUPITER_API_KEY }),
+    getPumpCurve(mint),
+    getPumpInitialRealTokens(),
   ]);
+  const curve = curveR.status === 'fulfilled' ? curveR.value : null;
+  if (curveR.status === 'rejected') console.error('pump curve error:', curveR.reason?.message);
 
   if (mintR.status === 'rejected') {
     console.error('mint info error:', mintR.reason?.message);
@@ -243,18 +248,13 @@ async function showToken(ctx, mint, amountInput, { edit = false } = {}) {
   }
 
   let market = mktR.status === 'fulfilled' ? mktR.value : null;
-  // Still no liquidity (typical for pump.fun tokens): read it from the bonding curve on-chain.
-  if (market && market.liquidityUsd == null) {
-    try {
-      const curve = await getPumpCurve(mint);
-      const solUsd = market.solUsd ?? (orderR.status === 'fulfilled'
-        ? solUsdFromQuote({ priceUsd: market.priceUsd, outAmount: orderR.value.outAmount, decimals: mintR.value.decimals, amountSol: amount })
-        : null);
-      const liq = liquidityFromCurve(curve, solUsd);
-      if (liq != null) market = { ...market, liquidityUsd: liq };
-    } catch (err) {
-      console.error('pump curve error:', err.message);
-    }
+  // Still no liquidity (typical for pump.fun tokens): work it out from the bonding curve on-chain.
+  if (market && market.liquidityUsd == null && curve) {
+    const solUsd = market.solUsd ?? (orderR.status === 'fulfilled'
+      ? solUsdFromQuote({ priceUsd: market.priceUsd, outAmount: orderR.value.outAmount, decimals: mintR.value.decimals, amountSol: amount })
+      : null);
+    const liq = liquidityFromCurve(curve, solUsd);
+    if (liq != null) market = { ...market, liquidityUsd: liq };
   }
   if (market?.symbol) symbols.set(mint, market.symbol);
   const text = buildTokenCard({
@@ -265,6 +265,7 @@ async function showToken(ctx, mint, amountInput, { edit = false } = {}) {
     balance: balR.status === 'fulfilled' ? balR.value : null,
     amount,
     slippageBps: p.slippageBps,
+    progress: curveProgress(curve, initR.status === 'fulfilled' ? initR.value : undefined),
     quote,
     quoteError,
   });
@@ -391,12 +392,12 @@ bot.callbackQuery(new RegExp(`^a:(\\d+(?:\\.\\d+)?):${MINT}$`), async (ctx) => {
   setPrefs(ctx.from.id, { amount: ctx.match[1] });
   return showToken(ctx, ctx.match[2], undefined, { edit: true });
 });
-bot.callbackQuery(new RegExp(`^sl:${MINT}$`), async (ctx) => {
+bot.callbackQuery(new RegExp(`^s:(\\d+):${MINT}$`), async (ctx) => {
   await ctx.answerCallbackQuery();
-  const cur = getPrefs(ctx.from.id).slippageBps;
-  const next = SLIPPAGE_STEPS[(SLIPPAGE_STEPS.indexOf(cur) + 1) % SLIPPAGE_STEPS.length];
-  setPrefs(ctx.from.id, { slippageBps: next });
-  return showToken(ctx, ctx.match[1], undefined, { edit: true });
+  const bps = Number(ctx.match[1]);
+  if (!SLIPPAGE_PRESETS.includes(bps)) return;
+  setPrefs(ctx.from.id, { slippageBps: bps });
+  return showToken(ctx, ctx.match[2], undefined, { edit: true });
 });
 bot.callbackQuery(new RegExp(`^x([as]):${MINT}$`), async (ctx) => {
   await ctx.answerCallbackQuery();

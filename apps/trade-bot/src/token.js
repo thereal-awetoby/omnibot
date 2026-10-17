@@ -75,7 +75,37 @@ export const PUMP_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 // realTokenReserves, realSolReserves, tokenTotalSupply (u64 each), then complete (bool).
 export function parsePumpCurve(data) {
   if (!data || data.length < 49) return null;
-  return { realSolLamports: data.readBigUInt64LE(32), complete: data[48] === 1 };
+  return {
+    realTokens: data.readBigUInt64LE(24),
+    realSolLamports: data.readBigUInt64LE(32),
+    complete: data[48] === 1,
+  };
+}
+
+// pump.fun's Global config account (same program): holds how many tokens a fresh curve sells.
+export const PUMP_GLOBAL_ACCOUNT = '4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf';
+// Raw units (6 decimals): 793,100,000 tokens. Used if the Global account can't be read.
+export const DEFAULT_INITIAL_REAL_TOKENS = 793_100_000_000_000n;
+
+// Global layout: 8-byte header, bool, authority(32), feeRecipient(32), then u64s:
+// initialVirtualTokenReserves @73, initialVirtualSolReserves @81, initialRealTokenReserves @89.
+export function parsePumpGlobal(data) {
+  if (!data || data.length < 97) return null;
+  const v = data.readBigUInt64LE(89);
+  return v >= 100_000_000_000_000n && v <= 1_000_000_000_000_000n ? v : null; // sanity range
+}
+
+// 0..1 = share of the curve's tokens already bought. 1 once the token graduated.
+export function curveProgress(curve, initialRealTokens = DEFAULT_INITIAL_REAL_TOKENS) {
+  if (!curve) return null;
+  if (curve.complete) return 1;
+  const p = 1 - Number(curve.realTokens) / Number(initialRealTokens);
+  return Math.min(1, Math.max(0, p));
+}
+
+export function progressBar(p, cells = 10) {
+  const filled = Math.round(p * cells);
+  return '▰'.repeat(filled) + '▱'.repeat(cells - filled);
 }
 
 const validSolUsd = (n) => typeof n === 'number' && Number.isFinite(n) && n > 10 && n < 2000;
@@ -149,7 +179,7 @@ export function shortNum(s) {
 }
 
 // Builds the HTML text of the card: Market / Safety / Your trade.
-export function buildTokenCard({ mint, market, mintInfo, wallet, balance, amount, slippageBps, quote, quoteError }) {
+export function buildTokenCard({ mint, market, mintInfo, wallet, balance, amount, slippageBps, quote, quoteError, progress = null }) {
   const title = market?.symbol
     ? `🪙 <b>$${esc(market.symbol)}</b>${market.name ? ` · ${esc(market.name)}` : ''}`
     : '🪙 <b>Unknown token</b>';
@@ -159,9 +189,14 @@ export function buildTokenCard({ mint, market, mintInfo, wallet, balance, amount
   if (market) {
     lines.push(`Price  ${formatPrice(market.priceUsd)}`);
     lines.push(`MCap  ${formatUsd(market.marketCapUsd)}  ·  Liq  ${formatUsd(market.liquidityUsd)}`);
-    if (market.dex) lines.push(`Source  ${esc(market.dex)}`);
   } else {
     lines.push('No market data found yet (very new token?)');
+  }
+
+  if (progress !== null) {
+    lines.push(progress >= 1
+      ? 'Curve  graduated ✅'
+      : `Curve  ${progressBar(progress)} ${(progress * 100).toFixed(1)}%`);
   }
 
   lines.push('', '<b>🛡 Safety</b>');
