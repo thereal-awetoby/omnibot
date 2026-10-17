@@ -1,0 +1,11 @@
+{
+  "name": "omnibot",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "trade": "npm run start -w apps/trade-bot",
+    "migrate": "npm run migrate -w packages/shared",
+    "test": "npm test -w packages/shared"
+  }
+}
