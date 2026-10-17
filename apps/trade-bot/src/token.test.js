@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTokenInput, formatUsd, formatPrice, fetchMarketData, fetchPumpData, fetchTokenMarket, shortNum, buildTokenCard } from './token.js';
+import { parseTokenInput, formatUsd, formatPrice, fetchMarketData, fetchPumpData, fetchTokenMarket, shortNum, buildTokenCard, parsePumpCurve, liquidityFromCurve, solUsdFromQuote, prettyDex } from './token.js';
 
 const MINT = 'HF7R3k8129c2Ya4FEwPcqyLXXoHx7hwWGGsM8sAkpump';
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -134,4 +134,53 @@ test('fetchTokenMarket falls back to pump.fun, and survives both sources failing
   assert.equal(fill.marketCapUsd, 7000);
   assert.equal(fill.liquidityUsd, 5 * 175 * 2);
   assert.equal(await fetchTokenMarket(MINT, route({}, false, false)), null);
+});
+
+function curveBuffer({ realSol, complete = false }) {
+  const b = Buffer.alloc(81);
+  b.writeBigUInt64LE(925_163_590_557_167n, 8); // virtualTokenReserves
+  b.writeBigUInt64LE(35_000_000_000n, 16); // virtualSolReserves
+  b.writeBigUInt64LE(700_000_000_000_000n, 24); // realTokenReserves
+  b.writeBigUInt64LE(realSol, 32); // realSolReserves
+  b.writeBigUInt64LE(1_000_000_000_000_000n, 40); // tokenTotalSupply
+  b[48] = complete ? 1 : 0;
+  return b;
+}
+
+test('parsePumpCurve reads reserves and the complete flag from the account bytes', () => {
+  const c = parsePumpCurve(curveBuffer({ realSol: 4_793_847_131n }));
+  assert.equal(c.realSolLamports, 4_793_847_131n);
+  assert.equal(c.complete, false);
+  assert.equal(parsePumpCurve(curveBuffer({ realSol: 1n, complete: true })).complete, true);
+  assert.equal(parsePumpCurve(Buffer.alloc(10)), null);
+  assert.equal(parsePumpCurve(null), null);
+});
+
+test('liquidityFromCurve = curve SOL x SOL price x 2, and never invents a number', () => {
+  const curve = parsePumpCurve(curveBuffer({ realSol: 10_000_000_000n })); // 10 SOL
+  assert.equal(liquidityFromCurve(curve, 180), 10 * 180 * 2);
+  assert.equal(liquidityFromCurve(curve, null), null);
+  assert.equal(liquidityFromCurve(curve, 5), null); // absurd SOL price
+  assert.equal(liquidityFromCurve(parsePumpCurve(curveBuffer({ realSol: 1n, complete: true })), 180), null);
+  assert.equal(liquidityFromCurve(null, 180), null);
+});
+
+test('solUsdFromQuote derives the SOL price from token price and quote', () => {
+  // 0.1 SOL buys 541,477.7 tokens (6 decimals) at $0.0000333 each -> ~$180 per SOL
+  const v = solUsdFromQuote({ priceUsd: 0.0000333, outAmount: '541477700000', decimals: 6, amountSol: '0.1' });
+  assert.ok(v > 170 && v < 190, String(v));
+  assert.equal(solUsdFromQuote({ priceUsd: null, outAmount: '1', decimals: 6, amountSol: '0.1' }), null);
+  assert.equal(solUsdFromQuote({ priceUsd: 1e-9, outAmount: '1000000', decimals: 6, amountSol: '0.1' }), null);
+});
+
+test('fetchMarketData returns the SOL price when the pair is quoted in SOL, and a friendly source', async () => {
+  const body = { pairs: [{
+    chainId: 'solana', baseToken: { address: MINT, name: 'N', symbol: 'N' }, quoteToken: { symbol: 'SOL' },
+    priceUsd: '0.0000177', priceNative: '0.0000001', marketCap: 17730, dexId: 'pumpfun',
+  }] };
+  const m = await fetchMarketData(MINT, mockFetch(200, body));
+  assert.ok(Math.abs(m.solUsd - 177) < 0.001);
+  assert.equal(m.dex, 'pump.fun curve');
+  assert.equal(m.liquidityUsd, null);
+  assert.equal(prettyDex('pumpswap'), 'PumpSwap');
 });

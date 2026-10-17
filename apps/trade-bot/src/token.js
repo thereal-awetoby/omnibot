@@ -51,8 +51,49 @@ export async function fetchMarketData(mint, fetchImpl = fetch) {
     priceUsd: p.priceUsd ? Number(p.priceUsd) : null,
     liquidityUsd: p.liquidity?.usd ?? null,
     marketCapUsd: p.marketCap ?? p.fdv ?? null,
-    dex: p.dexId ?? null,
+    dex: prettyDex(p.dexId),
+    solUsd: solPriceFrom(p),
   };
+}
+
+const DEX_NAMES = { pumpfun: 'pump.fun curve', pumpswap: 'PumpSwap', raydium: 'Raydium', orca: 'Orca', meteora: 'Meteora' };
+export const prettyDex = (id) => (id ? DEX_NAMES[id] ?? id : null);
+
+// If the pair is quoted in SOL, priceUsd / priceNative is the SOL price in USD.
+function solPriceFrom(pair) {
+  const sym = pair.quoteToken?.symbol;
+  const usd = Number(pair.priceUsd);
+  const native = Number(pair.priceNative);
+  if ((sym === 'SOL' || sym === 'WSOL') && usd > 0 && native > 0) return usd / native;
+  return null;
+}
+
+// ---- pump.fun bonding curve, read straight from the chain (no website API needed) ----
+export const PUMP_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+
+// Account layout (after the 8-byte Anchor header): virtualTokenReserves, virtualSolReserves,
+// realTokenReserves, realSolReserves, tokenTotalSupply (u64 each), then complete (bool).
+export function parsePumpCurve(data) {
+  if (!data || data.length < 49) return null;
+  return { realSolLamports: data.readBigUInt64LE(32), complete: data[48] === 1 };
+}
+
+const validSolUsd = (n) => typeof n === 'number' && Number.isFinite(n) && n > 10 && n < 2000;
+
+// Liquidity = SOL held by the curve x SOL price x 2 (DexScreener's convention).
+// A finished curve (token migrated) holds nothing; its liquidity lives in the new pool.
+export function liquidityFromCurve(curve, solUsd) {
+  if (!curve || curve.complete || !validSolUsd(solUsd)) return null;
+  return (Number(curve.realSolLamports) / 1e9) * solUsd * 2;
+}
+
+// Last resort for the SOL price: derive it from the Jupiter quote (price in USD x tokens per SOL).
+export function solUsdFromQuote({ priceUsd, outAmount, decimals, amountSol }) {
+  const tokens = Number(outAmount) / 10 ** decimals;
+  const sol = Number(amountSol);
+  if (!(priceUsd > 0) || !(tokens > 0) || !(sol > 0)) return null;
+  const v = (priceUsd * tokens) / sol;
+  return validSolUsd(v) ? v : null;
 }
 
 // pump.fun knows tokens that are still on the bonding curve (not migrated yet), which

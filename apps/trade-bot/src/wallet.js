@@ -1,4 +1,5 @@
 import { Keypair, Connection, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
+import { PUMP_PROGRAM_ID, parsePumpCurve } from './token.js';
 import bs58 from 'bs58';
 import * as bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
@@ -62,4 +63,15 @@ export const keypairFromBytes = (bytes) => Keypair.fromSecretKey(Uint8Array.from
 export async function getSolBalance(publicKey) {
   const lamports = await connection.getBalance(new PublicKey(publicKey));
   return lamports / LAMPORTS_PER_SOL;
+}
+
+// pump.fun bonding-curve account for a token, or null if it never had one.
+export async function getPumpCurve(mint) {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('bonding-curve'), new PublicKey(mint).toBuffer()],
+    new PublicKey(PUMP_PROGRAM_ID)
+  );
+  const info = await connection.getAccountInfo(pda);
+  if (!info || info.owner.toBase58() !== PUMP_PROGRAM_ID) return null;
+  return parsePumpCurve(info.data);
 }

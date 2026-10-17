@@ -5,10 +5,10 @@ import {
 } from '@omnibot/shared';
 import {
   createWallet, parseImport, secretToBase58, keypairFromBytes, getSolBalance,
-  isValidAddress, getMintInfo,
+  isValidAddress, getMintInfo, getPumpCurve,
 } from './wallet.js';
 import { solToLamports, fetchQuote, hasRoute, summarizeQuote } from './jupiter.js';
-import { parseTokenInput, fetchTokenMarket, buildTokenCard } from './token.js';
+import { parseTokenInput, fetchTokenMarket, buildTokenCard, liquidityFromCurve, solUsdFromQuote } from './token.js';
 
 if (!process.env.TRADE_BOT_TOKEN) throw new Error('TRADE_BOT_TOKEN is not set');
 const bot = new Bot(process.env.TRADE_BOT_TOKEN);
@@ -184,7 +184,7 @@ function tokenKeyboard(mint, p, walletLabel) {
   kb.text(customAmount ? `✅ ${p.amount} SOL ✏️` : '✏️ Custom', `xa:${mint}`).row();
   kb.text(`Slippage ${pct(p.slippageBps)} ⟳`, `sl:${mint}`).text('✏️ Custom', `xs:${mint}`).row();
   kb.url('📈 Chart', `https://dexscreener.com/solana/${mint}`).url('🔍 Solscan', `https://solscan.io/token/${mint}`).row();
-  kb.text(`👛 ${walletLabel ?? 'No wallet'}`, 'wallets').row();
+  kb.text(`💼 ${walletLabel ?? 'No wallet'}`, 'wallets').row();
   kb.text(`⚡ BUY ${p.amount} SOL`, `buy:${mint}`);
   return kb;
 }
@@ -242,7 +242,20 @@ async function showToken(ctx, mint, amountInput, { edit = false } = {}) {
       : e.message;
   }
 
-  const market = mktR.status === 'fulfilled' ? mktR.value : null;
+  let market = mktR.status === 'fulfilled' ? mktR.value : null;
+  // Still no liquidity (typical for pump.fun tokens): read it from the bonding curve on-chain.
+  if (market && market.liquidityUsd == null) {
+    try {
+      const curve = await getPumpCurve(mint);
+      const solUsd = market.solUsd ?? (orderR.status === 'fulfilled'
+        ? solUsdFromQuote({ priceUsd: market.priceUsd, outAmount: orderR.value.outAmount, decimals: mintR.value.decimals, amountSol: amount })
+        : null);
+      const liq = liquidityFromCurve(curve, solUsd);
+      if (liq != null) market = { ...market, liquidityUsd: liq };
+    } catch (err) {
+      console.error('pump curve error:', err.message);
+    }
+  }
   if (market?.symbol) symbols.set(mint, market.symbol);
   const text = buildTokenCard({
     mint,
