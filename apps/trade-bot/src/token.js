@@ -64,13 +64,21 @@ export async function fetchPumpData(mint, fetchImpl = fetch) {
   if (!res.ok) throw new Error(`pump.fun returned HTTP ${res.status}`);
   const c = await res.json();
   if (!c?.mint || typeof c.usd_market_cap !== 'number') return null;
+
+  // SOL price in USD, derived from pump.fun's own two market-cap numbers (SOL and USD).
+  const solUsd = typeof c.market_cap === 'number' && c.market_cap > 0 ? c.usd_market_cap / c.market_cap : null;
+  // Liquidity = SOL sitting in the bonding curve (lamports) x 2, the same convention DexScreener uses.
+  let liquidityUsd = null;
+  if (solUsd && solUsd > 10 && solUsd < 2000 && Number(c.real_sol_reserves) > 0) {
+    liquidityUsd = (Number(c.real_sol_reserves) / 1e9) * solUsd * 2;
+  }
   return {
     name: c.name,
     symbol: c.symbol,
     priceUsd: c.usd_market_cap / 1e9, // pump.fun tokens have a fixed 1B supply
-    liquidityUsd: null,
+    liquidityUsd,
     marketCapUsd: c.usd_market_cap,
-    dex: c.complete ? 'pump.fun (migrated)' : 'pump.fun',
+    dex: c.complete ? 'pump.fun (migrated)' : 'pump.fun curve',
   };
 }
 
@@ -78,12 +86,17 @@ export async function fetchPumpData(mint, fetchImpl = fetch) {
 export async function fetchTokenMarket(mint, fetchImpl = fetch) {
   let dex = null;
   try { dex = await fetchMarketData(mint, fetchImpl); } catch (e) { console.error('dexscreener error:', e.message); }
-  if (dex && dex.marketCapUsd != null) return dex;
+  if (dex && dex.marketCapUsd != null && dex.liquidityUsd != null) return dex;
   let pump = null;
   try { pump = await fetchPumpData(mint, fetchImpl); } catch (e) { console.error('pump.fun error:', e.message); }
   if (!dex) return pump;
   if (!pump) return dex;
-  return { ...dex, marketCapUsd: pump.marketCapUsd, priceUsd: dex.priceUsd ?? pump.priceUsd };
+  return {
+    ...dex,
+    marketCapUsd: dex.marketCapUsd ?? pump.marketCapUsd,
+    liquidityUsd: dex.liquidityUsd ?? pump.liquidityUsd,
+    priceUsd: dex.priceUsd ?? pump.priceUsd,
+  };
 }
 
 // "3,161,534.990174" -> "3,161,534.99"; tiny amounts keep their precision.
@@ -94,42 +107,44 @@ export function shortNum(s) {
   return str;
 }
 
-// Builds the HTML text of the card.
-export function buildTokenCard({ mint, market, mintInfo, wallet, balance, amount, quote, quoteError }) {
-  const symbol = market?.symbol ? `$${esc(market.symbol)}` : 'Token';
-  const name = market?.name ? ` — (${esc(market.name)})` : '';
-  const lines = [`<b>Buy</b> ${symbol}${name}`, `<code>${mint}</code>`, ''];
+// Builds the HTML text of the card: Market / Safety / Your trade.
+export function buildTokenCard({ mint, market, mintInfo, wallet, balance, amount, slippageBps, quote, quoteError }) {
+  const title = market?.symbol
+    ? `🪙 <b>$${esc(market.symbol)}</b>${market.name ? ` · ${esc(market.name)}` : ''}`
+    : '🪙 <b>Unknown token</b>';
+  const lines = [title, `<code>${mint}</code>`, ''];
 
-  if (wallet) {
-    const bal = typeof balance === 'number' ? `${balance.toFixed(4)} SOL` : 'n/a';
-    lines.push(`Balance: ${bal} — ${esc(wallet.label)}`);
-  } else {
-    lines.push('No wallet yet. Run /start to create one.');
-  }
-
+  lines.push('<b>📊 Market</b>');
   if (market) {
-    lines.push(
-      `Price: ${formatPrice(market.priceUsd)} — LIQ: ${formatUsd(market.liquidityUsd)} — MC: ${formatUsd(market.marketCapUsd)}`
-    );
+    lines.push(`Price  ${formatPrice(market.priceUsd)}`);
+    lines.push(`MCap  ${formatUsd(market.marketCapUsd)}  ·  Liq  ${formatUsd(market.liquidityUsd)}`);
+    if (market.dex) lines.push(`Source  ${esc(market.dex)}`);
   } else {
-    lines.push('Price: n/a (no market data found yet)');
+    lines.push('No market data found yet (very new token?)');
   }
 
-  lines.push(mintInfo.mintAuthority ? '⚠️ Mint authority NOT renounced' : 'Renounced ✅');
-  if (mintInfo.freezeAuthority) lines.push('⚠️ Freeze authority is active');
+  lines.push('', '<b>🛡 Safety</b>');
+  lines.push(`Mint  ${mintInfo.mintAuthority ? '⚠️ authority active' : 'renounced ✅'}  ·  Freeze  ${mintInfo.freezeAuthority ? '⚠️ active' : 'off ✅'}`);
 
-  lines.push('');
+  lines.push('', '<b>💱 Your trade</b>');
   if (quote) {
     const impact = quote.priceImpactPct === null ? 'n/a' : `${quote.priceImpactPct.toFixed(2)}%`;
     const warn = quote.priceImpactPct !== null && Math.abs(quote.priceImpactPct) >= 5 ? ' ⚠️' : '';
-    lines.push(`Quote: ${esc(amount)} SOL → ~${shortNum(quote.out)} ${market?.symbol ? esc(market.symbol) : 'tokens'}`);
-    lines.push(`Price impact: ${impact}${warn} · Route: ${esc(quote.router)}`);
+    lines.push(`${esc(amount)} SOL → ~${shortNum(quote.out)} ${market?.symbol ? esc(market.symbol) : 'tokens'}`);
+    lines.push(`Impact ${impact}${warn}  ·  Slippage ${slippageBps / 100}%  ·  ${esc(quote.router)}`);
   } else {
     lines.push(`Quote unavailable: ${esc(quoteError ?? 'unknown error')}`);
   }
 
+  if (wallet) {
+    const bal = typeof balance === 'number' ? `${balance.toFixed(4)} SOL` : 'n/a';
+    lines.push(`Wallet  ${esc(wallet.label)}  ·  ${bal}`);
+  } else {
+    lines.push('No wallet yet. Run /start to create one.');
+  }
+
   if (wallet && typeof balance === 'number' && balance < Number(amount) + 0.01) {
-    lines.push('', '🔴 Insufficient balance for buy amount + gas');
+    lines.push('', '🔴 Not enough SOL for this amount + gas. Tap Wallet to deposit.');
   }
   return lines.join('\n');
 }

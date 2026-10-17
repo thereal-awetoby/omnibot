@@ -56,35 +56,39 @@ test('fetchMarketData returns null when there are no pairs, throws on HTTP error
   await assert.rejects(() => fetchMarketData(MINT, mockFetch(500, {})), /HTTP 500/);
 });
 
-test('buildTokenCard shows everything, escapes HTML, warns on low balance', () => {
+test('buildTokenCard shows market, safety and trade sections, escapes HTML, warns on low balance', () => {
   const text = buildTokenCard({
     mint: MINT,
-    market: { name: 'Nas<sau>', symbol: 'NASSAU', priceUsd: 0.00000159, liquidityUsd: 1520, marketCapUsd: 1590 },
+    market: { name: 'Nas<sau>', symbol: 'NASSAU', priceUsd: 0.00000159, liquidityUsd: 1520, marketCapUsd: 1590, dex: 'pump.fun curve' },
     mintInfo: { mintAuthority: null, freezeAuthority: null },
     wallet: { label: 'toby test' },
     balance: 0,
     amount: '0.2',
+    slippageBps: 1000,
     quote: { out: '123,456', priceImpactPct: -0.5, router: 'iris' },
   });
   assert.match(text, /\$NASSAU/);
   assert.match(text, /Nas&lt;sau&gt;/);
-  assert.match(text, /Renounced ✅/);
-  assert.match(text, /LIQ: \$1\.52K/);
+  assert.match(text, /Market/);
+  assert.match(text, /Safety/);
+  assert.match(text, /renounced ✅/);
+  assert.match(text, /Liq {2}\$1\.52K/);
   assert.match(text, /0\.2 SOL → ~123,456 NASSAU/);
-  assert.match(text, /Insufficient balance/);
+  assert.match(text, /Slippage 10%/);
+  assert.match(text, /Not enough SOL/);
 });
 
 test('buildTokenCard copes with no market data and a failed quote', () => {
   const text = buildTokenCard({
     mint: MINT, market: null,
     mintInfo: { mintAuthority: 'abc', freezeAuthority: 'def' },
-    wallet: null, balance: null, amount: '0.1', quote: null, quoteError: 'no route',
+    wallet: null, balance: null, amount: '0.1', slippageBps: 500, quote: null, quoteError: 'no route',
   });
-  assert.match(text, /no market data/);
-  assert.match(text, /NOT renounced/);
-  assert.match(text, /Freeze authority is active/);
+  assert.match(text, /No market data/);
+  assert.match(text, /authority active/);
+  assert.match(text, /Freeze {2}⚠️ active/);
   assert.match(text, /Quote unavailable: no route/);
-  assert.doesNotMatch(text, /Insufficient/);
+  assert.doesNotMatch(text, /Not enough SOL/);
 });
 
 test('shortNum trims long decimals', () => {
@@ -94,12 +98,19 @@ test('shortNum trims long decimals', () => {
 });
 
 test('fetchPumpData reads a bonding-curve token', async () => {
-  const body = { mint: MINT, name: 'First Gemma Dolphin', symbol: 'BRUSH', usd_market_cap: 11070, complete: false };
+  const body = {
+    mint: MINT, name: 'First Gemma Dolphin', symbol: 'BRUSH', complete: false,
+    usd_market_cap: 11070, market_cap: 60, // -> SOL = $184.5
+    real_sol_reserves: 10_000_000_000, // 10 SOL in the curve
+  };
   const m = await fetchPumpData(MINT, mockFetch(200, body));
   assert.equal(m.symbol, 'BRUSH');
   assert.equal(m.marketCapUsd, 11070);
   assert.equal(m.priceUsd, 11070 / 1e9);
-  assert.equal(m.liquidityUsd, null);
+  assert.equal(m.liquidityUsd, 10 * 184.5 * 2);
+  // Missing or absurd numbers must not invent a liquidity figure.
+  assert.equal((await fetchPumpData(MINT, mockFetch(200, { ...body, real_sol_reserves: 0 }))).liquidityUsd, null);
+  assert.equal((await fetchPumpData(MINT, mockFetch(200, { ...body, market_cap: undefined }))).liquidityUsd, null);
   assert.equal(await fetchPumpData(MINT, mockFetch(200, {})), null);
 });
 
@@ -116,5 +127,11 @@ test('fetchTokenMarket falls back to pump.fun, and survives both sources failing
   assert.equal(merged.symbol, 'DD');
   assert.equal(merged.liquidityUsd, 900);
   assert.equal(merged.marketCapUsd, 5000);
+  // DexScreener has market cap but no liquidity (the BRUSH case): liquidity comes from pump.fun.
+  const dexNoLiq = { pairs: [{ chainId: 'solana', baseToken: { address: MINT, name: 'D', symbol: 'DD' }, priceUsd: '0.000002', marketCap: 7000 }] };
+  const pumpWithLiq = { mint: MINT, name: 'P', symbol: 'PP', usd_market_cap: 7000, market_cap: 40, real_sol_reserves: 5_000_000_000, complete: false };
+  const fill = await fetchTokenMarket(MINT, async (url) => ({ ok: true, status: 200, json: async () => (url.includes('dexscreener') ? dexNoLiq : pumpWithLiq) }));
+  assert.equal(fill.marketCapUsd, 7000);
+  assert.equal(fill.liquidityUsd, 5 * 175 * 2);
   assert.equal(await fetchTokenMarket(MINT, route({}, false, false)), null);
 });

@@ -175,16 +175,17 @@ const pct = (bps) => `${bps / 100}%`;
 function tokenKeyboard(mint, p, walletLabel) {
   const customAmount = !AMOUNT_PRESETS.includes(p.amount);
   const kb = new InlineKeyboard()
-    .text('← Back', 'home').text('↻ Refresh', `q:${mint}`).row()
-    .text(`✅ ${walletLabel ?? 'No wallet'}`, 'wallets').row()
-    .text('✅ Swap', 'soon:swap').text('Limit', 'soon:limit').text('DCA', 'soon:dca').row();
+    .text('← Home', 'home').text('↻ Refresh', `q:${mint}`).row()
+    .text('✅ Swap', 'soon:swap').text('Limit order', 'soon:limit').row();
   AMOUNT_PRESETS.forEach((a, i) => {
     kb.text(`${a === p.amount ? '✅ ' : ''}${a} SOL`, `a:${a}:${mint}`);
     if (i === 2) kb.row();
   });
-  kb.text(customAmount ? `✅ ${p.amount} SOL ✏️` : 'X SOL ✏️', `xa:${mint}`).row();
-  kb.text(`✅ ${pct(p.slippageBps)} Slippage`, `sl:${mint}`).text('X Slippage ✏️', `xs:${mint}`).row();
-  kb.text(`BUY ${p.amount} SOL`, `buy:${mint}`);
+  kb.text(customAmount ? `✅ ${p.amount} SOL ✏️` : '✏️ Custom', `xa:${mint}`).row();
+  kb.text(`Slippage ${pct(p.slippageBps)} ⟳`, `sl:${mint}`).text('✏️ Custom', `xs:${mint}`).row();
+  kb.url('📈 Chart', `https://dexscreener.com/solana/${mint}`).url('🔍 Solscan', `https://solscan.io/token/${mint}`).row();
+  kb.text(`👛 ${walletLabel ?? 'No wallet'}`, 'wallets').row();
+  kb.text(`⚡ BUY ${p.amount} SOL`, `buy:${mint}`);
   return kb;
 }
 
@@ -250,6 +251,7 @@ async function showToken(ctx, mint, amountInput, { edit = false } = {}) {
     wallet: w,
     balance: balR.status === 'fulfilled' ? balR.value : null,
     amount,
+    slippageBps: p.slippageBps,
     quote,
     quoteError,
   });
