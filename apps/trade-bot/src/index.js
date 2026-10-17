@@ -15,6 +15,10 @@ const awaitingImport = new Set();
 const SCAN_USERNAME = process.env.SCAN_BOT_USERNAME || 'OmniScanBot';
 const LAUNCH_USERNAME = process.env.LAUNCH_BOT_USERNAME || 'OmniLaunchBot';
 
+// Telegram monospace text: tap (or click) to copy.
+const code = (s) => `<code>${s}</code>`;
+const HTML = { parse_mode: 'HTML' };
+
 const noWalletKeyboard = () =>
   new InlineKeyboard().text('Create wallet', 'create').text('Import wallet', 'import');
 
@@ -38,7 +42,7 @@ async function showHome(ctx) {
       { reply_markup: noWalletKeyboard() }
     );
   }
-  return ctx.reply(`Omni Trade Bot\n\nWallet:\n${w.public_key}`, { reply_markup: mainKeyboard() });
+  return ctx.reply(`Omni Trade Bot\n\nWallet (tap to copy):\n${code(w.public_key)}`, { ...HTML, reply_markup: mainKeyboard() });
 }
 
 async function doCreate(ctx) {
@@ -51,7 +55,8 @@ async function doCreate(ctx) {
     source: 'created',
   });
   const msg = await ctx.reply(
-    `Wallet created.\n\nAddress:\n${kp.publicKey.toBase58()}\n\nPrivate key (shown once, save it now):\n${secretToBase58(kp)}\n\nThis message deletes itself in 60 seconds. Never share the key.`
+    `Wallet created.\n\nAddress (tap to copy):\n${code(kp.publicKey.toBase58())}\n\nPrivate key (tap to copy, shown once, save it now):\n${code(secretToBase58(kp))}\n\nThis message deletes itself in 60 seconds. Never share the key.`,
+    HTML
   );
   setTimeout(() => ctx.api.deleteMessage(msg.chat.id, msg.message_id).catch(() => {}), 60_000);
   return showHome(ctx);
@@ -67,7 +72,7 @@ async function doExport(ctx) {
   const w = await getTradeWallet(ctx.from.id);
   if (!w) return ctx.reply('No wallet yet.', { reply_markup: noWalletKeyboard() });
   const kp = keypairFromBytes(decryptSecret(w.encrypted_secret));
-  const msg = await ctx.reply(`Private key:\n${secretToBase58(kp)}\n\nDeletes in 60 seconds.`);
+  const msg = await ctx.reply(`Private key (tap to copy):\n${code(secretToBase58(kp))}\n\nDeletes in 60 seconds.`, HTML);
   setTimeout(() => ctx.api.deleteMessage(msg.chat.id, msg.message_id).catch(() => {}), 60_000);
 }
 
@@ -81,7 +86,7 @@ async function doBalance(ctx) {
 async function doDeposit(ctx) {
   const w = await getTradeWallet(ctx.from.id);
   if (!w) return ctx.reply('No wallet yet.', { reply_markup: noWalletKeyboard() });
-  return ctx.reply(`Send SOL to:\n${w.public_key}`);
+  return ctx.reply(`Send SOL to (tap to copy):\n${code(w.public_key)}`, HTML);
 }
 
 bot.command('start', showHome);
@@ -116,7 +121,7 @@ bot.on('message:text', async (ctx) => {
       encryptedSecret: encryptSecret(Buffer.from(kp.secretKey)),
       source: 'imported',
     });
-    await ctx.reply(`Wallet imported.\n\nAddress:\n${kp.publicKey.toBase58()}`);
+    await ctx.reply(`Wallet imported.\n\nAddress (tap to copy):\n${code(kp.publicKey.toBase58())}`, HTML);
     return showHome(ctx);
   } catch {
     return ctx.reply('Could not read that key or seed phrase. Run /importwallet to try again.');
