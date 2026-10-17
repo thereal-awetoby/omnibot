@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { nextWalletLabel } from './labels.js';
 
 let pool;
 
@@ -60,10 +61,10 @@ async function inTransaction(fn) {
 export function saveTradeWallet({ telegramId, publicKey, encryptedSecret, source }) {
   return inTransaction(async (c) => {
     const { rows } = await c.query(
-      'SELECT count(*)::int AS n FROM trade_wallets WHERE telegram_id = $1',
+      'SELECT label FROM trade_wallets WHERE telegram_id = $1',
       [telegramId]
     );
-    const label = `Wallet ${rows[0].n + 1}`;
+    const label = nextWalletLabel(rows.map((r) => r.label ?? ''));
     await c.query('UPDATE trade_wallets SET is_active = false WHERE telegram_id = $1', [telegramId]);
     await c.query(
       `INSERT INTO trade_wallets (telegram_id, public_key, encrypted_secret, source, label, is_active)
@@ -86,4 +87,14 @@ export function setActiveWallet(telegramId, walletId) {
     await c.query('UPDATE trade_wallets SET is_active = true WHERE id = $1', [walletId]);
     return true;
   });
+}
+
+// Renames one of the user's wallets. Returns false if it isn't theirs.
+// Throws with code 23505 if the user already has a wallet with that name.
+export async function renameWallet(telegramId, walletId, label) {
+  const r = await query(
+    'UPDATE trade_wallets SET label = $3 WHERE id = $2 AND telegram_id = $1',
+    [telegramId, walletId, label]
+  );
+  return r.rowCount > 0;
 }
