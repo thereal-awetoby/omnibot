@@ -424,6 +424,12 @@ bot.on('message:text', async (ctx) => {
   }
   if (awaitingCustom.has(ctx.from.id)) {
     const pending = awaitingCustom.get(ctx.from.id);
+    // A pasted token address means "show me this token": cancel the wait and open it.
+    const pasted = parseTokenInput(ctx.message.text);
+    if (pasted) {
+      awaitingCustom.delete(ctx.from.id);
+      return showToken(ctx, pasted.mint, pasted.amount);
+    }
     const done = await handleCustomInput(ctx, pending);
     if (done) awaitingCustom.delete(ctx.from.id);
     return;
