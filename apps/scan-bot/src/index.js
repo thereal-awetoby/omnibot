@@ -11,8 +11,8 @@ import {
   buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel } from './intel.js';
-import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain } from './chain.js';
-import { fetchLoreAI, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
+import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, rpcStats } from './chain.js';
+import { fetchLoreStory, fetchNews, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
 import { formatDuration } from './scan.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
 
@@ -106,9 +106,12 @@ const loading = new Map(); // mint -> Promise: simultaneous requests for one tok
 function loadCard(mint) {
   if (loading.has(mint)) return loading.get(mint);
   const p = (async () => {
+    const t0 = Date.now(); const s0 = rpcStats();
     const pre = startIntel(mint); // RPC + RugCheck start now, at the same time as the market lookup
     const market = await getMarket(mint);
     const { security, intel } = await gatherIntel(mint, market, pre);
+    const s1 = rpcStats(); // one line per card, handy when something feels slow
+    console.log(`card ${short(mint)} ${Date.now() - t0}ms, rpc calls ${s1.calls - s0.calls}, retried ${s1.retries - s0.retries}`);
     if (cardCache.size > 200) cardCache.delete(cardCache.keys().next().value);
     const card = { at: Date.now(), market, security, intel };
     cardCache.set(mint, card);
@@ -213,15 +216,24 @@ const buildLore = async (mint, userId) => {
   const c = await cachedCard(mint);
   const m = c.market;
   const x = (m?.socials ?? []).find((s) => ['twitter', 'x'].includes(String(s.type).toLowerCase()))?.url ?? null;
-  const narrative = await fetchLoreAI(
-    {
-      mint, name: m?.name ?? c.intel.meta?.name ?? null, symbol: m?.symbol ?? c.intel.meta?.symbol ?? null,
-      description: c.intel.meta?.description ?? null, xUrl: x,
-      ageText: typeof m?.createdAt === 'number' ? `${Math.max(1, Math.round((Date.now() - m.createdAt) / 3_600_000))}h` : null,
-    },
-    { apiKey: process.env.ANTHROPIC_API_KEY, model: process.env.LORE_MODEL || undefined, dailyMax: Number(process.env.LORE_DAILY_MAX) || undefined, perUserMax: Number(process.env.LORE_PER_USER_MAX) || undefined, userId }
-  );
-  return buildLoreText({ market: m, narrative, meta: c.intel.meta, detectedAt: c.intel.detectedAt });
+  const name = m?.name ?? c.intel.meta?.name ?? null;
+  const symbol = m?.symbol ?? c.intel.meta?.symbol ?? null;
+  // The story and the news search run at the same time.
+  const [story, headlines] = await Promise.all([
+    fetchLoreStory(
+      {
+        mint, name, symbol, description: c.intel.meta?.description ?? null, xUrl: x,
+        ageText: typeof m?.createdAt === 'number' ? `${Math.max(1, Math.round((Date.now() - m.createdAt) / 3_600_000))}h` : null,
+      },
+      {
+        anthropicKey: process.env.ANTHROPIC_API_KEY, anthropicModel: process.env.LORE_MODEL || undefined,
+        geminiKey: process.env.GEMINI_API_KEY, geminiModels: process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : undefined,
+        dailyMax: Number(process.env.LORE_DAILY_MAX) || undefined, perUserMax: Number(process.env.LORE_PER_USER_MAX) || undefined, userId,
+      },
+    ),
+    fetchNews({ name, symbol }),
+  ]);
+  return buildLoreText({ market: m, narrative: story?.text ?? null, grounded: story?.grounded ?? true, meta: c.intel.meta, headlines, detectedAt: c.intel.detectedAt });
 };
 
 async function showTrending(ctx, { edit = false } = {}) {
@@ -454,6 +466,8 @@ bot.catch((err) => console.error('bot error:', err.error?.message ?? err.message
 bot.start({
   onStart: (me) => {
     console.log(`Omni Scan Bot running as @${me.username}`);
+    console.log(`RPC endpoints: ${rpcStats().endpoints.map((e) => e.host).join(', ')}`);
+    console.log(`Lore AI: ${[process.env.ANTHROPIC_API_KEY ? 'Claude' : null, process.env.GEMINI_API_KEY ? 'Gemini' : null].filter(Boolean).join(' + ') || 'off (shows the token description and news only)'}`);
     // The menu next to the message box.
     bot.api.setMyCommands([
       { command: 'token', description: 'Token card (paste an address)' },

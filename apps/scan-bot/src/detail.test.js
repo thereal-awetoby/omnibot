@@ -124,7 +124,7 @@ test('buildLoreText: AI story first, creator description as fallback, then a pla
   const long = buildLoreText({ market: null, narrative: 'x'.repeat(2000) });
   assert.ok(long.length < 1000);
   assert.match(long, /…<\/blockquote>/);
-  assert.match(buildLoreText({ market: null, meta: null }), /No public story found/);
+  assert.match(buildLoreText({ market: null, meta: null }), /did not publish a description/);
 });
 
 test('address helpers', () => {
@@ -142,4 +142,16 @@ test('Dev view with only this token still shows data and explains the gap', () =
   assert.match(text, /Recent launches/);
   assert.match(text, /BDOG<\/b> @ \$18\.69K  ◀ this token/);
   assert.match(text, /older launches may be missing/);
+});
+
+test('buildLoreText: honest labels for searched vs listing-only AI, and news headlines', () => {
+  const NOW2 = Date.parse('2026-10-18T12:00:00Z');
+  const searched = buildLoreText({ market: { symbol: 'BDOG' }, narrative: 'A dog at the barber.', grounded: true, now: NOW2 });
+  assert.match(searched, /Written by AI from a web search/);
+  const listing = buildLoreText({ market: { symbol: 'BDOG' }, narrative: 'A dog at the barber.', grounded: false, now: NOW2 });
+  assert.match(listing, /listing only, no web search/);
+  const news = buildLoreText({ market: { symbol: 'BDOG' }, meta: null, now: NOW2, headlines: [{ title: 'Barber Dog <memecoin> goes viral', url: 'https://n.com/a?x=1&y=2', source: 'CoinDesk', at: NOW2 - 3 * 3_600_000 }] });
+  assert.match(news, /In the news/);
+  assert.match(news, /<a href="https:\/\/n\.com\/a\?x=1&amp;y=2">Barber Dog &lt;memecoin&gt; goes viral<\/a> <i>\(CoinDesk, 3h ago\)<\/i>/);
+  assert.doesNotMatch(news, /did not publish/); // headlines count as something to show
 });

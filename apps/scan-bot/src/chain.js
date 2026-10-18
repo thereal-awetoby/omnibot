@@ -2,19 +2,15 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { computeHolderStats, computeFresh } from './security.js';
 import { createdMintsFromTx } from './detail.js';
+import { createRpcPool, parseRpcUrls } from './rpcpool.js';
 
-// Every RPC call goes through this small queue so we stay under the provider's per-second cap
-// (Helius free is about 10/s). Without it the server answers 429 and web3.js waits seconds between retries.
-const RPC_MAX_PER_SEC = Number(process.env.RPC_MAX_RPS) || 8;
-let nextRpcSlot = 0;
-async function throttledFetch(url, opts) {
-  const now = Date.now();
-  const at = Math.max(now, nextRpcSlot);
-  nextRpcSlot = at + 1000 / RPC_MAX_PER_SEC;
-  if (at > now) await new Promise((r) => setTimeout(r, at - now));
-  return fetch(url, opts);
-}
-const connection = new Connection(process.env.RPC_URL || 'https://api.mainnet-beta.solana.com', { commitment: 'confirmed', fetch: throttledFetch });
+// Every RPC call goes through a small pool: each endpoint gets its own per-second limit (RPC_MAX_RPS, default 8),
+// and a call that is refused with 429 is retried at once on the next endpoint. Put two or more free RPC URLs in
+// RPC_URLS (comma separated) to multiply the speed. A single RPC_URL still works.
+const rpcUrls = parseRpcUrls();
+export const rpcPool = createRpcPool({ urls: rpcUrls, maxRps: Number(process.env.RPC_MAX_RPS) || 8 });
+export const rpcStats = () => rpcPool.stats();
+const connection = new Connection(rpcUrls[0], { commitment: 'confirmed', fetch: rpcPool.fetch, disableRetryOnRateLimit: true });
 const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 
 const cache = new Map(); // mint -> { at, value }

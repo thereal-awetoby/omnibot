@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, parseSearch, searchTokens, parseDexPaid, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
+import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, fetchLoreStory, parseNewsRss, fetchNews, parseSearch, searchTokens, parseDexPaid, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
 
 const json = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
@@ -223,4 +223,91 @@ test('fetchPriceSeries reads hourly closes oldest first; buildChartUrl makes a P
   assert.match(url, /^https:\/\/quickchart\.io\/chart\?v=4&w=800/);
   assert.match(decodeURIComponent(url), /#22c55e/);
   assert.equal(await fetchPriceSeries({ pairAddress: null, mint: 'M' }, ok), null);
+});
+
+// ---- Lore providers ----
+const gem = (text, grounded = true) => ({ ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text }] }, ...(grounded ? { groundingMetadata: { webSearchQueries: ['barber dog'] } } : {}) }] }) });
+const httpErr = (status) => ({ ok: false, status, json: async () => ({}) });
+const FACTS = { name: 'Barber Dog', symbol: 'BDOG', description: 'hi', xUrl: 'https://x.com/a' };
+
+test('fetchLoreStory: no keys means no call at all', async () => {
+  assert.equal(await fetchLoreStory({ mint: 'G0', ...FACTS }, {}, async () => { throw new Error('must not call'); }), null);
+});
+
+test('fetchLoreStory (Gemini): sends the key in a header, asks for Google Search, labels a searched story', async () => {
+  let seen;
+  const r = await fetchLoreStory({ mint: 'G1', ...FACTS }, { geminiKey: 'GK', geminiModels: ['m1'] }, async (u, o) => { seen = { u, o, body: JSON.parse(o.body) }; return gem('A **dog** at the barber went viral.'); });
+  assert.deepEqual(r, { text: 'A dog at the barber went viral.', grounded: true, provider: 'gemini' });
+  assert.match(seen.u, /models\/m1:generateContent$/);
+  assert.equal(seen.o.headers['x-goog-api-key'], 'GK');
+  assert.doesNotMatch(seen.u, /GK/); // the key never goes in the URL
+  assert.deepEqual(seen.body.tools, [{ google_search: {} }]);
+  assert.match(seen.body.contents[0].parts[0].text, /Barber Dog/);
+});
+
+test('fetchLoreStory (Gemini): if search is not allowed it asks again without search and says so; a model that did not search is not "grounded"', async () => {
+  const calls = [];
+  const impl = async (u, o) => { const b = JSON.parse(o.body); calls.push(Boolean(b.tools)); return b.tools ? httpErr(403) : gem('From the listing only.', false); };
+  const r = await fetchLoreStory({ mint: 'G2', ...FACTS }, { geminiKey: 'GK', geminiModels: ['m1'] }, impl);
+  assert.deepEqual(calls, [true, false]);
+  assert.equal(r.grounded, false);
+  assert.match(JSON.stringify(calls), /true,false/);
+  // searched call that returns no grounding metadata is also not "grounded"
+  const r2 = await fetchLoreStory({ mint: 'G3', ...FACTS }, { geminiKey: 'GK', geminiModels: ['m1'] }, async () => gem('No metadata.', false));
+  assert.equal(r2.grounded, false);
+});
+
+test('fetchLoreStory (Gemini): 404 tries the next model, 429 gives up quietly, caching works', async () => {
+  const tried = [];
+  const r = await fetchLoreStory({ mint: 'G4', ...FACTS }, { geminiKey: 'GK', geminiModels: ['old', 'new'] }, async (u) => { tried.push(u.includes('/old:') ? 'old' : 'new'); return u.includes('/old:') ? httpErr(404) : gem('Story.'); });
+  assert.deepEqual(tried, ['old', 'new']);
+  assert.equal(r.text, 'Story.');
+  assert.equal(await fetchLoreStory({ mint: 'G4', ...FACTS }, { geminiKey: 'GK' }, async () => { throw new Error('cached: must not call'); }), r);
+  assert.equal(await fetchLoreStory({ mint: 'G5', ...FACTS }, { geminiKey: 'GK', geminiModels: ['m'] }, async () => httpErr(429)), null);
+});
+
+test('fetchLoreStory: Claude first, Gemini when Claude fails; per-user limit still applies', async () => {
+  const order = [];
+  const impl = async (u) => { order.push(u.includes('anthropic') ? 'claude' : 'gemini'); return u.includes('anthropic') ? httpErr(401) : gem('Gemini story.'); };
+  const r = await fetchLoreStory({ mint: 'G6', ...FACTS }, { anthropicKey: 'AK', geminiKey: 'GK', geminiModels: ['m'] }, impl);
+  assert.deepEqual(order, ['claude', 'gemini']);
+  assert.equal(r.provider, 'gemini');
+  const limited = { anthropicKey: 'AK', perUserMax: 1, userId: 'u-limit' };
+  const ok = async () => ({ ok: true, status: 200, json: async () => ({ content: [{ type: 'text', text: 'Claude story.' }] }) });
+  assert.equal((await fetchLoreStory({ mint: 'G7', ...FACTS }, limited, ok)).text, 'Claude story.');
+  assert.equal(await fetchLoreStory({ mint: 'G8', ...FACTS }, limited, ok), null); // second new story for the same user today
+});
+
+// ---- news headlines ----
+const rss = (items) => `<?xml version="1.0"?><rss><channel>${items.map((i) => `<item><title><![CDATA[${i.t}]]></title><link>${i.l}</link><pubDate>${i.d}</pubDate><source url="https://x.com">${i.s}</source></item>`).join('')}</channel></rss>`;
+
+test('parseNewsRss keeps only headlines that mention the token, newest first, recent only', () => {
+  const now = Date.parse('2026-10-18T12:00:00Z');
+  const xml = rss([
+    { t: 'Barber Dog memecoin surges &amp; viral', l: 'https://n.com/1', d: 'Sat, 17 Oct 2026 10:00:00 GMT', s: 'CoinDesk' },
+    { t: 'Unrelated Bitcoin news', l: 'https://n.com/2', d: 'Sat, 17 Oct 2026 11:00:00 GMT', s: 'X' },
+    { t: 'Barber Dog old story', l: 'https://n.com/3', d: 'Mon, 01 Jan 2026 10:00:00 GMT', s: 'Old' },
+    { t: 'Why $BDOG is trending', l: 'https://n.com/4', d: 'Sat, 17 Oct 2026 18:00:00 GMT', s: 'Decrypt' },
+    { t: 'Barber Dog bad link', l: 'javascript:alert(1)', d: 'Sat, 17 Oct 2026 18:00:00 GMT', s: 'Evil' },
+  ]);
+  const items = parseNewsRss(xml, { name: 'Barber Dog', symbol: 'BDOG' }, now);
+  assert.deepEqual(items.map((i) => i.url), ['https://n.com/4', 'https://n.com/1']);
+  assert.equal(items[1].title, 'Barber Dog memecoin surges & viral');
+  assert.equal(items[0].source, 'Decrypt');
+  assert.deepEqual(parseNewsRss('', { name: 'Barber Dog' }, now), []);
+  assert.deepEqual(parseNewsRss(xml, { name: 'ab', symbol: 'x' }, now), []); // too short to match safely
+});
+
+test('fetchNews builds a quoted search, caches, and returns [] on errors', async () => {
+  const now = Date.parse('2026-10-18T12:00:00Z');
+  let url; let n = 0;
+  const xml = rss([{ t: 'Cat Wif Hat goes viral', l: 'https://n.com/9', d: 'Sat, 17 Oct 2026 10:00:00 GMT', s: 'S' }]);
+  const impl = async (u) => { n += 1; url = u; return { ok: true, status: 200, text: async () => xml }; };
+  const a = await fetchNews({ name: 'Cat Wif Hat', symbol: 'CWH' }, impl, now);
+  assert.equal(a.length, 1);
+  assert.match(url, /q=%22Cat%20Wif%20Hat%22%20crypto/);
+  await fetchNews({ name: 'Cat Wif Hat', symbol: 'CWH' }, impl, now + 1000);
+  assert.equal(n, 1);
+  assert.deepEqual(await fetchNews({ name: 'Zed Zed Zed' }, async () => { throw new Error('offline'); }, now), []);
+  assert.deepEqual(await fetchNews({ name: 'ab' }, impl, now), []);
 });
