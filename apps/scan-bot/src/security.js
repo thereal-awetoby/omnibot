@@ -44,3 +44,15 @@ export function computeFresh(top, ages) {
   }
   return known === 0 ? null : { fresh1dPct: Math.round(d1 * 10) / 10, fresh7dPct: Math.round(d7 * 10) / 10, walletsChecked: known };
 }
+
+// entries: [{ owner, pct, firstSlot }] = top holders and the slot in which each first received the token.
+// "Bundled" = wallets that got the token in the same block as the earliest buyer (or the next one),
+// the usual sign of a bundle. Returns { count, pct, slot }, or null when there is too little data to tell.
+export function findBundle(entries, window = 1) {
+  const known = (entries ?? []).filter((e) => Number.isFinite(e?.firstSlot));
+  if (known.length < 2) return null;
+  const first = Math.min(...known.map((e) => e.firstSlot));
+  const group = known.filter((e) => e.firstSlot - first <= window);
+  if (group.length < 2) return { count: 0, pct: 0, slot: null };
+  return { count: group.length, pct: Math.round(group.reduce((a, e) => a + e.pct, 0) * 10) / 10, slot: first };
+}

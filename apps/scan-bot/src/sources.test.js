@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated } from './sources.js';
+import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI } from './sources.js';
 
 const json = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
@@ -126,4 +126,38 @@ test('fetchPumpCreated asks the creator endpoint and returns null when it fails'
   assert.equal(out.length, 1);
   assert.equal(await fetchPumpCreated('C', async () => json({}, 404)), null);
   assert.equal(await fetchPumpCreated('C', async () => { throw new Error('offline'); }), null);
+});
+
+test('fetchPumpCreated tries the next pump.fun host when one fails', async () => {
+  const urls = [];
+  const out = await fetchPumpCreated('CREATOR2', async (u) => { urls.push(u); return urls.length === 1 ? json({}, 404) : json([{ mint: A1 }]); });
+  assert.equal(out.length, 1);
+  assert.match(urls[0], /frontend-api-v3\.pump\.fun/);
+  assert.match(urls[1], /frontend-api-v2\.pump\.fun/);
+});
+
+test('fetchLoreAI: no key means no call; reads the text, caches, respects the daily cap', async () => {
+  const now = Date.UTC(2027, 0, 5, 12);
+  assert.equal(await fetchLoreAI({ mint: 'L0' }, {}, async () => { throw new Error('must not call'); }, now), null);
+  let calls = 0; let sent;
+  const impl = async (u, o) => { calls += 1; sent = { u, o, body: JSON.parse(o.body) }; return json({ content: [{ type: 'server_tool_use' }, { type: 'text', text: 'A **dog** at the barber went viral.' }, { type: 'web_search_tool_result' }, { type: 'text', text: ' It spread on X.' }] }); };
+  const t = await fetchLoreAI({ mint: 'L1', name: 'Barber Dog', symbol: 'BDOG', description: 'hi', xUrl: 'https://x.com/a' }, { apiKey: 'k' }, impl, now);
+  assert.equal(t, 'A dog at the barber went viral. It spread on X.');
+  assert.equal(sent.u, 'https://api.anthropic.com/v1/messages');
+  assert.equal(sent.o.headers['x-api-key'], 'k');
+  assert.equal(sent.body.tools[0].name, 'web_search');
+  assert.match(sent.body.messages[0].content, /Name: Barber Dog[\s\S]*Symbol: BDOG[\s\S]*X link: https:\/\/x\.com\/a/);
+  assert.match(sent.body.system, /Never give price predictions/);
+  assert.equal(await fetchLoreAI({ mint: 'L1' }, { apiKey: 'k' }, impl, now + 1000), t); // cached
+  assert.equal(calls, 1);
+  assert.equal(await fetchLoreAI({ mint: 'L2' }, { apiKey: 'k' }, async () => json({}, 401), now), null);
+  assert.equal(await fetchLoreAI({ mint: 'L3' }, { apiKey: 'k' }, async () => json({ content: [] }), now), null);
+  // daily cap: 2 calls allowed in a new day, third is refused without calling
+  const later = now + 86_400_000;
+  let n = 0;
+  const counting = async () => { n += 1; return json({ content: [{ type: 'text', text: 'ok' }] }); };
+  await fetchLoreAI({ mint: 'C1' }, { apiKey: 'k', dailyMax: 2 }, counting, later);
+  await fetchLoreAI({ mint: 'C2' }, { apiKey: 'k', dailyMax: 2 }, counting, later);
+  assert.equal(await fetchLoreAI({ mint: 'C3' }, { apiKey: 'k', dailyMax: 2 }, counting, later), null);
+  assert.equal(n, 2);
 });

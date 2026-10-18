@@ -1,6 +1,7 @@
 // Gathers everything beyond the basic market numbers, never throwing and never waiting forever.
 import { fetchRugCheck, fetchAth, describeAth } from './sources.js';
-import { getSecurityRaw, withHolderStats, getDevHolding, getFreshWallets } from './chain.js';
+import { getSecurityRaw, withHolderStats, getDevHolding, getFreshWallets, getEarlyBuyers } from './chain.js';
+import { findBundle } from './security.js';
 
 // Resolves to `fallback` if the promise is still pending after `ms`, or if it fails.
 export const within = (p, ms, fallback = null) => new Promise((resolve) => {
@@ -15,20 +16,20 @@ export function startIntel(mint) {
 }
 
 // Returns { security, intel } where intel = { holdersTotal, lpLockedPct, rugged, devPct, fresh1dPct, fresh7dPct,
-// walletsChecked, ath, top, top10Pct, top1Pct, creator, meta, detectedAt, linked } (any field may be null).
+// walletsChecked, ath, bundle, top, top10Pct, top1Pct, creator, meta, detectedAt, linked } (any field may be null).
+// Every step starts the moment the data it needs is ready (no waiting for unrelated lookups), and each one
+// has its own time limit, so a slow source shows n/a instead of holding up the whole card.
 export async function gatherIntel(mint, market, pre = startIntel(mint)) {
-  // Stage 1: the lookups already running, plus the price history.
-  const [raw, rug, athRaw] = await Promise.all([
-    within(pre.raw, 6_000),
-    within(pre.rug, 6_000),
-    market ? within(fetchAth({ pairAddress: market.pairAddress, mint, createdAt: market.createdAt }), 5_000) : null,
-  ]);
-  const security = withHolderStats(raw, mint, market?.pairAddress ?? null);
-  // Stage 2: needs the creator (RugCheck) and the top holders / supply (RPC).
-  const [devPct, fresh] = await Promise.all([
-    within(getDevHolding(rug?.creator, mint, security?.supply), 3_500),
-    within(getFreshWallets(security?.top), 4_000),
-  ]);
+  const rawP = within(pre.raw, 6_000);
+  const rugP = within(pre.rug, 6_000);
+  const securityP = rawP.then((raw) => withHolderStats(raw, mint, market?.pairAddress ?? null));
+  const athP = market ? within(fetchAth({ pairAddress: market.pairAddress, mint, createdAt: market.createdAt }), 4_000) : Promise.resolve(null);
+  const devP = Promise.all([rugP, securityP]).then(([rug, sec]) => within(getDevHolding(rug?.creator, mint, sec?.supply), 3_500));
+  const freshP = securityP.then((sec) => within(getFreshWallets(sec?.top), 3_800));
+  const bundleP = Promise.all([rawP, securityP, rugP])
+    .then(([raw, sec, rug]) => within(getEarlyBuyers(raw, sec?.top, rug?.creator ?? null), 3_800))
+    .then((entries) => findBundle(entries));
+  const [security, rug, athRaw, devPct, fresh, bundle] = await Promise.all([securityP, rugP, athP, devP, freshP, bundleP]);
   // Holder concentration: our own RPC numbers first, RugCheck's list when the RPC is busy.
   const haveRpcTop = typeof security?.top10Pct === 'number';
   const intel = {
@@ -43,6 +44,7 @@ export async function gatherIntel(mint, market, pre = startIntel(mint)) {
     fresh7dPct: fresh?.fresh7dPct ?? null,
     walletsChecked: fresh?.walletsChecked ?? 0,
     ath: describeAth(athRaw, market),
+    bundle,
     // for the detail views
     creator: rug?.creator ?? null,
     meta: rug?.meta ?? null,

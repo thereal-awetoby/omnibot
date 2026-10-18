@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createdMintsFromTx, mergeLaunches, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink } from './detail.js';
+import { createdMintsFromTx, mergeLaunches, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink, usdShort } from './detail.js';
 
 const DEV = 'DevWa11etDevWa11etDevWa11etDevWa11etDevW1';
 const M1 = 'So11111111111111111111111111111111111111112';
@@ -34,35 +34,41 @@ test('createdMintsFromTx ignores failed transactions, other payers and non-mint 
   assert.deepEqual(createdMintsFromTx(plain, DEV), [M1]);
 });
 
-test('mergeLaunches hides the current token, fills from market data, sorts newest first', () => {
-  const launches = [{ mint: M1, createdAt: 1000, symbol: 'old' }, { mint: M2, createdAt: 5000 }, { mint: 'CUR', createdAt: 9000 }];
+test('mergeLaunches dedupes, flags the current token, fills from market data, sorts newest first', () => {
+  const launches = [{ mint: M1, createdAt: 1000, symbol: 'old' }, { mint: M2, createdAt: 5000 }, { mint: 'CUR', createdAt: 9000 }, { mint: M2, createdAt: 5000 }];
   const markets = new Map([[M1, { symbol: 'AAA', marketCapUsd: 250_000 }]]);
   const out = mergeLaunches(launches, markets, 'CUR');
-  assert.deepEqual(out.map((l) => l.mint), [M2, M1]);
-  assert.equal(out[1].symbol, 'AAA');
-  assert.equal(out[1].marketCapUsd, 250_000);
-  assert.equal(out[0].marketCapUsd, null);
+  assert.deepEqual(out.map((l) => l.mint), ['CUR', M2, M1]);
+  assert.deepEqual(out.map((l) => l.current), [true, false, false]);
+  assert.equal(out[2].symbol, 'AAA');
+  assert.equal(out[2].marketCapUsd, 250_000);
+  assert.equal(out[1].marketCapUsd, null);
 });
 
-test('buildDevText: wallet, balance, holding, launches summary', () => {
+test('buildDevText: wallet, deploys/day, recent and top launches, copyable address', () => {
+  const D = 86_400_000;
   const launches = [
-    { mint: M1, symbol: 'AAA<', createdAt: NOW - 3 * 86_400_000, marketCapUsd: 250_000 },
-    { mint: M2, symbol: null, createdAt: NOW - 41 * 86_400_000, marketCapUsd: null },
+    { mint: 'CUR', symbol: 'BDOG', createdAt: NOW - 18 * 3_600_000, marketCapUsd: 18_690, current: true },
+    { mint: M1, symbol: 'ACAT<', createdAt: NOW - 2 * D, marketCapUsd: 2_900 },
+    { mint: M2, symbol: null, createdAt: NOW - 10 * D, marketCapUsd: 775_000 },
   ];
   const t = buildDevText({ market: { symbol: 'BDOG' }, creator: DEV, devPct: 0, solBalance: 12.345, launches, source: 'pump', now: NOW });
-  assert.match(t, /Dev<\/b> · \$BDOG/);
-  assert.match(t, /solscan\.io\/account\/DevWa11et/);
-  assert.match(t, /◎ 12\.3 SOL/);
-  assert.match(t, /Holds <b>0%<\/b>/);
-  assert.match(t, /<b>2<\/b> found · 1 now over \$100K · earliest 41d ago/);
-  assert.match(t, /1\. \$AAA&lt; · \$250\.00K · 3d ago/);
-  assert.match(t, /2\. <code>EPjF…Dt1v<\/code> · no market data · 41d ago/);
+  assert.match(t, /^👨‍💻 <a href="https:\/\/solscan\.io\/account\/DevWa11et[^"]*">DevW…evW1<\/a>\n/);
+  assert.match(t, /├ Deploys\/day: <b>0\.3<\/b>\n├ Balance: ◎ 12\.3 SOL\n└ Holds <b>0%<\/b> of \$BDOG/);
+  assert.match(t, /🔄 <b>Recent launches<\/b> \[3\]/);
+  assert.match(t, /<b>BDOG<\/b> @ \$18\.69K  ◀ this token/);
+  assert.match(t, /<b>ACAT&lt;<\/b> @ \$2\.90K/);
+  assert.match(t, /🚀 <b>Top launches<\/b>[\s\S]*<b>EPjF…Dt1v<\/b> @ \$775\.00K/);
+  assert.match(t, /<code>DevWa11etDevWa11etDevWa11etDevWa11etDevW1<\/code>/);
   assert.doesNotMatch(t, /last \d+ transactions/);
-  assert.match(buildDevText({ market: null, creator: DEV, launches: [], source: 'rpc', scannedTx: 40, now: NOW }), /None found from this wallet[\s\S]*last 40 transactions/);
+  assert.match(buildDevText({ market: null, creator: DEV, launches: [], source: 'rpc', scannedTx: 120, now: NOW }), /None found from this wallet[\s\S]*last 120 transactions/);
   assert.match(buildDevText({ market: null, creator: DEV, launches: null, now: NOW }), /Could not load/);
   assert.match(buildDevText({ market: null, creator: null }), /not known yet/);
-  const many = Array.from({ length: 11 }, (_, i) => ({ mint: M1, symbol: `T${i}`, createdAt: NOW - i * 1000, marketCapUsd: 1 }));
-  assert.match(buildDevText({ market: null, creator: DEV, launches: many, now: NOW }), /…and 3 more/);
+  const many = Array.from({ length: 50 }, (_, i) => ({ mint: M1, symbol: `T${i}`, createdAt: NOW - (i + 1) * D, marketCapUsd: 1000 + i }));
+  const big = buildDevText({ market: null, creator: DEV, launches: many, source: 'pump', now: NOW });
+  assert.match(big, /Recent launches<\/b> \[50\+\]/);
+  assert.match(big, /Deploys\/day: <b>1\.0<\/b>/);
+  assert.equal((big.match(/<b>T\d+<\/b>/g) ?? []).length, 10); // 5 recent + 5 top
 });
 
 test('valueHoldings values only real pairs, skips the current token and shows the top three', () => {
@@ -81,33 +87,44 @@ test('valueHoldings values only real pairs, skips the current token and shows th
   assert.deepEqual(valueHoldings(null, prices, 'CUR'), { top: [], count: 0, totalUsd: 0 });
 });
 
-test('buildHoldersText: ranks, links, balances, other holdings, linked marker', () => {
+test('buildHoldersText: one small block per wallet, share on top, details underneath', () => {
   const holders = [
-    { owner: DEV, pct: 3.46, linked: true, sol: 12.3, holdings: { top: [{ symbol: 'WIF', usd: 1200 }, { symbol: null, usd: 400 }], count: 4, totalUsd: 2100 } },
+    { owner: DEV, pct: 3.46, linked: true, sol: 12.3, holdings: { top: [{ symbol: 'WIF', usd: 1200 }, { symbol: null, usd: 400 }, { symbol: 'X', usd: 5 }], count: 1400, totalUsd: 14_800 } },
     { owner: M1, pct: 2.2, linked: false, sol: 0.5, holdings: { top: [], count: 0, totalUsd: 0 } },
     { owner: M2, pct: 1.1, linked: false, sol: null, holdings: null },
   ];
   const t = buildHoldersText({ market: { symbol: 'BDOG' }, holders });
   assert.match(t, /Top holders<\/b> · \$BDOG/);
-  assert.match(t, /1\. <a href="https:\/\/solscan\.io\/account\/DevWa11et[^"]*">DevW…evW1<\/a>  <b>3\.5%<\/b> 🔗/);
-  assert.match(t, /◎ 12\.3 SOL · 4 other tokens · ~\$2\.10K/);
-  assert.match(t, /\$WIF \$1\.20K · token \$400\.00/);
-  assert.match(t, /2\. .*<b>2\.2%<\/b>\n   ◎ 0\.50 SOL · no other tokens/);
-  assert.match(t, /3\. .*\n   holdings unavailable/);
+  assert.match(t, /<b>1\.<\/b> <a href="https:\/\/solscan\.io\/account\/DevWa11et[^"]*">DevW…evW1<\/a> · <b>3\.5%<\/b> 🔗\n├ ◎ 12\.3 SOL\n├ 1\.4K other tokens · ~\$14\.80K\n└ \$WIF \$1\.20K · token \$400\n/);
+  assert.match(t, /<b>2\.<\/b> .* · <b>2\.2%<\/b>\n├ ◎ 0\.50 SOL\n└ No other tokens\n/);
+  assert.match(t, /<b>3\.<\/b> .* · <b>1\.1%<\/b>\n└ Other tokens: unavailable/);
+  assert.doesNotMatch(t, /\$X /); // only the top two are listed
   assert.match(t, /🔗 = flagged as linked/);
   assert.match(buildHoldersText({ market: null, holders: [] }), /not available/);
   assert.doesNotMatch(buildHoldersText({ market: null, holders: holders.slice(1) }), /flagged as linked/);
 });
 
-test('buildLoreText: escaped description, trimmed, with first-seen time', () => {
-  const t = buildLoreText({ market: { symbol: 'BDOG' }, meta: { description: 'A <b>dog</b>   at the\nbarber & more.' }, detectedAt: NOW - 23 * 60_000, now: NOW });
-  assert.match(t, /Lore<\/b> · \$BDOG/);
-  assert.match(t, /<blockquote>A &lt;b&gt;dog&lt;\/b&gt; at the barber &amp; more\.<\/blockquote>/);
-  assert.match(t, /First seen 23m ago/);
-  const long = buildLoreText({ market: null, meta: { description: 'x'.repeat(2000) } });
-  assert.ok(long.length < 900);
+test('usdShort', () => {
+  assert.equal(usdShort(14_800), '$14.80K');
+  assert.equal(usdShort(377.3), '$377');
+  assert.equal(usdShort(0.004), '$0.00');
+  assert.equal(usdShort(NaN), 'n/a');
+});
+
+test('buildLoreText: AI story first, creator description as fallback, then a plain note', () => {
+  const ai = buildLoreText({ market: { symbol: 'BDOG' }, narrative: 'A <b>dog</b> at the barber & more.', meta: { description: 'creator text' }, detectedAt: NOW - 23 * 60_000, now: NOW });
+  assert.match(ai, /Lore<\/b> · \$BDOG/);
+  assert.match(ai, /<blockquote>A &lt;b&gt;dog&lt;\/b&gt; at the barber &amp; more\.<\/blockquote>/);
+  assert.match(ai, /Written by AI/);
+  assert.doesNotMatch(ai, /creator text/);
+  assert.match(ai, /First seen 23m ago/);
+  const own = buildLoreText({ market: null, meta: { description: 'A dog   at\nthe barber' } });
+  assert.match(own, /<blockquote>A dog at the barber<\/blockquote>/);
+  assert.match(own, /Written by the token's creator/);
+  const long = buildLoreText({ market: null, narrative: 'x'.repeat(2000) });
+  assert.ok(long.length < 1000);
   assert.match(long, /…<\/blockquote>/);
-  assert.match(buildLoreText({ market: null, meta: null }), /did not publish a description/);
+  assert.match(buildLoreText({ market: null, meta: null }), /No public story found/);
 });
 
 test('address helpers', () => {

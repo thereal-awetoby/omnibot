@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeHolderStats, computeFresh } from './security.js';
+import { computeHolderStats, computeFresh, findBundle } from './security.js';
 
 const acc = (address, amount) => ({ address, amount: String(amount) });
 
@@ -37,4 +37,14 @@ test('computeFresh sums supply held by new wallets and ignores unknown ages', ()
   assert.deepEqual(computeFresh(top, ages), { fresh1dPct: 10, fresh7dPct: 15, walletsChecked: 3 });
   assert.equal(computeFresh(top, new Map()), null);
   assert.equal(computeFresh([], new Map()), null);
+});
+
+test('findBundle groups holders who first got the token in the same block as the earliest buyer', () => {
+  const e = (owner, pct, firstSlot) => ({ owner, pct, firstSlot });
+  assert.deepEqual(findBundle([e('a', 3, 100), e('b', 2.5, 100), e('c', 1.2, 101), e('d', 4, 500)]), { count: 3, pct: 6.7, slot: 100 });
+  assert.deepEqual(findBundle([e('a', 3, 100), e('b', 2.5, 300), e('c', 1.2, 900)]), { count: 0, pct: 0, slot: null });
+  assert.equal(findBundle([e('a', 3, 100)]), null); // too little to tell
+  assert.equal(findBundle([e('a', 3, null), e('b', 2, undefined)]), null);
+  assert.equal(findBundle(null), null);
+  assert.deepEqual(findBundle([e('a', 1, 10), e('b', 1, 12)], 2), { count: 2, pct: 2, slot: 10 }); // wider window
 });

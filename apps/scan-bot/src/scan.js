@@ -109,7 +109,12 @@ const lab = (t) => `<code>${t.padEnd(LABEL_W)}</code>`;
 const row = (label, value) => `${lab(label)}${value}`;
 const val = (t) => `<b>${t}</b>`;
 const NA = '<i>n/a</i>';
-const tree = (rows) => rows.map((r, i) => `${i === rows.length - 1 ? '└' : '├'} ${r}`);
+// A row may span several lines ("\n"): the extra lines hang under it with a │ (or blank on the last row).
+const tree = (rows) => rows.map((r, i) => {
+  const last = i === rows.length - 1;
+  const [first, ...more] = r.split('\n');
+  return [`${last ? '└' : '├'} ${first}`, ...more.map((x) => `${last ? ' ' : '│'} ${x}`)].join('\n');
+});
 const pctText = (n, d = 1) => `${n.toFixed(d)}%`;
 
 // Short rows on purpose: each one fits on a phone screen without wrapping.
@@ -120,11 +125,12 @@ function statsBlock(m, now, intel = null) {
   const fdvDiffers = m.fdvUsd != null && m.marketCapUsd != null && Math.abs(m.fdvUsd - m.marketCapUsd) / Math.max(m.marketCapUsd, 1) > 0.01;
   rows.push(row('MCap', `${val(formatUsd(m.marketCapUsd))}${fdvDiffers ? `  ·  FDV ${formatUsd(m.fdvUsd)}` : ''}`));
   rows.push(row('Liq', val(formatUsd(m.liquidityUsd))));
+  // Volume: one window per line, aligned, so it reads as a small table.
   const vol = [];
-  if (m.volume?.h1 != null) vol.push(`1h ${formatUsd(m.volume.h1)}`);
-  if (m.volume?.h24 != null) vol.push(`24h ${formatUsd(m.volume.h24)}`);
-  if (!vol.length && m.volume24h != null) vol.push(`24h ${formatUsd(m.volume24h)}`);
-  if (vol.length) rows.push(row('Vol', vol.join(' · ')));
+  if (m.volume?.h1 != null) vol.push(['1h', m.volume.h1]);
+  if (m.volume?.h24 != null) vol.push(['24h', m.volume.h24]);
+  if (!vol.length && m.volume24h != null) vol.push(['24h', m.volume24h]);
+  if (vol.length) rows.push(vol.map(([w, v], i) => `${i === 0 ? lab('Vol') : lab('')}– ${w.padEnd(3)} ${formatUsd(v)}`).join('\n'));
   const h1 = m.change?.h1 ?? m.change1h;
   const t = m.txns?.h1;
   const hour = [];
@@ -156,6 +162,8 @@ function securityBlock(sec, intel, market) {
   if (top.length) rows.push(row('TH', top.map((h) => h.pct.toFixed(1)).join(' | ')));
 
   rows.push(row('Fresh', typeof intel?.fresh7dPct === 'number' ? `1D ${val(pctText(intel.fresh1dPct))} · 7D ${val(pctText(intel.fresh7dPct))}` : NA));
+  const b = intel?.bundle;
+  rows.push(row('Bundlers', !b ? NA : b.count === 0 ? 'none in top holders' : `${val(`${b.count} wallets`)} (${pctText(b.pct)}) · top holders`));
   if (market) rows.push(row('DEX Paid', market.hasProfile ? `${val('yes')} ✅` : 'no'));
   rows.push(row('Holders', typeof intel?.holdersTotal === 'number' ? val(Math.round(intel.holdersTotal).toLocaleString('en-US')) : NA));
   return ['<b>🛡 Security</b>', ...tree(rows)];

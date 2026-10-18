@@ -12,7 +12,7 @@ import {
 } from './scan.js';
 import { startIntel, gatherIntel } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens } from './chain.js';
-import { fetchPumpCreated } from './sources.js';
+import { fetchPumpCreated, fetchLoreAI } from './sources.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
 
 if (!process.env.SCAN_BOT_TOKEN) throw new Error('SCAN_BOT_TOKEN is not set');
@@ -97,14 +97,20 @@ async function withTyping(ctx, fn) {
 // Recently built cards, so the Top holders / Dev / Lore buttons answer instantly.
 const cardCache = new Map(); // mint -> { at, market, security, intel }
 const CARD_TTL_MS = 10 * 60_000;
-async function loadCard(mint) {
-  const pre = startIntel(mint); // RPC + RugCheck start now, at the same time as the market lookup
-  const market = await getMarket(mint);
-  const { security, intel } = await gatherIntel(mint, market, pre);
-  if (cardCache.size > 200) cardCache.delete(cardCache.keys().next().value);
-  const card = { at: Date.now(), market, security, intel };
-  cardCache.set(mint, card);
-  return card;
+const loading = new Map(); // mint -> Promise: simultaneous requests for one token share a single lookup
+function loadCard(mint) {
+  if (loading.has(mint)) return loading.get(mint);
+  const p = (async () => {
+    const pre = startIntel(mint); // RPC + RugCheck start now, at the same time as the market lookup
+    const market = await getMarket(mint);
+    const { security, intel } = await gatherIntel(mint, market, pre);
+    if (cardCache.size > 200) cardCache.delete(cardCache.keys().next().value);
+    const card = { at: Date.now(), market, security, intel };
+    cardCache.set(mint, card);
+    return card;
+  })().finally(() => loading.delete(mint));
+  loading.set(mint, p);
+  return p;
 }
 const cachedCard = async (mint) => {
   const c = cardCache.get(mint);
@@ -114,7 +120,9 @@ const cachedCard = async (mint) => {
 async function showToken(ctx, mint, { edit = false, record = false } = {}) {
   const group = isGroup(ctx);
   // One complete card, sent once it is ready. No placeholder message.
-  const { market, security, intel } = edit ? await loadCard(mint) : await withTyping(ctx, () => loadCard(mint));
+  // A card built in the last 20 seconds is reused (a Refresh always rebuilds it).
+  const fresh = !edit && cardCache.get(mint);
+  const { market, security, intel } = fresh && Date.now() - fresh.at < 20_000 ? fresh : edit ? await loadCard(mint) : await withTyping(ctx, () => loadCard(mint));
   const [watched, call] = await Promise.all([
     group ? false : isWatching(ctx.from.id, mint), // a group card is shared, so no personal ⭐ state there
     group ? callFor(ctx, mint, market, record).catch((e) => { console.error('call error:', e.message); return null; }) : null,
@@ -131,7 +139,7 @@ async function showToken(ctx, mint, { edit = false, record = false } = {}) {
 
 // ---- detail views: Top holders, Dev, Lore. Each answers as a new message under the card. ----
 const detailText = new Map(); // `${kind}:${mint}` -> { at, text }
-const DETAIL_TTL_MS = 2 * 60_000;
+const DETAIL_TTL_MS = 5 * 60_000;
 const lastDetailAt = new Map(); // userId -> timestamp
 async function showDetail(ctx, kind, mint, build) {
   await ctx.answerCallbackQuery().catch(() => {});
@@ -175,10 +183,10 @@ async function buildDev(mint) {
   const creator = c.intel.creator;
   if (!creator) return buildDevText({ market: c.market, creator: null });
   const [solBalance, pumpList] = await Promise.all([getSolBalance(creator), fetchPumpCreated(creator)]);
-  let launches = pumpList;
-  let source = pumpList ? 'pump' : null;
+  let launches = pumpList?.length ? pumpList : null;
+  let source = launches ? 'pump' : null;
   let scannedTx = 0;
-  if (!pumpList) {
+  if (!launches) { // pump.fun gave nothing: read the wallet's own transactions instead
     try { const r = await scanCreatedTokens(creator); launches = r.launches; scannedTx = r.scannedTx; source = 'rpc'; }
     catch (e) { console.error('dev scan error:', e.message); launches = null; }
   }
@@ -192,7 +200,17 @@ async function buildDev(mint) {
 
 const buildLore = async (mint) => {
   const c = await cachedCard(mint);
-  return buildLoreText({ market: c.market, meta: c.intel.meta, detectedAt: c.intel.detectedAt });
+  const m = c.market;
+  const x = (m?.socials ?? []).find((s) => ['twitter', 'x'].includes(String(s.type).toLowerCase()))?.url ?? null;
+  const narrative = await fetchLoreAI(
+    {
+      mint, name: m?.name ?? c.intel.meta?.name ?? null, symbol: m?.symbol ?? c.intel.meta?.symbol ?? null,
+      description: c.intel.meta?.description ?? null, xUrl: x,
+      ageText: typeof m?.createdAt === 'number' ? `${Math.max(1, Math.round((Date.now() - m.createdAt) / 3_600_000))}h` : null,
+    },
+    { apiKey: process.env.ANTHROPIC_API_KEY, model: process.env.LORE_MODEL || undefined, dailyMax: Number(process.env.LORE_DAILY_MAX) || undefined }
+  );
+  return buildLoreText({ market: m, narrative, meta: c.intel.meta, detectedAt: c.intel.detectedAt });
 };
 
 async function showTrending(ctx, { edit = false } = {}) {

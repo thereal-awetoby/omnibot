@@ -26,6 +26,9 @@ export function getSecurityRaw(mint) {
 
 async function loadRaw(mint) {
   const mintKey = new PublicKey(mint);
+  // The mint and its largest accounts do not depend on each other, so ask for both at once.
+  const largestReq = connection.getTokenLargestAccounts(mintKey);
+  largestReq.catch(() => {}); // handled below; avoids a stray rejection if the mint turns out unreadable
   const info = await connection.getParsedAccountInfo(mintKey);
   const parsed = info.value?.data?.parsed;
   if (parsed?.type !== 'mint') return null;
@@ -38,7 +41,7 @@ async function loadRaw(mint) {
     owners: null,
   };
   try {
-    const largest = (await connection.getTokenLargestAccounts(mintKey)).value.map((a) => ({ address: a.address.toBase58(), amount: a.amount }));
+    const largest = (await largestReq).value.map((a) => ({ address: a.address.toBase58(), amount: a.amount }));
     const accs = await connection.getMultipleParsedAccounts(largest.map((a) => new PublicKey(a.address)));
     const owners = new Map();
     accs.value.forEach((acc, i) => { const o = acc?.data?.parsed?.info?.owner; if (o) owners.set(largest[i].address, o); });
@@ -170,18 +173,42 @@ export async function getSolBalance(owner) {
 
 // Tokens a wallet created, found by reading its most recent transactions. Returns { launches, scannedTx } where
 // launches = [{ mint, createdAt (ms) }]. Not the full history: only the last `limit` transactions are read.
-export async function scanCreatedTokens(creator, { limit = 40, deadlineMs = 8_000 } = {}) {
-  const sigs = (await connection.getSignaturesForAddress(new PublicKey(creator), { limit })).filter((s) => !s.err);
+export async function scanCreatedTokens(creator, { limit = 150, deadlineMs = 12_000 } = {}) {
+  const sigs = (await connection.getSignaturesForAddress(new PublicKey(creator), { limit })).filter((s) => !s.err).map((s) => s.signature);
   const launches = [];
   let scanned = 0;
-  await pool(sigs, 4, deadlineMs, async (s) => {
-    try {
-      const tx = await connection.getParsedTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+  const chunks = [];
+  for (let i = 0; i < sigs.length; i += 25) chunks.push(sigs.slice(i, i + 25));
+  const opts = { maxSupportedTransactionVersion: 0, commitment: 'confirmed' };
+  await pool(chunks, 3, deadlineMs, async (chunk) => {
+    let txs;
+    try { txs = await connection.getParsedTransactions(chunk, opts); } // one batched request
+    catch { txs = await Promise.all(chunk.map((sig) => connection.getParsedTransaction(sig, opts).catch(() => null))); } // RPC refuses batches
+    for (const tx of txs) {
       scanned += 1;
-      for (const mint of createdMintsFromTx(tx, creator)) launches.push({ mint, createdAt: tx.blockTime ? tx.blockTime * 1000 : null });
-    } catch (e) {
-      console.error('parsed tx error:', e.message);
+      for (const mint of createdMintsFromTx(tx, creator)) launches.push({ mint, createdAt: tx?.blockTime ? tx.blockTime * 1000 : null });
     }
   });
   return { launches: [...launches], scannedTx: scanned };
+}
+
+// For each top holder: the slot in which their token account first received the token (null if unknown).
+// Used to spot wallets that all got in during the same block. `top` = [{ owner, pct }].
+export async function getEarlyBuyers(raw, top, creator = null, { deadlineMs = 3_000, max = 10 } = {}) {
+  if (!raw?.largest || !raw?.owners || !top?.length) return null;
+  const accountOf = new Map();
+  for (const a of raw.largest) { const o = raw.owners.get(a.address); if (o && !accountOf.has(o)) accountOf.set(o, a.address); }
+  const entries = [];
+  const todo = top.filter((h) => h.owner !== creator && accountOf.has(h.owner)).slice(0, max);
+  await pool(todo, 5, deadlineMs, async (h) => {
+    try {
+      const sigs = await connection.getSignaturesForAddress(new PublicKey(accountOf.get(h.owner)), { limit: 1000 });
+      const ok = sigs.filter((s) => !s.err);
+      // only trust the oldest entry when the whole history fit in one page
+      if (sigs.length < 1000 && ok.length) entries.push({ owner: h.owner, pct: h.pct, firstSlot: ok.at(-1).slot });
+    } catch (e) {
+      console.error('early buyer error:', e.message);
+    }
+  });
+  return [...entries];
 }

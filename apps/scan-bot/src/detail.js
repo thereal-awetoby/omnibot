@@ -33,9 +33,11 @@ export function createdMintsFromTx(tx, creator) {
 }
 
 // launches: [{ mint, createdAt }]; markets: Map(mint -> market from DexScreener). Newest first.
+// The token being scanned stays in the list, flagged `current`.
 export function mergeLaunches(launches, markets, currentMint) {
+  const seen = new Set();
   return launches
-    .filter((l) => l.mint !== currentMint)
+    .filter((l) => (seen.has(l.mint) ? false : seen.add(l.mint)))
     .map((l) => {
       const m = markets.get(l.mint);
       return {
@@ -43,46 +45,52 @@ export function mergeLaunches(launches, markets, currentMint) {
         symbol: m?.symbol ?? l.symbol ?? null,
         createdAt: l.createdAt ?? m?.createdAt ?? null,
         marketCapUsd: m?.marketCapUsd ?? null,
+        current: l.mint === currentMint,
       };
     })
     .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
 }
 
-// info: { creator, devPct, solBalance, launches: [...] | null, source: 'pump' | 'rpc' | null, scannedTx, total }
+// Compact dollars for lists: $14.8K, $377, $0.12
+export function usdShort(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return 'n/a';
+  if (n >= 1000) return formatUsd(n);
+  return n >= 1 ? `$${Math.round(n)}` : `$${n.toFixed(2)}`;
+}
+
+const launchLine = (l, now) => {
+  const age = (l.createdAt ? formatDuration(now - l.createdAt) ?? '' : '').padEnd(4);
+  const label = l.symbol ? esc(l.symbol) : short(l.mint);
+  return `<code>${age}</code> <b>${label}</b> @ ${l.marketCapUsd != null ? usdShort(l.marketCapUsd) : 'n/a'}${l.current ? '  ◀ this token' : ''}`;
+};
+
+// launches: result of mergeLaunches (or null when they could not be loaded).
 export function buildDevText({ market, creator, devPct, solBalance, launches, source, scannedTx, now = Date.now() }) {
-  const lines = [`👨‍💻 <b>Dev</b> · ${name(market)}`];
-  if (!creator) {
-    lines.push('', 'The dev wallet for this token is not known yet. Try again in a minute.');
-    return lines.join('\n');
+  if (!creator) return `👨‍💻 <b>Dev</b> · ${name(market)}\n\nThe dev wallet for this token is not known yet. Try again in a minute.`;
+  const head = [`👨‍💻 ${walletLink(creator)}`];
+  const facts = [];
+  const dated = (launches ?? []).map((l) => l.createdAt).filter(Boolean);
+  if (launches && launches.length >= 2 && dated.length >= 2) {
+    const days = Math.max(1, (now - Math.min(...dated)) / 86_400_000);
+    facts.push(`Deploys/day: <b>${(launches.length / days).toFixed(launches.length / days >= 10 ? 0 : 1)}</b>`);
   }
-  const bits = [walletLink(creator)];
-  if (typeof solBalance === 'number') bits.push(`◎ ${solBalance.toFixed(solBalance >= 10 ? 1 : 2)} SOL`);
-  lines.push(bits.join('  ·  '));
-  if (typeof devPct === 'number') lines.push(`Holds <b>${devPct.toFixed(devPct % 1 ? 1 : 0)}%</b> of this token`);
-  lines.push('');
+  if (typeof solBalance === 'number') facts.push(`Balance: ◎ ${solBalance.toFixed(solBalance >= 10 ? 1 : 2)} SOL`);
+  if (typeof devPct === 'number') facts.push(`Holds <b>${devPct.toFixed(devPct % 1 ? 1 : 0)}%</b> of ${market?.symbol ? `$${esc(market.symbol)}` : 'this token'}`);
+  facts.forEach((f, i) => head.push(`${i === facts.length - 1 ? '└' : '├'} ${f}`));
+  const lines = [...head, ''];
 
   if (!launches) {
-    lines.push('🚀 <b>Other launches</b>', 'Could not load this wallet\'s launches right now. Tap Dev again in a moment.');
-    return lines.join('\n');
-  }
-  if (!launches.length) {
-    lines.push('🚀 <b>Other launches</b>', 'None found from this wallet.');
+    lines.push('🔄 <b>Recent launches</b>', 'Could not load this wallet\'s launches right now. Tap Dev again in a moment.');
+  } else if (!launches.length) {
+    lines.push('🔄 <b>Recent launches</b>', 'None found from this wallet.');
   } else {
-    const over = launches.filter((l) => (l.marketCapUsd ?? 0) >= 100_000).length;
-    const first = launches.map((l) => l.createdAt).filter(Boolean).sort((a, b) => a - b)[0];
-    const firstAgo = first ? formatDuration(now - first) : null;
-    const head = [`<b>${launches.length}</b> found`];
-    if (over) head.push(`${over} now over $100K`);
-    if (firstAgo) head.push(`earliest ${firstAgo} ago`);
-    lines.push('🚀 <b>Other launches</b>', head.join(' · '), '');
-    launches.slice(0, 8).forEach((l, i) => {
-      const age = l.createdAt ? formatDuration(now - l.createdAt) : null;
-      const label = l.symbol ? `$${esc(l.symbol)}` : `<code>${short(l.mint)}</code>`;
-      lines.push(`${i + 1}. ${label} · ${l.marketCapUsd != null ? formatUsd(l.marketCapUsd) : 'no market data'}${age ? ` · ${age} ago` : ''}`);
-    });
-    if (launches.length > 8) lines.push(`…and ${launches.length - 8} more`);
+    const n = launches.length;
+    lines.push(`🔄 <b>Recent launches</b> [${n}${source === 'pump' && n >= 50 ? '+' : ''}]`, `<blockquote>${launches.slice(0, 5).map((l) => launchLine(l, now)).join('\n')}</blockquote>`);
+    const top = launches.filter((l) => l.marketCapUsd != null).sort((a, b) => b.marketCapUsd - a.marketCapUsd).slice(0, 5);
+    if (top.length > 1) lines.push('', '🚀 <b>Top launches</b> (market cap now)', `<blockquote>${top.map((l) => launchLine(l, now)).join('\n')}</blockquote>`);
   }
-  if (source === 'rpc') lines.push('', `<i>Based on this wallet's last ${scannedTx} transactions.</i>`);
+  lines.push('', `<code>${creator}</code>`);
+  if (source === 'rpc') lines.push(`<i>Based on this wallet's last ${scannedTx} transactions.</i>`);
   return lines.join('\n');
 }
 
@@ -104,6 +112,7 @@ export function valueHoldings(tokens, prices, excludeMint) {
 }
 
 // holders: [{ owner, pct, linked, sol (number|null), holdings (valueHoldings result | null) }]
+// One small block per wallet: the share it holds on top, its details underneath.
 export function buildHoldersText({ market, holders }) {
   const lines = [`👥 <b>Top holders</b> · ${name(market)}`, '<i>Pool and bonding curve are not counted.</i>', ''];
   if (!holders.length) {
@@ -111,31 +120,35 @@ export function buildHoldersText({ market, holders }) {
     return lines.join('\n');
   }
   holders.forEach((h, i) => {
-    lines.push(`${i + 1}. ${walletLink(h.owner)}  <b>${h.pct.toFixed(1)}%</b>${h.linked ? ' 🔗' : ''}`);
-    const bits = [];
-    if (typeof h.sol === 'number') bits.push(`◎ ${h.sol.toFixed(h.sol >= 10 ? 1 : 2)} SOL`);
-    if (h.holdings) {
-      if (h.holdings.count) bits.push(`${formatCount(h.holdings.count)} other token${h.holdings.count === 1 ? '' : 's'}${h.holdings.totalUsd > 0 ? ` · ~${formatUsd(h.holdings.totalUsd)}` : ''}`);
-      else bits.push('no other tokens');
-    } else bits.push('holdings unavailable');
-    lines.push(`   ${bits.join(' · ')}`);
-    if (h.holdings?.top.length) lines.push(`   ${h.holdings.top.map((t) => `${t.symbol ? `$${esc(t.symbol)}` : 'token'} ${formatUsd(t.usd)}`).join(' · ')}`);
+    const rows = [];
+    if (typeof h.sol === 'number') rows.push(`◎ ${h.sol.toFixed(h.sol >= 10 ? 1 : 2)} SOL`);
+    if (!h.holdings) rows.push('Other tokens: unavailable');
+    else if (!h.holdings.count) rows.push('No other tokens');
+    else {
+      rows.push(`${formatCount(h.holdings.count)} other token${h.holdings.count === 1 ? '' : 's'}${h.holdings.totalUsd > 0 ? ` · ~${usdShort(h.holdings.totalUsd)}` : ''}`);
+      if (h.holdings.top.length) rows.push(h.holdings.top.slice(0, 2).map((t) => `${t.symbol ? `$${esc(t.symbol)}` : 'token'} ${usdShort(t.usd)}`).join(' · '));
+    }
+    lines.push(`<b>${i + 1}.</b> ${walletLink(h.owner)} · <b>${h.pct.toFixed(1)}%</b>${h.linked ? ' 🔗' : ''}`);
+    rows.forEach((r, k) => lines.push(`${k === rows.length - 1 ? '└' : '├'} ${r}`));
+    lines.push('');
   });
-  if (holders.some((h) => h.linked)) lines.push('', '<i>🔗 = flagged as linked to other wallets by RugCheck.</i>');
-  return lines.join('\n');
+  if (holders.some((h) => h.linked)) lines.push('<i>🔗 = flagged as linked to other wallets by RugCheck.</i>');
+  return lines.join('\n').trimEnd();
 }
 
 // ---------- Lore ----------
 
-// meta: { name, symbol, description } as the token's creator published it.
-export function buildLoreText({ market, meta, now = Date.now(), detectedAt = null }) {
+// narrative: AI-written story (or null). meta: { name, symbol, description } as the creator published it.
+export function buildLoreText({ market, narrative = null, meta, now = Date.now(), detectedAt = null }) {
   const lines = [`📖 <b>Lore</b> · ${name(market)}`, ''];
+  const clip = (t, n) => (t.length > n ? `${t.slice(0, n).trimEnd()}…` : t);
   const d = meta?.description ? meta.description.replace(/\s+/g, ' ').trim() : '';
-  if (d) {
-    const text = d.length > 700 ? `${d.slice(0, 700).trimEnd()}…` : d;
-    lines.push(`<blockquote>${esc(text)}</blockquote>`, '<i>Written by the token\'s creator. Accuracy not guaranteed.</i>');
+  if (narrative) {
+    lines.push(`<blockquote>${esc(clip(narrative.replace(/\s+/g, ' ').trim(), 800))}</blockquote>`, '<i>Written by AI from a web search. Accuracy not guaranteed.</i>');
+  } else if (d) {
+    lines.push(`<blockquote>${esc(clip(d, 700))}</blockquote>`, '<i>Written by the token\'s creator. Accuracy not guaranteed.</i>');
   } else {
-    lines.push('The creator did not publish a description for this token.');
+    lines.push('No public story found for this token yet.');
   }
   if (detectedAt) lines.push('', `First seen ${formatDuration(now - detectedAt) ?? 'just now'} ago`);
   return lines.join('\n');

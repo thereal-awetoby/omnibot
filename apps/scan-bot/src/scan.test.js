@@ -137,7 +137,7 @@ test('formatPriceCard: 4 significant digits and subscript zeros for tiny prices'
 });
 
 const fullIntel = {
-  lpLockedPct: 100, devPct: 0, fresh1dPct: 6.1, fresh7dPct: 13, walletsChecked: 9, holdersTotal: 1812,
+  bundle: { count: 3, pct: 9.4, slot: 5 }, lpLockedPct: 100, devPct: 0, fresh1dPct: 6.1, fresh7dPct: 13, walletsChecked: 9, holdersTotal: 1812,
   top10Pct: 31.2, top1Pct: 11, top: [{ owner: 'a', pct: 11 }, { owner: 'b', pct: 6.2 }, { owner: 'c', pct: 5 }],
   ath: { athMcapUsd: 1_060_000, fromAthPct: -4, athAt: NOW - 4 * 60_000 },
 };
@@ -151,7 +151,7 @@ test('full card: compact rows, facts only, escaped text', () => {
   assert.match(card, /<code>Price    <\/code><b>\$0\.5<\/b>  \(\+2283%\)/);
   assert.match(card, /<code>MCap     <\/code><b>\$2\.00M<\/b>  ·  FDV \$2\.50M/);
   assert.match(card, /<code>Liq      <\/code><b>\$50\.00K<\/b>\n/);
-  assert.match(card, /<code>Vol      <\/code>1h \$20\.00K · 24h \$400\.00K\n/);
+  assert.match(card, /├ <code>Vol      <\/code>– 1h  \$20\.00K\n│ <code>         <\/code>– 24h \$400\.00K\n/);
   assert.match(card, /<code>1H       <\/code>\+43\.9% · 🟢 4\.1K · 🔴 2\.9K\n/);
   assert.match(card, /<code>ATH      <\/code><b>\$1\.06M<\/b>  \(-4\.0%\) · 4m\n/);
   assert.match(card, /Mint ✅ off · Freeze ✅ off/);
@@ -161,6 +161,7 @@ test('full card: compact rows, facts only, escaped text', () => {
   assert.match(card, /<code>TH       <\/code>11\.0 \| 6\.2 \| 5\.0/);
   assert.match(card, /1D <b>6\.1%<\/b> · 7D <b>13\.0%<\/b>\n/);
   assert.match(card, /<code>DEX Paid <\/code><b>yes<\/b> ✅/);
+  assert.match(card, /<code>Bundlers <\/code><b>3 wallets<\/b> \(9\.4%\) · top holders/);
   assert.match(card, /<b>1,812<\/b>/);
   assert.match(card, /🔗 <b>Social<\/b>/);
   // tree glyphs: the last row of each block closes with └
@@ -181,7 +182,7 @@ test('risky authorities are shown as plain facts', () => {
 
 test('card keeps the same rows when data is missing (n/a instead of vanishing)', () => {
   const card = buildScanCard({ mint: MINT, market, security: null, intel: null, now: NOW });
-  for (const label of ['Auth', 'LP', 'Dev', 'Top 10', 'Fresh', 'Holders']) assert.match(card, new RegExp(`<code>${label.padEnd(9)}</code><i>n/a</i>`), label);
+  for (const label of ['Auth', 'LP', 'Dev', 'Top 10', 'Fresh', 'Bundlers', 'Holders']) assert.match(card, new RegExp(`<code>${label.padEnd(9)}</code><i>n/a</i>`), label);
   assert.match(card, /<code>DEX Paid <\/code><b>yes<\/b>/);
   assert.match(buildScanCard({ mint: MINT, market: { ...market, hasProfile: false }, now: NOW }), /<code>DEX Paid <\/code>no/);
 });
@@ -189,17 +190,17 @@ test('card keeps the same rows when data is missing (n/a instead of vanishing)',
 test('stats rows only appear when there is data, and stay short', () => {
   const lean = { symbol: 'X', priceUsd: 1, marketCapUsd: 1000, liquidityUsd: 500, volume24h: 12 };
   const card = buildScanCard({ mint: MINT, market: lean, now: NOW });
-  assert.match(card, /<code>Vol      <\/code>24h \$12\.00\n/);
+  assert.match(card, /<code>Vol      <\/code>– 24h \$12\.00\n/);
   assert.doesNotMatch(card, /<code>1H /);
   assert.doesNotMatch(card, /<code>ATH /);
-  for (const line of card.split('\n').filter((l) => /^[├└] <code>/.test(l))) {
+  for (const line of card.split('\n').filter((l) => /^[├└│] <code>/.test(l))) {
     assert.ok(line.replace(/<[^>]+>/g, '').length <= 44, line); // fits a phone screen without wrapping
   }
 });
 
 test('the full card rows all fit a phone screen', () => {
   const card = buildScanCard({ mint: MINT, market, security, intel: fullIntel, now: NOW });
-  for (const line of card.split('\n').filter((l) => /^[├└] <code>/.test(l))) {
+  for (const line of card.split('\n').filter((l) => /^[├└│] <code>/.test(l))) {
     assert.ok(line.replace(/<[^>]+>/g, '').length <= 44, line);
   }
 });
@@ -209,4 +210,11 @@ test('RugCheck holders fill in when the RPC is busy', () => {
   const card = buildScanCard({ mint: MINT, market, security: null, intel, now: NOW });
   assert.match(card, /<b>62\.0%<\/b>  ·  largest 30\.0%/);
   assert.match(buildScanCard({ mint: MINT, market: null, now: NOW }), /No market data/);
+});
+
+test('bundlers row: none, unknown and counted', () => {
+  const none = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, bundle: { count: 0, pct: 0, slot: null } }, now: NOW });
+  assert.match(none, /<code>Bundlers <\/code>none in top holders/);
+  const unknown = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, bundle: null }, now: NOW });
+  assert.match(unknown, /<code>Bundlers <\/code><i>n\/a<\/i>/);
 });
