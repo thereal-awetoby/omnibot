@@ -149,9 +149,15 @@ test('buildLoreText: honest labels for searched vs listing-only AI, and news hea
   const searched = buildLoreText({ market: { symbol: 'BDOG' }, narrative: 'A dog at the barber.', grounded: true, now: NOW2 });
   assert.match(searched, /Written by AI from a web search/);
   const listing = buildLoreText({ market: { symbol: 'BDOG' }, narrative: 'A dog at the barber.', grounded: false, now: NOW2 });
-  assert.match(listing, /listing only, no web search/);
+  assert.match(listing, /own listing and linked post, no web search/);
   const news = buildLoreText({ market: { symbol: 'BDOG' }, meta: null, now: NOW2, headlines: [{ title: 'Barber Dog <memecoin> goes viral', url: 'https://n.com/a?x=1&y=2', source: 'CoinDesk', at: NOW2 - 3 * 3_600_000 }] });
   assert.match(news, /In the news/);
   assert.match(news, /<a href="https:\/\/n\.com\/a\?x=1&amp;y=2">Barber Dog &lt;memecoin&gt; goes viral<\/a> <i>\(CoinDesk, 3h ago\)<\/i>/);
   assert.doesNotMatch(news, /did not publish/); // headlines count as something to show
+});
+
+test('buildLoreText: debug note explains why there is no AI summary (owner only, escaped)', () => {
+  const t = buildLoreText({ market: null, meta: null, debugNote: 'Gemini returned HTTP 403: <API key not valid>' });
+  assert.match(t, /AI summary unavailable: Gemini returned HTTP 403: &lt;API key not valid&gt;/);
+  assert.doesNotMatch(buildLoreText({ market: null, meta: null }), /unavailable/);
 });

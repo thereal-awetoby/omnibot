@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, fetchLoreStory, parseNewsRss, fetchNews, parseSearch, searchTokens, parseDexPaid, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
+import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, fetchLoreStory, pickGeminiModels, getLastLoreError, parseTweetOembed, fetchTweetText, fetchImageInline, parseNewsRss, fetchNews, parseSearch, searchTokens, parseDexPaid, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
 
 const json = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
@@ -310,4 +310,110 @@ test('fetchNews builds a quoted search, caches, and returns [] on errors', async
   assert.equal(n, 1);
   assert.deepEqual(await fetchNews({ name: 'Zed Zed Zed' }, async () => { throw new Error('offline'); }, now), []);
   assert.deepEqual(await fetchNews({ name: 'ab' }, impl, now), []);
+});
+
+// ---- model discovery, thinking models, error text, quota refund ----
+const modelList = (...names) => ({ ok: true, status: 200, json: async () => ({ models: names.map((n) => ({ name: `models/${n}`, supportedGenerationMethods: ['generateContent'] })) }) });
+
+test('pickGeminiModels: stable Flash first (newest version), then preview, then lite; special models skipped', () => {
+  const models = [
+    { name: 'models/gemini-2.5-pro', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3-flash-preview', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.5-flash', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-2.5-flash-lite', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-2.5-flash-image', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-2.5-flash-preview-tts', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-live-2.5-flash', supportedGenerationMethods: ['bidiGenerateContent'] },
+    { name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] },
+  ];
+  assert.deepEqual(pickGeminiModels(models), ['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-3-flash-preview']);
+  assert.deepEqual(pickGeminiModels(null), []);
+});
+
+test('fetchLoreStory (Gemini): with no model given it asks Google which models exist, then uses the best one', async () => {
+  const urls = [];
+  const impl = async (u) => { urls.push(u); return u.includes('/models?') ? modelList('gemini-9-flash', 'gemini-9-pro') : gem('Discovered story.'); };
+  const r = await fetchLoreStory({ mint: 'D1', ...FACTS }, { geminiKey: 'GK' }, impl);
+  assert.equal(r.text, 'Discovered story.');
+  assert.match(urls[0], /\/v1beta\/models\?pageSize/);
+  assert.match(urls[1], /models\/gemini-9-flash:generateContent/);
+});
+
+test('fetchLoreStory (Gemini): sends the post text and the logo, uses a big output budget, ignores "thought" parts', async () => {
+  let body;
+  const impl = async (u, o) => {
+    body = JSON.parse(o.body);
+    return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: 'secret reasoning', thought: true }, { text: 'The real story.' }] }, groundingMetadata: { webSearchQueries: ['q'] } }] }) };
+  };
+  const r = await fetchLoreStory({ mint: 'D2', ...FACTS, postText: 'sitting dog at the barber', imageUrl: 'https://img/x.png' }, { geminiKey: 'GK', geminiModels: ['m'] }, async (u, o) => {
+    if (u === 'https://img/x.png') return { ok: true, status: 200, headers: { get: () => 'image/png' }, arrayBuffer: async () => Buffer.from('PNGDATA') };
+    return impl(u, o);
+  });
+  assert.equal(r.text, 'The real story.');
+  assert.match(body.contents[0].parts[0].text, /sitting dog at the barber/);
+  assert.equal(body.contents[0].parts[1].inlineData.mimeType, 'image/png');
+  assert.equal(body.contents[0].parts[1].inlineData.data, Buffer.from('PNGDATA').toString('base64'));
+  assert.ok(body.generationConfig.maxOutputTokens >= 1500);
+});
+
+test('fetchLoreStory (Gemini): an empty searched answer is retried without search; errors carry Google\'s reason but never the key', async () => {
+  const empty = { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [] }, finishReason: 'MAX_TOKENS' }] }) };
+  const calls = [];
+  const r = await fetchLoreStory({ mint: 'D3', ...FACTS }, { geminiKey: 'SECRETKEY', geminiModels: ['m'] }, async (u, o) => { const b = JSON.parse(o.body); calls.push(Boolean(b.tools)); return b.tools ? empty : gem('Second try works.', false); });
+  assert.deepEqual(calls, [true, false]);
+  assert.equal(r.text, 'Second try works.');
+  const bad = async () => ({ ok: false, status: 403, json: async () => ({ error: { status: 'PERMISSION_DENIED', message: 'API key not valid. Please pass a valid API key.' } }) });
+  assert.equal(await fetchLoreStory({ mint: 'D4', ...FACTS }, { geminiKey: 'SECRETKEY', geminiModels: ['m'] }, bad), null);
+  assert.match(getLastLoreError(), /HTTP 403: PERMISSION_DENIED API key not valid/);
+  assert.doesNotMatch(getLastLoreError(), /SECRETKEY/);
+});
+
+test('fetchLoreStory: failed stories do not use up the daily allowance, but the limit message is clear', async () => {
+  const opts = { geminiKey: 'GK', geminiModels: ['m'], perUserMax: 2, userId: 'u-refund' };
+  const fail = async () => httpErr(500);
+  for (let i = 0; i < 4; i++) assert.equal(await fetchLoreStory({ mint: `F${i}`, ...FACTS }, opts, fail), null);
+  assert.ok((await fetchLoreStory({ mint: 'F9', ...FACTS }, opts, async () => gem('works'))).text); // still allowed: failures were refunded
+  assert.ok((await fetchLoreStory({ mint: 'F10', ...FACTS }, opts, async () => gem('works too'))).text);
+  assert.equal(await fetchLoreStory({ mint: 'F11', ...FACTS }, opts, async () => gem('over the limit')), null);
+  assert.match(getLastLoreError(), /already asked for 2 new stories today/);
+});
+
+// ---- linked X post and logo ----
+test('parseTweetOembed and fetchTweetText read the post text from X oEmbed', async () => {
+  const body = { html: '<blockquote class="twitter-tweet"><p lang="en" dir="ltr">Dog sits at the barber &amp; waits<br>so patient <a href="https://t.co/x">https://t.co/x</a> <a href="https://t.co/y">pic.twitter.com/abc</a></p>&mdash; Solsuke (@solsuke)</blockquote>' };
+  assert.equal(parseTweetOembed(body), 'Dog sits at the barber & waits so patient https://t.co/x');
+  assert.equal(parseTweetOembed({ html: '<div>no paragraph</div>' }), null);
+  let url;
+  const t = await fetchTweetText('https://x.com/solsuke/status/12345?s=20', async (u) => { url = u; return { ok: true, status: 200, json: async () => body }; });
+  assert.match(t, /Dog sits at the barber/);
+  assert.match(url, /oembed\?omit_script=1&url=https%3A%2F%2Ftwitter\.com%2Fsolsuke%2Fstatus%2F12345$/);
+  assert.equal(await fetchTweetText('https://x.com/solsuke', async () => { throw new Error('must not call'); }), null); // a profile link has no single post
+  assert.equal(await fetchTweetText('https://x.com/a/status/999', async () => ({ ok: false, status: 404, json: async () => ({}) })), null);
+});
+
+test('fetchImageInline only accepts small https images', async () => {
+  const img = (type, size) => async () => ({ ok: true, status: 200, headers: { get: () => type }, arrayBuffer: async () => Buffer.alloc(size, 1) });
+  assert.equal((await fetchImageInline('https://i/x.png', img('image/png', 100))).mimeType, 'image/png');
+  assert.equal(await fetchImageInline('https://i/x.png', img('text/html', 100)), null);
+  assert.equal(await fetchImageInline('https://i/x.png', img('image/png', 2_000_000)), null);
+  assert.equal(await fetchImageInline('http://i/x.png', img('image/png', 100)), null);
+  assert.equal(await fetchImageInline('https://i/x.png', async () => { throw new Error('offline'); }), null);
+});
+
+test('fetchLoreStory (Gemini): a 429 on the searched call falls back to a plain call; a 429 on a model moves to the next model', async () => {
+  const calls = [];
+  const impl = async (u, o) => {
+    const b = JSON.parse(o.body); const model = /models\/([^:]+):/.exec(u)[1];
+    calls.push(`${model}:${b.tools ? 'search' : 'plain'}`);
+    if (model === 'm1') return httpErr(429);                 // m1 has no quota left at all
+    return b.tools ? httpErr(429) : gem('Plain answer after search quota ran out.', false);
+  };
+  const r = await fetchLoreStory({ mint: 'Q1', ...FACTS }, { geminiKey: 'GK', geminiModels: ['m1', 'm2'] }, impl);
+  assert.deepEqual(calls, ['m1:search', 'm1:plain', 'm2:search', 'm2:plain']);
+  assert.equal(r.text, 'Plain answer after search quota ran out.');
+  assert.equal(r.grounded, false);
+  // every model out of quota: nothing is written and the reason is kept for LORE_DEBUG
+  assert.equal(await fetchLoreStory({ mint: 'Q2', ...FACTS }, { geminiKey: 'GK', geminiModels: ['m1'] }, async () => httpErr(429)), null);
+  assert.match(getLastLoreError(), /HTTP 429/);
 });

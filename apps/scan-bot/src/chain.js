@@ -3,6 +3,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { computeHolderStats, computeFresh } from './security.js';
 import { createdMintsFromTx } from './detail.js';
 import { createRpcPool, parseRpcUrls } from './rpcpool.js';
+import { parseDasAccounts, funderFromTx } from './bubblemap.js';
 
 // Every RPC call goes through a small pool: each endpoint gets its own per-second limit (RPC_MAX_RPS, default 8),
 // and a call that is refused with 429 is retried at once on the next endpoint. Put two or more free RPC URLs in
@@ -241,4 +242,67 @@ export async function getEarlyBuyers(raw, top, creator = null, { deadlineMs = 3_
     }
   });
   return [...entries];
+}
+
+// The pump.fun bonding-curve wallet of a token (it holds the unsold supply, so it is not a "holder").
+export const bondingCurveOf = (mint) => PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), new PublicKey(mint).toBuffer()], PUMP_PROGRAM_ID)[0].toBase58();
+
+// Every holder of a token in one go, using Helius' getTokenAccounts (works on the free plan, needs a Helius URL in
+// RPC_URL / RPC_URLS). Returns { rows: [{ owner, amount }], complete } or null when unavailable.
+// `complete` is false when the token has more accounts than we are willing to page through.
+export async function getHolderAccountsDas(mint, { maxPages = 3, pageSize = 1000 } = {}) {
+  const rows = [];
+  try {
+    for (let page = 1; page <= maxPages; page++) {
+      const res = await rpcPool.fetchWhere((u) => /helius/i.test(u), {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'omni', method: 'getTokenAccounts', params: { mint, page, limit: pageSize, options: { showZeroBalance: false } } }),
+      });
+      if (!res.ok) return null;
+      const parsed = parseDasAccounts(await res.json());
+      if (!parsed) return null;
+      rows.push(...parsed.accounts);
+      if (parsed.accounts.length < pageSize) return { rows, complete: true };
+    }
+    return { rows, complete: false };
+  } catch (e) {
+    console.error('holder list error:', e.message);
+    return null;
+  }
+}
+
+// Who first funded this wallet? Read from the wallet's oldest transaction. Wallets with a long history are skipped
+// (their first transaction is far back and costs many calls). Result is remembered, so repeat maps are quick.
+const funderCache = new Map(); // owner -> funder address | null
+export async function getFunder(owner) {
+  if (funderCache.has(owner)) return funderCache.get(owner);
+  try {
+    const sigs = await connection.getSignaturesForAddress(new PublicKey(owner), { limit: 200 });
+    let funder = null;
+    if (sigs.length > 0 && sigs.length < 200) {
+      const tx = await connection.getParsedTransaction(sigs[sigs.length - 1].signature, { maxSupportedTransactionVersion: 0 });
+      funder = funderFromTx(tx, owner);
+    }
+    if (funderCache.size > 5000) funderCache.clear();
+    funderCache.set(owner, funder);
+    return funder;
+  } catch (e) {
+    console.error('funder error:', e.message);
+    return undefined; // unknown: not remembered, so a later map tries again
+  }
+}
+
+// Funders for many wallets, 4 at a time, stopping at the deadline. Returns Map(owner -> funder | null | undefined).
+export async function getFunders(owners, { deadlineMs = 11_000 } = {}) {
+  const out = new Map();
+  const queue = [...owners];
+  const stopAt = Date.now() + deadlineMs;
+  const worker = async () => {
+    for (let o = queue.shift(); o; o = queue.shift()) {
+      if (Date.now() > stopAt) return;
+      out.set(o, await getFunder(o));
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  return out;
 }

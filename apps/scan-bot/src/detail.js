@@ -142,18 +142,19 @@ export function buildHoldersText({ market, holders }) {
 // narrative: AI-written story (or null). grounded: true when it came from a web search, false when the AI only had
 // the token's own listing. meta: { name, symbol, description } as the creator published it.
 // headlines: [{ title, url, source, at }] from the news search (may be empty).
-export function buildLoreText({ market, narrative = null, grounded = true, meta, headlines = [], now = Date.now(), detectedAt = null }) {
+export function buildLoreText({ market, narrative = null, grounded = true, meta, headlines = [], now = Date.now(), detectedAt = null, debugNote = null }) {
   const lines = [`📖 <b>Lore</b> · ${name(market)}`, ''];
   const clip = (t, n) => (t.length > n ? `${t.slice(0, n).trimEnd()}…` : t);
   const d = meta?.description ? meta.description.replace(/\s+/g, ' ').trim() : '';
   if (narrative) {
     lines.push(`<blockquote>${esc(clip(narrative.replace(/\s+/g, ' ').trim(), 800))}</blockquote>`,
-      grounded ? '<i>Written by AI from a web search. Accuracy not guaranteed.</i>' : '<i>Written by AI from the token\'s listing only, no web search. Accuracy not guaranteed.</i>');
+      grounded ? '<i>Written by AI from a web search. Accuracy not guaranteed.</i>' : '<i>Written by AI from the token\'s own listing and linked post, no web search. Accuracy not guaranteed.</i>');
   } else if (d) {
     lines.push(`<blockquote>${esc(clip(d, 700))}</blockquote>`, '<i>Written by the token\'s creator. Accuracy not guaranteed.</i>');
   } else if (!headlines.length) {
     lines.push('The creator did not publish a description for this token.');
   }
+  if (debugNote) lines.push('', `<i>AI summary unavailable: ${esc(String(debugNote).slice(0, 200))}</i>`);
   if (headlines.length) {
     lines.push('', '📰 <b>In the news</b>');
     for (const h of headlines.slice(0, 3)) {

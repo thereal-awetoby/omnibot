@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
@@ -12,7 +12,8 @@ import {
 } from './scan.js';
 import { startIntel, gatherIntel } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, rpcStats } from './chain.js';
-import { fetchLoreStory, fetchNews, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
+import { loadBubblemap } from './bubbleload.js';
+import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
 import { formatDuration } from './scan.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
 
@@ -62,9 +63,9 @@ async function getMarket(mint) {
   return null;
 }
 
-// Bubblemaps opens in the browser. (As a Telegram mini app it shows a blank page unless Bubblemaps enables it for us.)
+// Our own bubblemap image is built in the bot (see bubbleload.js). The Bubblemaps.io link stays as an extra.
 const bubbleUrl = (mint) => `https://v2.bubblemaps.io/map?address=${mint}`;
-const bubbleButton = (kb, mint) => kb.url('🫧 Bubblemap', bubbleUrl(mint));
+const bubbleButton = (kb, mint) => kb.text('🫧 Bubblemap', `b:${mint}`);
 
 const cardKeyboard = (mint, watched, group = false) =>
   bubbleButton(new InlineKeyboard()
@@ -92,8 +93,8 @@ async function callFor(ctx, mint, market, record) {
 }
 
 // Keeps Telegram's "typing…" going while we work, instead of posting a "loading" message.
-async function withTyping(ctx, fn) {
-  const send = () => ctx.api.sendChatAction(ctx.chat.id, 'typing').catch(() => {});
+async function withTyping(ctx, fn, action = 'typing') {
+  const send = () => ctx.api.sendChatAction(ctx.chat.id, action).catch(() => {});
   send();
   const t = setInterval(send, 4000);
   try { return await fn(); } finally { clearInterval(t); }
@@ -169,6 +170,28 @@ async function showDetail(ctx, kind, mint, build) {
   });
 }
 
+// The bubblemap: one picture of the biggest holders and which of them were funded by the same wallet.
+async function sendBubblemap(ctx, mint) {
+  if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
+  const now = Date.now();
+  if (now - (lastDetailAt.get(ctx.from.id) ?? 0) < 1500) return; // ignore rapid repeat taps
+  lastDetailAt.set(ctx.from.id, now);
+  let result = null;
+  try { result = await withTyping(ctx, async () => loadBubblemap(mint, await cachedCard(mint)), 'upload_photo'); }
+  catch (e) { console.error('bubblemap error:', e.message); }
+  const origin = ctx.callbackQuery?.message?.message_id ?? ctx.message?.message_id;
+  const reply = origin ? { reply_parameters: { message_id: origin, allow_sending_without_reply: true } } : {};
+  const site = new InlineKeyboard().url('🌐 Bubblemaps.io', bubbleUrl(mint)).text('🗑 Close', 'x');
+  if (!result) return ctx.reply('Could not build the bubblemap right now (holder data was not available). Try again in a moment.', { ...reply, reply_markup: site });
+  const kb = new InlineKeyboard().text('👥 Top holders', `h:${mint}`).text('👨‍💻 Dev', `d:${mint}`).row().url('🌐 Bubblemaps.io', bubbleUrl(mint)).text('🗑 Close', 'x');
+  try {
+    return await ctx.replyWithPhoto(new InputFile(result.png, 'bubblemap.png'), { caption: result.caption, parse_mode: 'HTML', reply_markup: kb, ...reply });
+  } catch (e) {
+    console.error('bubblemap send error:', e.message);
+    return ctx.reply('Could not send the bubblemap image. Try again in a moment.', { ...reply, reply_markup: site });
+  }
+}
+
 async function buildHolders(mint) {
   const c = await cachedCard(mint);
   const top = (c.intel.top ?? []).filter((h) => isAddr(h.owner)).slice(0, 10);
@@ -218,22 +241,22 @@ const buildLore = async (mint, userId) => {
   const x = (m?.socials ?? []).find((s) => ['twitter', 'x'].includes(String(s.type).toLowerCase()))?.url ?? null;
   const name = m?.name ?? c.intel.meta?.name ?? null;
   const symbol = m?.symbol ?? c.intel.meta?.symbol ?? null;
-  // The story and the news search run at the same time.
-  const [story, headlines] = await Promise.all([
-    fetchLoreStory(
-      {
-        mint, name, symbol, description: c.intel.meta?.description ?? null, xUrl: x,
-        ageText: typeof m?.createdAt === 'number' ? `${Math.max(1, Math.round((Date.now() - m.createdAt) / 3_600_000))}h` : null,
-      },
-      {
-        anthropicKey: process.env.ANTHROPIC_API_KEY, anthropicModel: process.env.LORE_MODEL || undefined,
-        geminiKey: process.env.GEMINI_API_KEY, geminiModels: process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : undefined,
-        dailyMax: Number(process.env.LORE_DAILY_MAX) || undefined, perUserMax: Number(process.env.LORE_PER_USER_MAX) || undefined, userId,
-      },
-    ),
-    fetchNews({ name, symbol }),
-  ]);
-  return buildLoreText({ market: m, narrative: story?.text ?? null, grounded: story?.grounded ?? true, meta: c.intel.meta, headlines, detectedAt: c.intel.detectedAt });
+  // The linked post and the news search run first (together); the AI then writes the story from everything we found.
+  const [postText, headlines] = await Promise.all([x ? fetchTweetText(x) : null, fetchNews({ name, symbol })]);
+  const story = await fetchLoreStory(
+    {
+      mint, name, symbol, description: c.intel.meta?.description ?? null, xUrl: x, postText, imageUrl: m?.imageUrl ?? m?.headerUrl ?? null,
+      ageText: typeof m?.createdAt === 'number' ? `${Math.max(1, Math.round((Date.now() - m.createdAt) / 3_600_000))}h` : null,
+    },
+    {
+      anthropicKey: process.env.ANTHROPIC_API_KEY, anthropicModel: process.env.LORE_MODEL || undefined,
+      geminiKey: process.env.GEMINI_API_KEY, geminiModels: process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : undefined,
+      dailyMax: Number(process.env.LORE_DAILY_MAX) || undefined, perUserMax: Number(process.env.LORE_PER_USER_MAX) || undefined, userId,
+    },
+  );
+  // LORE_DEBUG=1 in .env shows the reason in the chat when the AI could not write a summary.
+  const debugNote = process.env.LORE_DEBUG && !story && (process.env.GEMINI_API_KEY || process.env.ANTHROPIC_API_KEY) ? getLastLoreError() : null;
+  return buildLoreText({ market: m, narrative: story?.text ?? null, grounded: story?.grounded ?? true, meta: c.intel.meta, headlines, detectedAt: c.intel.detectedAt, debugNote });
 };
 
 async function showTrending(ctx, { edit = false } = {}) {
@@ -320,6 +343,8 @@ const withMint = (usage, fn) => async (ctx) => {
   if (!mint) return ctx.reply(`Usage: ${usage} <token address>\nOr reply to a message that has the address.`);
   return fn(ctx, mint);
 };
+bot.command('bm', withMint('/bm', (ctx, mint) => sendBubblemap(ctx, mint)));
+bot.command('bubblemap', withMint('/bubblemap', (ctx, mint) => sendBubblemap(ctx, mint)));
 bot.command('th', withMint('/th', (ctx, mint) => showDetail(ctx, 'h', mint, () => buildHolders(mint))));
 bot.command('dev', withMint('/dev', (ctx, mint) => showDetail(ctx, 'd', mint, () => buildDev(mint))));
 bot.command('nar', withMint('/nar', (ctx, mint) => showDetail(ctx, 'l', mint, () => buildLore(mint, ctx.from.id))));
@@ -408,6 +433,7 @@ bot.callbackQuery('trend', async (ctx) => { await ctx.answerCallbackQuery(); ret
 bot.callbackQuery('wl', async (ctx) => { await ctx.answerCallbackQuery(); return showWatchlist(ctx, { edit: true }); });
 bot.callbackQuery(new RegExp(`^t:${MINT}$`), async (ctx) => { await ctx.answerCallbackQuery(); return showToken(ctx, ctx.match[1]); });
 bot.callbackQuery(new RegExp(`^r:${MINT}$`), async (ctx) => { await ctx.answerCallbackQuery(); return showToken(ctx, ctx.match[1], { edit: true }); });
+bot.callbackQuery(new RegExp(`^b:${MINT}$`), (ctx) => sendBubblemap(ctx, ctx.match[1]));
 bot.callbackQuery(new RegExp(`^h:${MINT}$`), (ctx) => showDetail(ctx, 'h', ctx.match[1], () => buildHolders(ctx.match[1])));
 bot.callbackQuery(new RegExp(`^d:${MINT}$`), (ctx) => showDetail(ctx, 'd', ctx.match[1], () => buildDev(ctx.match[1])));
 bot.callbackQuery(new RegExp(`^l:${MINT}$`), (ctx) => showDetail(ctx, 'l', ctx.match[1], () => buildLore(ctx.match[1], ctx.from.id)));
