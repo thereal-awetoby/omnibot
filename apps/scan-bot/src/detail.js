@@ -65,7 +65,7 @@ const launchLine = (l, now) => {
 };
 
 // launches: result of mergeLaunches (or null when they could not be loaded).
-export function buildDevText({ market, creator, devPct, solBalance, launches, source, scannedTx, now = Date.now() }) {
+export function buildDevText({ market, creator, devPct, solBalance, launches, source, scannedTx, partial = false, now = Date.now() }) {
   if (!creator) return `👨‍💻 <b>Dev</b> · ${name(market)}\n\nThe dev wallet for this token is not known yet. Try again in a minute.`;
   const head = [`👨‍💻 ${walletLink(creator)}`];
   const facts = [];
@@ -90,7 +90,8 @@ export function buildDevText({ market, creator, devPct, solBalance, launches, so
     if (top.length > 1) lines.push('', '🚀 <b>Top launches</b> (market cap now)', `<blockquote>${top.map((l) => launchLine(l, now)).join('\n')}</blockquote>`);
   }
   lines.push('', `<code>${creator}</code>`);
-  if (source === 'rpc') lines.push(`<i>Based on this wallet's last ${scannedTx} transactions.</i>`);
+  if (source === 'rpc' && scannedTx > 0) lines.push(`<i>Based on this wallet's last ${scannedTx} transactions.</i>`);
+  else if (partial) lines.push('<i>Could not read this wallet\'s full history right now, so older launches may be missing. Tap Dev again in a moment.</i>');
   return lines.join('\n');
 }
 

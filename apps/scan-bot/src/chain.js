@@ -167,6 +167,28 @@ export async function getHolderTokens(owners, deadlineMs = 8_000) {
   return new Map(out);
 }
 
+// The wallet that created a token, read straight from Solana (used when RugCheck does not say).
+// 1) pump.fun tokens: the bonding curve account stores its creator.  2) any token: the wallet that paid
+// for the mint's first transaction. Returns an address or null.
+export async function getCreatorOnChain(mint) {
+  try {
+    const mintKey = new PublicKey(mint);
+    const curve = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), mintKey.toBuffer()], PUMP_PROGRAM_ID)[0];
+    const info = await connection.getAccountInfo(curve);
+    if (info && info.owner.equals(PUMP_PROGRAM_ID) && info.data.length >= 81) return new PublicKey(info.data.subarray(49, 81)).toBase58();
+  } catch (e) { console.error('creator (curve) error:', e.message); }
+  try {
+    const sigs = await connection.getSignaturesForAddress(new PublicKey(mint), { limit: 1000 });
+    if (sigs.length && sigs.length < 1000) { // only trust the oldest entry when the whole history fit in one page
+      const tx = await connection.getParsedTransaction(sigs.at(-1).signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+      const k0 = tx?.transaction?.message?.accountKeys?.[0];
+      const payer = k0?.pubkey?.toBase58?.() ?? String(k0?.pubkey ?? k0 ?? '');
+      if (payer) return payer;
+    }
+  } catch (e) { console.error('creator (first tx) error:', e.message); }
+  return null;
+}
+
 export async function getSolBalance(owner) {
   try { return (await connection.getBalance(new PublicKey(owner))) / 1e9; } catch (e) { console.error('sol balance error:', e.message); return null; }
 }

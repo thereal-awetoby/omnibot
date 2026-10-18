@@ -134,3 +134,12 @@ test('address helpers', () => {
   assert.match(walletLink('not an address <b>'), /^not an addre$/);
   assert.doesNotMatch(walletLink('<script>'), /<script>/);
 });
+
+test('Dev view with only this token still shows data and explains the gap', () => {
+  const W = 'G6NnKQTgN7Dmo9yrJXwoqiDm35FznQmQ1qXVFAXPpump';
+  const launches = mergeLaunches([{ mint: W, createdAt: 1_700_000_000_000 - 3_600_000 }], new Map([[W, { symbol: 'BDOG', marketCapUsd: 18_690 }]]), W);
+  const text = buildDevText({ market: { symbol: 'BDOG' }, creator: W, devPct: 0, solBalance: 1.5, launches, source: 'rpc', scannedTx: 0, partial: true, now: 1_700_000_000_000 });
+  assert.match(text, /Recent launches/);
+  assert.match(text, /BDOG<\/b> @ \$18\.69K  ◀ this token/);
+  assert.match(text, /older launches may be missing/);
+});

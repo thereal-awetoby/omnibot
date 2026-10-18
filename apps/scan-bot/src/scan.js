@@ -130,7 +130,7 @@ function statsBlock(m, now, intel = null) {
   if (m.volume?.h1 != null) vol.push(['1h', m.volume.h1]);
   if (m.volume?.h24 != null) vol.push(['24h', m.volume.h24]);
   if (!vol.length && m.volume24h != null) vol.push(['24h', m.volume24h]);
-  if (vol.length) rows.push(vol.map(([w, v], i) => `${i === 0 ? lab('Vol') : lab('')}– ${w.padEnd(3)} ${formatUsd(v)}`).join('\n'));
+  if (vol.length) rows.push(vol.map(([w, v], i) => `${i === 0 ? lab('Vol') : lab('')}→ ${w.padEnd(3)} ${formatUsd(v)}`).join('\n'));
   const h1 = m.change?.h1 ?? m.change1h;
   const t = m.txns?.h1;
   const hour = [];

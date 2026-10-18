@@ -151,7 +151,7 @@ test('full card: compact rows, facts only, escaped text', () => {
   assert.match(card, /<code>Price    <\/code><b>\$0\.5<\/b>  \(\+2283%\)/);
   assert.match(card, /<code>MCap     <\/code><b>\$2\.00M<\/b>  ·  FDV \$2\.50M/);
   assert.match(card, /<code>Liq      <\/code><b>\$50\.00K<\/b>\n/);
-  assert.match(card, /├ <code>Vol      <\/code>– 1h  \$20\.00K\n│ <code>         <\/code>– 24h \$400\.00K\n/);
+  assert.match(card, /├ <code>Vol      <\/code>→ 1h  \$20\.00K\n│ <code>         <\/code>→ 24h \$400\.00K\n/);
   assert.match(card, /<code>1H       <\/code>\+43\.9% · 🟢 4\.1K · 🔴 2\.9K\n/);
   assert.match(card, /<code>ATH      <\/code><b>\$1\.06M<\/b>  \(-4\.0%\) · 4m\n/);
   assert.match(card, /Mint ✅ off · Freeze ✅ off/);
@@ -190,7 +190,7 @@ test('card keeps the same rows when data is missing (n/a instead of vanishing)',
 test('stats rows only appear when there is data, and stay short', () => {
   const lean = { symbol: 'X', priceUsd: 1, marketCapUsd: 1000, liquidityUsd: 500, volume24h: 12 };
   const card = buildScanCard({ mint: MINT, market: lean, now: NOW });
-  assert.match(card, /<code>Vol      <\/code>– 24h \$12\.00\n/);
+  assert.match(card, /<code>Vol      <\/code>→ 24h \$12\.00\n/);
   assert.doesNotMatch(card, /<code>1H /);
   assert.doesNotMatch(card, /<code>ATH /);
   for (const line of card.split('\n').filter((l) => /^[├└│] <code>/.test(l))) {

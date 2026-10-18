@@ -8,10 +8,10 @@ import {
 import {
   parseMintInput, extractMint, looksLikeMint, parseAlertPct, shouldAlert,
   buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText,
-  buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText,
+  buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel } from './intel.js';
-import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens } from './chain.js';
+import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain } from './chain.js';
 import { fetchPumpCreated, fetchLoreAI } from './sources.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
 
@@ -142,7 +142,7 @@ const detailText = new Map(); // `${kind}:${mint}` -> { at, text }
 const DETAIL_TTL_MS = 5 * 60_000;
 const lastDetailAt = new Map(); // userId -> timestamp
 async function showDetail(ctx, kind, mint, build) {
-  await ctx.answerCallbackQuery().catch(() => {});
+  if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
   const now = Date.now();
   if (now - (lastDetailAt.get(ctx.from.id) ?? 0) < 1500) return; // ignore rapid repeat taps
   lastDetailAt.set(ctx.from.id, now);
@@ -153,7 +153,7 @@ async function showDetail(ctx, kind, mint, build) {
     if (detailText.size > 300) detailText.delete(detailText.keys().next().value);
     detailText.set(key, { at: now, text });
   }
-  const origin = ctx.callbackQuery?.message?.message_id;
+  const origin = ctx.callbackQuery?.message?.message_id ?? ctx.message?.message_id;
   return ctx.reply(text, {
     ...HTML,
     reply_markup: new InlineKeyboard().text('🗑 Close', 'x'),
@@ -180,7 +180,8 @@ async function buildHolders(mint) {
 
 async function buildDev(mint) {
   const c = await cachedCard(mint);
-  const creator = c.intel.creator;
+  // RugCheck usually knows the creator; if not, read it from the chain.
+  const creator = c.intel.creator ?? (await getCreatorOnChain(mint));
   if (!creator) return buildDevText({ market: c.market, creator: null });
   const [solBalance, pumpList] = await Promise.all([getSolBalance(creator), fetchPumpCreated(creator)]);
   let launches = pumpList?.length ? pumpList : null;
@@ -190,11 +191,16 @@ async function buildDev(mint) {
     try { const r = await scanCreatedTokens(creator); launches = r.launches; scannedTx = r.scannedTx; source = 'rpc'; }
     catch (e) { console.error('dev scan error:', e.message); launches = null; }
   }
+  // This token was made by this wallet, so it always belongs in the list.
+  if (!launches?.some((l) => l.mint === mint)) {
+    launches = [...(launches ?? []), { mint, createdAt: c.market?.createdAt ?? c.intel.detectedAt ?? null }];
+  }
   let markets = new Map();
-  if (launches?.length) { try { markets = await fetchPairsByTokens(launches.map((l) => l.mint).slice(0, 30)); } catch (e) { console.error('launch prices error:', e.message); } }
+  try { markets = await fetchPairsByTokens(launches.map((l) => l.mint).slice(0, 30)); } catch (e) { console.error('launch prices error:', e.message); }
+  if (c.market) markets.set(mint, c.market);
   return buildDevText({
     market: c.market, creator, devPct: c.intel.devPct, solBalance,
-    launches: launches ? mergeLaunches(launches, markets, mint) : null, source, scannedTx,
+    launches: mergeLaunches(launches, markets, mint), source, scannedTx, partial: source !== 'pump',
   });
 }
 
@@ -256,7 +262,7 @@ async function doUnwatch(ctx, mint, { edit = false } = {}) {
 
 bot.command('start', showHome);
 bot.command('help', (ctx) => ctx.reply(
-  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard  /calls  (groups)\n\n/token <address>\n/chart <address>\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
+  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard  /calls  (groups)\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/chart <address>\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
 ));
 bot.command('token', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
@@ -271,6 +277,36 @@ bot.command('chart', async (ctx) => {
   });
 });
 bot.command('trending', (ctx) => showTrending(ctx));
+
+// Quick commands (the bot's menu). Each takes an address, or works on the message you reply to.
+function mintFromCommand(ctx) {
+  return parseMintInput(ctx.match.trim()) ?? extractMint(ctx.message?.reply_to_message?.text ?? '');
+}
+const withMint = (usage, fn) => async (ctx) => {
+  const mint = mintFromCommand(ctx);
+  if (!mint) return ctx.reply(`Usage: ${usage} <token address>\nOr reply to a message that has the address.`);
+  return fn(ctx, mint);
+};
+bot.command('th', withMint('/th', (ctx, mint) => showDetail(ctx, 'h', mint, () => buildHolders(mint))));
+bot.command('dev', withMint('/dev', (ctx, mint) => showDetail(ctx, 'd', mint, () => buildDev(mint))));
+bot.command('nar', withMint('/nar', (ctx, mint) => showDetail(ctx, 'l', mint, () => buildLore(mint, ctx.from.id))));
+bot.command('lore', withMint('/lore', (ctx, mint) => showDetail(ctx, 'l', mint, () => buildLore(mint, ctx.from.id))));
+bot.command('soc', withMint('/soc', async (ctx, mint) => {
+  const m = await withTyping(ctx, () => getMarket(mint));
+  if (!m) return ctx.reply('No market data found for that token yet.');
+  return ctx.reply(`${m.symbol ? '$' + esc(m.symbol) : short(mint)}\n${buildSocialLine(m)}`, HTML);
+}));
+bot.command('dp', withMint('/dp', async (ctx, mint) => {
+  const m = await withTyping(ctx, () => getMarket(mint));
+  if (!m) return ctx.reply('No market data found for that token yet.');
+  return ctx.reply(`${m.symbol ? '$' + esc(m.symbol) : short(mint)}\nDEX Paid: ${m.hasProfile ? '✅ yes' : '❌ no'}`, HTML);
+}));
+bot.command('p', withMint('/p', async (ctx, mint) => {
+  const m = await withTyping(ctx, () => getMarket(mint));
+  if (!m?.priceUsd) return ctx.reply('No price found for that token yet.');
+  const d = m.change?.h24 ?? m.change24h;
+  return ctx.reply(`${m.symbol ? '$' + esc(m.symbol) : short(mint)}  <b>${formatPriceCard(m.priceUsd)}</b>${d != null ? `  (${shortPct(d)} 24h)` : ''}`, HTML);
+}));
 bot.command('watch', async (ctx) => {
   const arg = ctx.match.trim();
   if (!arg) return showWatchlist(ctx);
@@ -372,6 +408,22 @@ bot.catch((err) => console.error('bot error:', err.error?.message ?? err.message
 bot.start({
   onStart: (me) => {
     console.log(`Omni Scan Bot running as @${me.username}`);
+    // The menu next to the message box.
+    bot.api.setMyCommands([
+      { command: 'token', description: 'Token card (paste an address)' },
+      { command: 'th', description: 'View the top holders' },
+      { command: 'dev', description: 'View deployer & deployed coins' },
+      { command: 'nar', description: 'Get the narrative (lore) of a token' },
+      { command: 'soc', description: 'Get social media links' },
+      { command: 'dp', description: 'Check DEX Paid status' },
+      { command: 'p', description: 'Simple price query' },
+      { command: 'chart', description: 'Open a chart' },
+      { command: 'trending', description: 'View trending tokens' },
+      { command: 'watch', description: 'Your watchlist / watch a token' },
+      { command: 'leaderboard', description: 'Group call leaderboard' },
+      { command: 'calls', description: 'Your calls in this group' },
+      { command: 'help', description: 'All commands' },
+    ]).catch((e) => console.error('setMyCommands error:', e.message));
     setInterval(checkAlerts, 60_000);
   },
 });
