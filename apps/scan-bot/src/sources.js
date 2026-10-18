@@ -115,6 +115,69 @@ export async function fetchPumpCreated(creator, fetchImpl = fetch) {
   return null;
 }
 
+// ---------- DexScreener: when the profile was paid for ----------
+
+// body: DexScreener "orders" answer (a list). Returns { paidAt (ms) } for the newest approved profile order, or null.
+export function parseDexPaid(body) {
+  const list = Array.isArray(body) ? body : Array.isArray(body?.orders) ? body.orders : [];
+  let best = null;
+  for (const o of list) {
+    if (!o || o.status !== 'approved' || !['tokenProfile', 'communityTakeover', 'tokenAd', 'trendingBarAd'].includes(o.type)) continue;
+    const t = Number(o.paymentTimestamp);
+    const ms = Number.isFinite(t) && t > 0 ? (t < 1e11 ? t * 1000 : t) : null;
+    if (!best || (ms ?? 0) > (best.paidAt ?? 0)) best = { paidAt: ms };
+  }
+  return best;
+}
+
+export async function fetchDexPaid(mint, fetchImpl = fetch) {
+  try {
+    const res = await fetchImpl(`https://api.dexscreener.com/orders/v1/solana/${mint}`, { signal: AbortSignal.timeout(6_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return parseDexPaid(await res.json());
+  } catch (e) {
+    console.error('dexpaid error:', e.message);
+    return null;
+  }
+}
+
+// ---------- chart picture (price line from GeckoTerminal candles, drawn by QuickChart) ----------
+
+// Hourly closes for the last ~3 days: [{ t (s), c }] oldest first, or null.
+export async function fetchPriceSeries({ pairAddress, mint }, fetchImpl = fetch, now = Date.now()) {
+  if (!pairAddress || now < geckoPausedUntil) return null;
+  const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pairAddress}/ohlcv/hour?aggregate=1&limit=72&currency=usd&token=${mint}`;
+  try {
+    const res = await fetchImpl(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(8_000) });
+    if (res.status === 429) { geckoPausedUntil = now + 60_000; throw new Error('GeckoTerminal rate limit, pausing 60s'); }
+    if (!res.ok) throw new Error(`GeckoTerminal returned HTTP ${res.status}`);
+    const list = (await res.json())?.data?.attributes?.ohlcv_list;
+    const pts = (Array.isArray(list) ? list : []).map((r) => ({ t: num(r?.[0]), c: num(r?.[4]) })).filter((p) => p.t !== null && p.c !== null && p.c > 0);
+    return pts.length >= 2 ? pts.sort((a, b) => a.t - b.t) : null;
+  } catch (e) {
+    console.error('chart series error:', e.message);
+    return null;
+  }
+}
+
+// A picture URL Telegram can fetch: QuickChart draws the line chart as a PNG.
+export function buildChartUrl(points, title) {
+  const up = points.at(-1).c >= points[0].c;
+  const color = up ? '#22c55e' : '#ef4444';
+  const cfg = {
+    type: 'line',
+    data: {
+      labels: points.map((p) => new Date(p.t * 1000).toISOString().slice(5, 13).replace('T', ' ') + 'h'),
+      datasets: [{ data: points.map((p) => p.c), borderColor: color, backgroundColor: up ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)', fill: true, pointRadius: 0, borderWidth: 2 }],
+    },
+    options: {
+      plugins: { legend: { display: false }, title: { display: true, text: title, color: '#e5e7eb' } },
+      scales: { x: { ticks: { maxTicksLimit: 6, color: '#9ca3af' } }, y: { ticks: { color: '#9ca3af' } } },
+    },
+  };
+  return `https://quickchart.io/chart?v=4&w=800&h=450&bkg=%230b1220&format=png&c=${encodeURIComponent(JSON.stringify(cfg))}`;
+}
+
 // ---------- search by name or symbol (DexScreener) ----------
 
 // body: DexScreener search answer. One entry per Solana token (its deepest pool), biggest liquidity first.

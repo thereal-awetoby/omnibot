@@ -3,7 +3,18 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { computeHolderStats, computeFresh } from './security.js';
 import { createdMintsFromTx } from './detail.js';
 
-const connection = new Connection(process.env.RPC_URL || 'https://api.mainnet-beta.solana.com', 'confirmed');
+// Every RPC call goes through this small queue so we stay under the provider's per-second cap
+// (Helius free is about 10/s). Without it the server answers 429 and web3.js waits seconds between retries.
+const RPC_MAX_PER_SEC = Number(process.env.RPC_MAX_RPS) || 8;
+let nextRpcSlot = 0;
+async function throttledFetch(url, opts) {
+  const now = Date.now();
+  const at = Math.max(now, nextRpcSlot);
+  nextRpcSlot = at + 1000 / RPC_MAX_PER_SEC;
+  if (at > now) await new Promise((r) => setTimeout(r, at - now));
+  return fetch(url, opts);
+}
+const connection = new Connection(process.env.RPC_URL || 'https://api.mainnet-beta.solana.com', { commitment: 'confirmed', fetch: throttledFetch });
 const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 
 const cache = new Map(); // mint -> { at, value }
@@ -195,7 +206,7 @@ export async function getSolBalance(owner) {
 
 // Tokens a wallet created, found by reading its most recent transactions. Returns { launches, scannedTx } where
 // launches = [{ mint, createdAt (ms) }]. Not the full history: only the last `limit` transactions are read.
-export async function scanCreatedTokens(creator, { limit = 150, deadlineMs = 12_000 } = {}) {
+export async function scanCreatedTokens(creator, { limit = 150, deadlineMs = 20_000 } = {}) {
   const sigs = (await connection.getSignaturesForAddress(new PublicKey(creator), { limit })).filter((s) => !s.err).map((s) => s.signature);
   const launches = [];
   let scanned = 0;
@@ -211,6 +222,7 @@ export async function scanCreatedTokens(creator, { limit = 150, deadlineMs = 12_
       for (const mint of createdMintsFromTx(tx, creator)) launches.push({ mint, createdAt: tx?.blockTime ? tx.blockTime * 1000 : null });
     }
   });
+  console.log(`dev scan: ${creator.slice(0, 6)}… read ${scanned}/${sigs.length} transactions, found ${launches.length} created token(s)`);
   return { launches: [...launches], scannedTx: scanned };
 }
 

@@ -12,7 +12,8 @@ import {
 } from './scan.js';
 import { startIntel, gatherIntel } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain } from './chain.js';
-import { fetchLoreAI, searchTokens } from './sources.js';
+import { fetchLoreAI, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
+import { formatDuration } from './scan.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
 
 if (!process.env.SCAN_BOT_TOKEN) throw new Error('SCAN_BOT_TOKEN is not set');
@@ -61,9 +62,9 @@ async function getMarket(mint) {
   return null;
 }
 
-// Bubblemaps: opens inside Telegram as a mini app in private chats; Telegram only allows that there, so groups get a normal link.
+// Bubblemaps opens in the browser. (As a Telegram mini app it shows a blank page unless Bubblemaps enables it for us.)
 const bubbleUrl = (mint) => `https://v2.bubblemaps.io/map?address=${mint}`;
-const bubbleButton = (kb, mint, group) => (group ? kb.url('🫧 Bubblemap', bubbleUrl(mint)) : kb.webApp('🫧 Bubblemap', bubbleUrl(mint)));
+const bubbleButton = (kb, mint) => kb.url('🫧 Bubblemap', bubbleUrl(mint));
 
 const cardKeyboard = (mint, watched, group = false) =>
   bubbleButton(new InlineKeyboard()
@@ -273,12 +274,28 @@ bot.command('token', async (ctx) => {
   if (!mint) return ctx.reply('Usage: /token <token address>');
   return showToken(ctx, mint);
 });
+const chartButtons = (mint) => new InlineKeyboard()
+  .url('📈 DexScreener', `https://dexscreener.com/solana/${mint}`).url('Birdeye', `https://birdeye.so/token/${mint}?chain=solana`).row()
+  .url('GMGN', `https://gmgn.ai/sol/token/${mint}`).url('🔍 Solscan', `https://solscan.io/token/${mint}`);
+
+// A picture of the last 3 days of price, with the chart links underneath. Falls back to links alone.
+async function sendChart(ctx, mint) {
+  const m = await withTyping(ctx, () => getMarket(mint));
+  const pts = m ? await withTyping(ctx, () => fetchPriceSeries({ pairAddress: m.pairAddress, mint })) : null;
+  const kb = chartButtons(mint);
+  if (pts) {
+    const d = m.change?.h24 ?? m.change24h;
+    const caption = `${m.symbol ? '$' + esc(m.symbol) : short(mint)}  <b>${formatPriceCard(m.priceUsd)}</b>${d != null ? `  (${shortPct(d)} 24h)` : ''}\n<i>Price, last ${Math.round((pts.at(-1).t - pts[0].t) / 3600) + 1}h</i>`;
+    try {
+      return await ctx.replyWithPhoto(buildChartUrl(pts, `${m.symbol ? '$' + m.symbol : short(mint)} · USD`), { caption, parse_mode: 'HTML', reply_markup: kb });
+    } catch (e) { console.error('chart photo error:', e.message); }
+  }
+  return ctx.reply('Open the live chart:', { reply_markup: kb });
+}
 bot.command('chart', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
   if (!mint) return ctx.reply('Usage: /chart <token address>');
-  return ctx.reply('Open the live chart:', {
-    reply_markup: new InlineKeyboard().url('📈 DexScreener', `https://dexscreener.com/solana/${mint}`).url('🔍 Solscan', `https://solscan.io/token/${mint}`),
-  });
+  return sendChart(ctx, mint);
 });
 bot.command('trending', (ctx) => showTrending(ctx));
 
@@ -301,15 +318,22 @@ bot.command('soc', withMint('/soc', async (ctx, mint) => {
   return ctx.reply(`${m.symbol ? '$' + esc(m.symbol) : short(mint)}\n${buildSocialLine(m)}`, HTML);
 }));
 bot.command('dp', withMint('/dp', async (ctx, mint) => {
-  const m = await withTyping(ctx, () => getMarket(mint));
+  const [m, paid] = await withTyping(ctx, () => Promise.all([getMarket(mint), fetchDexPaid(mint)]));
   if (!m) return ctx.reply('No market data found for that token yet.');
-  return ctx.reply(`${m.symbol ? '$' + esc(m.symbol) : short(mint)}\nDEX Paid: ${m.hasProfile ? '✅ yes' : '❌ no'}`, HTML);
+  const sym = m.symbol ? '$' + esc(m.symbol) : short(mint);
+  const yes = Boolean(paid) || Boolean(m.hasProfile);
+  const ago = paid?.paidAt ? formatDuration(Date.now() - paid.paidAt) : null;
+  const caption = yes
+    ? `✅ <b>DexPaid</b>${ago ? ` · ${ago} ago` : ''} · ${sym}\n${buildSocialLine(m)}`
+    : `❌ <b>Not DexPaid</b> · ${sym}`;
+  const image = m.headerUrl || m.imageUrl;
+  const kb = new InlineKeyboard().url('📈 DexScreener', `https://dexscreener.com/solana/${mint}`);
+  if (image) {
+    try { return await ctx.replyWithPhoto(image, { caption, parse_mode: 'HTML', reply_markup: kb }); }
+    catch (e) { console.error('dp photo error:', e.message); }
+  }
+  return ctx.reply(caption, { ...HTML, reply_markup: kb });
 }));
-bot.command('bm', withMint('/bm', async (ctx, mint) => ctx.reply('Bubblemap (who holds what, and which wallets are linked):', { reply_markup: bubbleButton(new InlineKeyboard(), mint, isGroup(ctx)) })));
-bot.command('c', withMint('/c', async (ctx, mint) => ctx.reply('Open the live chart:', {
-  reply_markup: new InlineKeyboard().url('📈 DexScreener', `https://dexscreener.com/solana/${mint}`).url('Birdeye', `https://birdeye.so/token/${mint}?chain=solana`).row().url('GMGN', `https://gmgn.ai/sol/token/${mint}`).url('🔍 Solscan', `https://solscan.io/token/${mint}`),
-})));
-bot.command('i', (ctx) => showTrending(ctx));
 bot.command('s', async (ctx) => {
   const q = ctx.match.trim();
   if (!q) return ctx.reply('Usage: /s <name or symbol>\nExample: /s barber dog');

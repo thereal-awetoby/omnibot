@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, parseSearch, searchTokens } from './sources.js';
+import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, parseSearch, searchTokens, parseDexPaid, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
 
 const json = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
@@ -196,4 +196,31 @@ test('searchTokens calls DexScreener search and throws on HTTP errors', async ()
   assert.match(url, /search\?q=bar%20ber$/);
   await assert.rejects(searchTokens('x', async () => ({ ok: false, status: 500 })), /HTTP 500/);
   assert.deepEqual(await searchTokens('  ', async () => { throw new Error('no call'); }), []);
+});
+
+test('parseDexPaid finds the newest approved profile order and ignores the rest', () => {
+  const r = parseDexPaid([
+    { type: 'tokenProfile', status: 'processing', paymentTimestamp: 1_700_000_999_000 },
+    { type: 'tokenProfile', status: 'approved', paymentTimestamp: 1_700_000_000_000 },
+    { type: 'tokenAd', status: 'approved', paymentTimestamp: 1_700_000_500_000 },
+    { type: 'other', status: 'approved', paymentTimestamp: 1_800_000_000_000 },
+  ]);
+  assert.equal(r.paidAt, 1_700_000_500_000);
+  assert.equal(parseDexPaid([]), null);
+  assert.equal(parseDexPaid(null), null);
+});
+
+test('fetchDexPaid returns null when the API fails', async () => {
+  assert.equal(await fetchDexPaid('M', async () => ({ ok: false, status: 404 })), null);
+  assert.equal((await fetchDexPaid('M', async () => ({ ok: true, json: async () => [{ type: 'tokenProfile', status: 'approved', paymentTimestamp: 1_700_000_000_000 }] }))).paidAt, 1_700_000_000_000);
+});
+
+test('fetchPriceSeries reads hourly closes oldest first; buildChartUrl makes a PNG url', async () => {
+  const ok = async () => ({ ok: true, status: 200, json: async () => ({ data: { attributes: { ohlcv_list: [[200, 1, 2, 1, 1.5, 9], [100, 1, 2, 1, 1.2, 9], [300, 1, 2, 1, 0, 9]] } } }) });
+  const pts = await fetchPriceSeries({ pairAddress: 'P', mint: 'M' }, ok, 1_900_000_000_000);
+  assert.deepEqual(pts, [{ t: 100, c: 1.2 }, { t: 200, c: 1.5 }]);
+  const url = buildChartUrl(pts, '$A');
+  assert.match(url, /^https:\/\/quickchart\.io\/chart\?v=4&w=800/);
+  assert.match(decodeURIComponent(url), /#22c55e/);
+  assert.equal(await fetchPriceSeries({ pairAddress: null, mint: 'M' }, ok), null);
 });
