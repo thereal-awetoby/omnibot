@@ -178,13 +178,24 @@ export async function getHolderTokens(owners, deadlineMs = 8_000) {
 // The wallet that created a token, read straight from Solana (used when RugCheck does not say).
 // 1) pump.fun tokens: the bonding curve account stores its creator.  2) any token: the wallet that paid
 // for the mint's first transaction. Returns an address or null.
-export async function getCreatorOnChain(mint) {
+const curveCreatorCache = new Map(); // mint -> address | null
+// pump.fun tokens: the creator stored in the bonding-curve account (it stays there after the token graduates).
+export async function getCurveCreator(mint) {
+  if (curveCreatorCache.has(mint)) return curveCreatorCache.get(mint);
+  let creator = null;
   try {
-    const mintKey = new PublicKey(mint);
-    const curve = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), mintKey.toBuffer()], PUMP_PROGRAM_ID)[0];
+    const curve = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), new PublicKey(mint).toBuffer()], PUMP_PROGRAM_ID)[0];
     const info = await connection.getAccountInfo(curve);
-    if (info && info.owner.equals(PUMP_PROGRAM_ID) && info.data.length >= 81) return new PublicKey(info.data.subarray(49, 81)).toBase58();
+    if (info && info.owner.equals(PUMP_PROGRAM_ID) && info.data.length >= 81) creator = new PublicKey(info.data.subarray(49, 81)).toBase58();
   } catch (e) { console.error('creator (curve) error:', e.message); }
+  if (curveCreatorCache.size > 500) curveCreatorCache.clear();
+  curveCreatorCache.set(mint, creator);
+  return creator;
+}
+
+export async function getCreatorOnChain(mint) {
+  const fromCurve = await getCurveCreator(mint);
+  if (fromCurve) return fromCurve;
   try {
     const sigs = await connection.getSignaturesForAddress(new PublicKey(mint), { limit: 1000 });
     if (sigs.length && sigs.length < 1000) { // only trust the oldest entry when the whole history fit in one page

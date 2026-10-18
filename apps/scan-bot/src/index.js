@@ -12,7 +12,8 @@ import {
 } from './scan.js';
 import { startIntel, gatherIntel } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, rpcStats } from './chain.js';
-import { loadBubblemap } from './bubbleload.js';
+import { loadBubblemap, loadBubbleData } from './bubbleload.js';
+import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
 import { formatDuration } from './scan.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
@@ -63,9 +64,19 @@ async function getMarket(mint) {
   return null;
 }
 
-// Our own bubblemap image is built in the bot (see bubbleload.js). The Bubblemaps.io link stays as an extra.
+// Bubblemap: with MINIAPP_URL set, private chats open our interactive map inside Telegram (hover, tap, copy).
+// Telegram only allows mini-app buttons in private chats; groups get the picture instead. The Bubblemaps.io link stays as an extra.
+const MINIAPP_URL = (process.env.MINIAPP_URL || '').trim().replace(/\/+$/, '');
+const miniMapUrl = (mint) => `${MINIAPP_URL}/map?mint=${mint}`;
 const bubbleUrl = (mint) => `https://v2.bubblemaps.io/map?address=${mint}`;
-const bubbleButton = (kb, mint) => kb.text('🫧 Bubblemap', `b:${mint}`);
+const bubbleButton = (kb, mint, group = false) => (MINIAPP_URL && !group ? kb.webApp('🫧 Bubblemap', miniMapUrl(mint)) : kb.text('🫧 Bubblemap', `b:${mint}`));
+
+// Data for the mini app: the same holders, funding groups and layout as the picture.
+async function loadMapData(mint) {
+  const card = await cachedCard(mint);
+  const loaded = await loadBubbleData(mint, card);
+  return loaded ? buildMapPayload({ symbol: card.market?.symbol ?? null, name: card.market?.name ?? null, loaded }) : null;
+}
 
 const cardKeyboard = (mint, watched, group = false) =>
   bubbleButton(new InlineKeyboard()
@@ -182,8 +193,11 @@ async function sendBubblemap(ctx, mint) {
   const origin = ctx.callbackQuery?.message?.message_id ?? ctx.message?.message_id;
   const reply = origin ? { reply_parameters: { message_id: origin, allow_sending_without_reply: true } } : {};
   const site = new InlineKeyboard().url('🌐 Bubblemaps.io', bubbleUrl(mint)).text('🗑 Close', 'x');
+  const interactive = MINIAPP_URL ? (isGroup(ctx) ? [['url', '🫧 Interactive map', miniMapUrl(mint)]] : [['web', '🫧 Interactive map', miniMapUrl(mint)]]) : [];
   if (!result) return ctx.reply('Could not build the bubblemap right now (holder data was not available). Try again in a moment.', { ...reply, reply_markup: site });
-  const kb = new InlineKeyboard().text('👥 Top holders', `h:${mint}`).text('👨‍💻 Dev', `d:${mint}`).row().url('🌐 Bubblemaps.io', bubbleUrl(mint)).text('🗑 Close', 'x');
+  const kb = new InlineKeyboard();
+  for (const [type, label, url] of interactive) { if (type === 'web') kb.webApp(label, url); else kb.url(label, url); kb.row(); }
+  kb.text('👥 Top holders', `h:${mint}`).text('👨‍💻 Dev', `d:${mint}`).row().url('🌐 Bubblemaps.io', bubbleUrl(mint)).text('🗑 Close', 'x');
   try {
     return await ctx.replyWithPhoto(new InputFile(result.png, 'bubblemap.png'), { caption: result.caption, parse_mode: 'HTML', reply_markup: kb, ...reply });
   } catch (e) {
@@ -213,6 +227,7 @@ async function buildDev(mint) {
   const c = await cachedCard(mint);
   // RugCheck usually knows the creator; if not, read it from the chain.
   const creator = c.intel.creator ?? (await getCreatorOnChain(mint));
+  console.log(`dev wallet: ${creator ? creator.slice(0, 6) + '…' + creator.slice(-4) : 'none'} (RugCheck said ${c.intel.rugCreator ? c.intel.rugCreator.slice(0, 6) + '…' + c.intel.rugCreator.slice(-4) : 'nothing'})`);
   if (!creator) return buildDevText({ market: c.market, creator: null });
   // pump.fun's public list is gone, so read the wallet's own transactions (fast on a Helius RPC).
   const solBalancePromise = getSolBalance(creator);
@@ -343,7 +358,9 @@ const withMint = (usage, fn) => async (ctx) => {
   if (!mint) return ctx.reply(`Usage: ${usage} <token address>\nOr reply to a message that has the address.`);
   return fn(ctx, mint);
 };
-bot.command('bm', withMint('/bm', (ctx, mint) => sendBubblemap(ctx, mint)));
+bot.command('bm', withMint('/bm', (ctx, mint) => (MINIAPP_URL && !isGroup(ctx)
+  ? ctx.reply('Bubblemap: tap to open the interactive map.', { reply_markup: new InlineKeyboard().webApp('🫧 Open Bubblemap', miniMapUrl(mint)).row().text('🖼 Picture instead', `b:${mint}`) })
+  : sendBubblemap(ctx, mint))));
 bot.command('bubblemap', withMint('/bubblemap', (ctx, mint) => sendBubblemap(ctx, mint)));
 bot.command('th', withMint('/th', (ctx, mint) => showDetail(ctx, 'h', mint, () => buildHolders(mint))));
 bot.command('dev', withMint('/dev', (ctx, mint) => showDetail(ctx, 'd', mint, () => buildDev(mint))));
@@ -492,6 +509,8 @@ bot.catch((err) => console.error('bot error:', err.error?.message ?? err.message
 bot.start({
   onStart: (me) => {
     console.log(`Omni Scan Bot running as @${me.username}`);
+    if (MINIAPP_URL) startMiniApp({ port: Number(process.env.MINIAPP_PORT) || 3000, loadData: loadMapData });
+    else console.log('Bubblemap mini app: off (set MINIAPP_URL to turn it on). The picture version is used.');
     console.log(`RPC endpoints: ${rpcStats().endpoints.map((e) => e.host).join(', ')}`);
     console.log(`Lore AI: ${[process.env.ANTHROPIC_API_KEY ? 'Claude' : null, process.env.GEMINI_API_KEY ? 'Gemini' : null].filter(Boolean).join(' + ') || 'off (shows the token description and news only)'}`);
     // The menu next to the message box.

@@ -25,7 +25,8 @@ export function loadBubblemap(mint, card) {
   return p;
 }
 
-async function build(mint, card) {
+// The data behind a bubblemap (shared by the picture and the interactive mini app).
+async function collect(mint, card) {
   const raw = await getSecurityRaw(mint);
   if (!raw) return null;
   // Prefer the full holder list (Helius); fall back to the 20 largest accounts.
@@ -44,8 +45,30 @@ async function build(mint, card) {
 
   const curve = /curve/i.test(card.market?.dex ?? '');
   const layout = layoutBubbles(built.nodes, built.poolPct, { hasPool: built.poolPct > 0.05 });
+  return { built, groups, funders, layout, checked, total: toCheck.length, curve, source: full ? 'das' : 'rpc' };
+}
+
+async function build(mint, card) {
+  const d = await collectCached(mint, card);
+  if (!d) return null;
+  const { built, groups, layout, checked, total, curve, source } = d;
   const svg = buildBubbleSvg({ symbol: card.market?.symbol, nodes: built.nodes, poolPct: built.poolPct, clusters: groups, layout, topPct: built.topPct, poolLabel: curve ? 'Curve' : 'LP' });
   const png = Buffer.from(await renderPng(svg));
-  const caption = buildBubbleCaption({ symbol: card.market?.symbol, built, groups, funderChecked: checked, funderTotal: toCheck.length, poolLabel: curve ? 'Bonding curve' : 'Liquidity pool', source: full ? 'das' : 'rpc' });
+  const caption = buildBubbleCaption({ symbol: card.market?.symbol, built, groups, funderChecked: checked, funderTotal: total, poolLabel: curve ? 'Bonding curve' : 'Liquidity pool', source });
   return { png, caption };
 }
+
+// The same data for the mini app: one lookup is shared by the picture and the interactive map for 10 minutes.
+const dataCache = new Map();
+const dataInflight = new Map();
+export function collectCached(mint, card) {
+  const hit = dataCache.get(mint);
+  if (hit && Date.now() - hit.at < TTL_MS) return Promise.resolve(hit.value);
+  if (dataInflight.has(mint)) return dataInflight.get(mint);
+  const p = collect(mint, card)
+    .then((value) => { if (value) { if (dataCache.size > 30) dataCache.delete(dataCache.keys().next().value); dataCache.set(mint, { at: Date.now(), value }); } return value; })
+    .finally(() => dataInflight.delete(mint));
+  dataInflight.set(mint, p);
+  return p;
+}
+export const loadBubbleData = collectCached;

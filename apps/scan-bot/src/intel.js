@@ -1,6 +1,6 @@
 // Gathers everything beyond the basic market numbers, never throwing and never waiting forever.
 import { fetchRugCheck, fetchAth, describeAth } from './sources.js';
-import { getSecurityRaw, withHolderStats, getDevHolding, getFreshWallets, getEarlyBuyers } from './chain.js';
+import { getSecurityRaw, withHolderStats, getDevHolding, getFreshWallets, getEarlyBuyers, getCurveCreator } from './chain.js';
 import { findBundle } from './security.js';
 
 // Resolves to `fallback` if the promise is still pending after `ms`, or if it fails.
@@ -24,12 +24,14 @@ export async function gatherIntel(mint, market, pre = startIntel(mint)) {
   const rugP = within(pre.rug, 6_000);
   const securityP = rawP.then((raw) => withHolderStats(raw, mint, market?.pairAddress ?? null));
   const athP = market ? within(fetchAth({ pairAddress: market.pairAddress, mint, createdAt: market.createdAt }), 4_000) : Promise.resolve(null);
-  const devP = Promise.all([rugP, securityP]).then(([rug, sec]) => within(getDevHolding(rug?.creator, mint, sec?.supply), 3_500));
+  // The dev is the creator stored on-chain (pump.fun); RugCheck's creator is only the fallback.
+  const creatorP = Promise.all([within(getCurveCreator(mint), 3_000), rugP]).then(([curve, rug]) => curve ?? rug?.creator ?? null);
+  const devP = Promise.all([creatorP, securityP]).then(([creator, sec]) => within(getDevHolding(creator, mint, sec?.supply), 3_500));
   const freshP = securityP.then((sec) => within(getFreshWallets(sec?.top), 3_800));
-  const bundleP = Promise.all([rawP, securityP, rugP])
-    .then(([raw, sec, rug]) => within(getEarlyBuyers(raw, sec?.top, rug?.creator ?? null), 3_800))
+  const bundleP = Promise.all([rawP, securityP, creatorP])
+    .then(([raw, sec, creator]) => within(getEarlyBuyers(raw, sec?.top, creator), 3_800))
     .then((entries) => findBundle(entries));
-  const [security, rug, athRaw, devPct, fresh, bundle] = await Promise.all([securityP, rugP, athP, devP, freshP, bundleP]);
+  const [security, rug, athRaw, devPct, fresh, bundle, creator] = await Promise.all([securityP, rugP, athP, devP, freshP, bundleP, creatorP]);
   // Holder concentration: our own RPC numbers first, RugCheck's list when the RPC is busy.
   const haveRpcTop = typeof security?.top10Pct === 'number';
   const intel = {
@@ -46,7 +48,8 @@ export async function gatherIntel(mint, market, pre = startIntel(mint)) {
     ath: describeAth(athRaw, market),
     bundle,
     // for the detail views
-    creator: rug?.creator ?? null,
+    creator,
+    rugCreator: rug?.creator ?? null,
     meta: rug?.meta ?? null,
     detectedAt: rug?.detectedAt ?? null,
     linked: (rug?.top ?? []).filter((h) => h.insider).map((h) => h.owner),
