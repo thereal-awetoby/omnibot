@@ -208,13 +208,82 @@ export async function getCreatorOnChain(mint) {
   return null;
 }
 
+// The wallet that actually DEPLOYED a token: the one that paid for the transaction that created it. This is not
+// always the "creator" stored on pump.fun's bonding curve (launch tools and fee-sharing can change that one).
+// Finding the creation transaction cheaply: 1) Helius can list a mint's oldest transaction directly,
+// 2) the token's metadata account is only touched at creation, so its oldest signature IS the creation,
+// 3) otherwise page back through the mint's history, for a limited number of pages.
+const METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+const deployerCache = new Map(); // mint -> address | null
+let oldestListWorks = true; // Helius's "oldest first" method; switched off after the first refusal
+const payerOf = (tx) => {
+  const k0 = tx?.transaction?.message?.accountKeys?.[0];
+  return k0?.pubkey?.toBase58?.() ?? (typeof k0?.pubkey === 'string' ? k0.pubkey : typeof k0 === 'string' ? k0 : null);
+};
+
+async function oldestSignatureHelius(mint) {
+  if (!oldestListWorks) return null;
+  try {
+    const res = await rpcPool.fetchWhere((u) => /helius/i.test(u), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'omni', method: 'getTransactionsForAddress', params: [mint, { transactionDetails: 'signatures', sortOrder: 'asc', limit: 5 }] }),
+    });
+    const body = res.ok ? await res.json() : null;
+    const rows = body?.result?.data ?? (Array.isArray(body?.result) ? body.result : null);
+    if (!rows) { oldestListWorks = false; return null; }
+    return rows.find((r) => !r.err)?.signature ?? null;
+  } catch { return null; }
+}
+
+async function oldestSignatureByPaging(mint, { pages = 8 } = {}) {
+  const key = new PublicKey(mint);
+  try { // metadata account first: very few signatures, oldest = creation
+    const meta = PublicKey.findProgramAddressSync([Buffer.from('metadata'), METADATA_PROGRAM_ID.toBuffer(), key.toBuffer()], METADATA_PROGRAM_ID)[0];
+    const sigs = await connection.getSignaturesForAddress(meta, { limit: 100 });
+    const ok = sigs.filter((x) => !x.err);
+    if (ok.length && sigs.length < 100) return ok.at(-1).signature;
+  } catch (e) { console.error('deployer (metadata) error:', e.message); }
+  let before;
+  for (let p = 0; p < pages; p++) {
+    const sigs = await connection.getSignaturesForAddress(key, { limit: 1000, before });
+    if (sigs.length < 1000) return sigs.filter((x) => !x.err).at(-1)?.signature ?? null;
+    before = sigs.at(-1).signature;
+  }
+  return null; // too busy a token: the creation is too far back to reach cheaply
+}
+
+export async function getDeployerOnChain(mint) {
+  if (deployerCache.has(mint)) return deployerCache.get(mint);
+  let deployer = null;
+  let how = 'none';
+  try {
+    let sig = await oldestSignatureHelius(mint);
+    if (sig) how = 'helius'; else { sig = await oldestSignatureByPaging(mint); if (sig) how = 'paging'; }
+    if (sig) {
+      const tx = await connection.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+      deployer = payerOf(tx);
+    }
+  } catch (e) { console.error('deployer error:', e.message); }
+  console.log(`deployer lookup: ${deployer ? deployer.slice(0, 6) + '…' + deployer.slice(-4) : 'not found'} (via ${how})`);
+  if (deployer || how !== 'none') { if (deployerCache.size > 500) deployerCache.clear(); deployerCache.set(mint, deployer); }
+  return deployer;
+}
+
+// Share of a token's supply a wallet holds (fetches the supply itself).
+export async function getHoldingPct(owner, mint) {
+  try {
+    const sup = await connection.getTokenSupply(new PublicKey(mint));
+    return await getDevHolding(owner, mint, sup.value.amount);
+  } catch (e) { console.error('holding error:', e.message); return null; }
+}
+
 export async function getSolBalance(owner) {
   try { return (await connection.getBalance(new PublicKey(owner))) / 1e9; } catch (e) { console.error('sol balance error:', e.message); return null; }
 }
 
 // Tokens a wallet created, found by reading its most recent transactions. Returns { launches, scannedTx } where
 // launches = [{ mint, createdAt (ms) }]. Not the full history: only the last `limit` transactions are read.
-export async function scanCreatedTokens(creator, { limit = 150, deadlineMs = 20_000 } = {}) {
+export async function scanCreatedTokens(creator, { limit = Number(process.env.DEV_SCAN_TX) || 300, deadlineMs = 20_000 } = {}) {
   const sigs = (await connection.getSignaturesForAddress(new PublicKey(creator), { limit })).filter((s) => !s.err).map((s) => s.signature);
   const launches = [];
   let scanned = 0;

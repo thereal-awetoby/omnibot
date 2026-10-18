@@ -161,3 +161,11 @@ test('buildLoreText: debug note explains why there is no AI summary (owner only,
   assert.match(t, /AI summary unavailable: Gemini returned HTTP 403: &lt;API key not valid&gt;/);
   assert.doesNotMatch(buildLoreText({ market: null, meta: null }), /unavailable/);
 });
+
+test('buildDevText: shows the fee wallet when it differs from the deployer', () => {
+  const FEE = '4Nd1mYQq1Bx8oXFqWk9hPjQ4YZvcBt3tDnAp5g8mQ6vE';
+  const t = buildDevText({ market: { symbol: 'X' }, creator: DEV, creatorFees: FEE, launches: [], source: 'rpc', scannedTx: 10, now: NOW });
+  assert.match(t, /Fee wallet/);
+  assert.ok(t.includes(`<code>${DEV}</code>`));
+  assert.doesNotMatch(buildDevText({ market: { symbol: 'X' }, creator: DEV, creatorFees: DEV, launches: [], now: NOW }), /Fee wallet/);
+});

@@ -11,7 +11,7 @@ import {
   buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel } from './intel.js';
-import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, rpcStats } from './chain.js';
+import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
@@ -225,10 +225,15 @@ async function buildHolders(mint) {
 
 async function buildDev(mint) {
   const c = await cachedCard(mint);
-  // RugCheck usually knows the creator; if not, read it from the chain.
-  const creator = c.intel.creator ?? (await getCreatorOnChain(mint));
-  console.log(`dev wallet: ${creator ? creator.slice(0, 6) + '…' + creator.slice(-4) : 'none'} (RugCheck said ${c.intel.rugCreator ? c.intel.rugCreator.slice(0, 6) + '…' + c.intel.rugCreator.slice(-4) : 'nothing'})`);
+  // The dev is the wallet that deployed the token (paid for its creation). pump.fun's stored "creator" (which
+  // RugCheck repeats) can be a different wallet, e.g. when a launch tool or fee sharing is used; it is shown as the fee wallet.
+  const stored = c.intel.creator ?? null;
+  const deployer = await getDeployerOnChain(mint);
+  const creator = deployer ?? stored ?? (await getCreatorOnChain(mint));
+  const sh = (a) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : 'none');
+  console.log(`dev wallet: ${sh(creator)} (deployer ${sh(deployer)}, stored creator ${sh(stored)}, RugCheck ${sh(c.intel.rugCreator)})`);
   if (!creator) return buildDevText({ market: c.market, creator: null });
+  const devPct = !stored || creator === stored ? c.intel.devPct : await getHoldingPct(creator, mint);
   // pump.fun's public list is gone, so read the wallet's own transactions (fast on a Helius RPC).
   const solBalancePromise = getSolBalance(creator);
   let launches = null;
@@ -245,7 +250,7 @@ async function buildDev(mint) {
   try { markets = await fetchPairsByTokens(launches.map((l) => l.mint).slice(0, 30)); } catch (e) { console.error('launch prices error:', e.message); }
   if (c.market) markets.set(mint, c.market);
   return buildDevText({
-    market: c.market, creator, devPct: c.intel.devPct, solBalance,
+    market: c.market, creator, creatorFees: stored, devPct, solBalance,
     launches: mergeLaunches(launches, markets, mint), source, scannedTx, partial: true,
   });
 }

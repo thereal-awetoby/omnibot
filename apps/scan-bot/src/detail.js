@@ -65,7 +65,7 @@ const launchLine = (l, now) => {
 };
 
 // launches: result of mergeLaunches (or null when they could not be loaded).
-export function buildDevText({ market, creator, devPct, solBalance, launches, source, scannedTx, partial = false, now = Date.now() }) {
+export function buildDevText({ market, creator, creatorFees = null, devPct, solBalance, launches, source, scannedTx, partial = false, now = Date.now() }) {
   if (!creator) return `👨‍💻 <b>Dev</b> · ${name(market)}\n\nThe dev wallet for this token is not known yet. Try again in a minute.`;
   const head = [`👨‍💻 ${walletLink(creator)}`];
   const facts = [];
@@ -75,6 +75,7 @@ export function buildDevText({ market, creator, devPct, solBalance, launches, so
     facts.push(`Deploys/day: <b>${(launches.length / days).toFixed(launches.length / days >= 10 ? 0 : 1)}</b>`);
   }
   if (typeof solBalance === 'number') facts.push(`Balance: ◎ ${solBalance.toFixed(solBalance >= 10 ? 1 : 2)} SOL`);
+  if (creatorFees && creatorFees !== creator) facts.push(`Fee wallet: ${walletLink(creatorFees)}`);
   if (typeof devPct === 'number') facts.push(`Holds <b>${devPct.toFixed(devPct % 1 ? 1 : 0)}%</b> of ${market?.symbol ? `$${esc(market.symbol)}` : 'this token'}`);
   facts.forEach((f, i) => head.push(`${i === facts.length - 1 ? '└' : '├'} ${f}`));
   const lines = [...head, ''];
