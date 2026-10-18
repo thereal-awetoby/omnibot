@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import {
-  upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc,
+  upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
   recordFirstCall, getFirstCall, listChatCalls, listUserCalls,
   MAX_WATCHES,
@@ -12,7 +12,7 @@ import {
 } from './scan.js';
 import { startIntel, gatherIntel } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain } from './chain.js';
-import { fetchPumpCreated, fetchLoreAI } from './sources.js';
+import { fetchLoreAI, searchTokens } from './sources.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
 
 if (!process.env.SCAN_BOT_TOKEN) throw new Error('SCAN_BOT_TOKEN is not set');
@@ -61,9 +61,13 @@ async function getMarket(mint) {
   return null;
 }
 
-const cardKeyboard = (mint, watched) =>
-  new InlineKeyboard()
-    .url('⚡ Buy on Omni Trade', tradeLink(mint)).row()
+// Bubblemaps: opens inside Telegram as a mini app in private chats; Telegram only allows that there, so groups get a normal link.
+const bubbleUrl = (mint) => `https://v2.bubblemaps.io/map?address=${mint}`;
+const bubbleButton = (kb, mint, group) => (group ? kb.url('🫧 Bubblemap', bubbleUrl(mint)) : kb.webApp('🫧 Bubblemap', bubbleUrl(mint)));
+
+const cardKeyboard = (mint, watched, group = false) =>
+  bubbleButton(new InlineKeyboard()
+    .url('⚡ Buy on Omni Trade', tradeLink(mint)).row(), mint, group).row()
     .text('👥 Top holders', `h:${mint}`).text('👨‍💻 Dev', `d:${mint}`).text('📖 Lore', `l:${mint}`).row()
     .text(watched ? '✖ Unwatch' : '⭐ Watch', `${watched ? 'uw' : 'w'}:${mint}`).text('↻ Refresh', `r:${mint}`).row()
     .url('📈 DexScreener', `https://dexscreener.com/solana/${mint}`).url('🔍 Solscan', `https://solscan.io/token/${mint}`).row()
@@ -128,7 +132,7 @@ async function showToken(ctx, mint, { edit = false, record = false } = {}) {
     group ? callFor(ctx, mint, market, record).catch((e) => { console.error('call error:', e.message); return null; }) : null,
   ]);
   const callLine = buildCallLine(call, market?.priceUsd);
-  const kb = cardKeyboard(mint, watched);
+  const kb = cardKeyboard(mint, watched, group);
   // The token's banner (or logo) shows above the text, like Rick does.
   const previewUrl = market?.headerUrl || market?.imageUrl || null;
   const preview = previewUrl ? { link_preview_options: { url: previewUrl, show_above_text: true, prefer_large_media: true } } : {};
@@ -183,14 +187,14 @@ async function buildDev(mint) {
   // RugCheck usually knows the creator; if not, read it from the chain.
   const creator = c.intel.creator ?? (await getCreatorOnChain(mint));
   if (!creator) return buildDevText({ market: c.market, creator: null });
-  const [solBalance, pumpList] = await Promise.all([getSolBalance(creator), fetchPumpCreated(creator)]);
-  let launches = pumpList?.length ? pumpList : null;
-  let source = launches ? 'pump' : null;
+  // pump.fun's public list is gone, so read the wallet's own transactions (fast on a Helius RPC).
+  const solBalancePromise = getSolBalance(creator);
+  let launches = null;
   let scannedTx = 0;
-  if (!launches) { // pump.fun gave nothing: read the wallet's own transactions instead
-    try { const r = await scanCreatedTokens(creator); launches = r.launches; scannedTx = r.scannedTx; source = 'rpc'; }
-    catch (e) { console.error('dev scan error:', e.message); launches = null; }
-  }
+  try { const r = await scanCreatedTokens(creator); launches = r.launches; scannedTx = r.scannedTx; }
+  catch (e) { console.error('dev scan error:', e.message); }
+  const source = 'rpc';
+  const solBalance = await solBalancePromise;
   // This token was made by this wallet, so it always belongs in the list.
   if (!launches?.some((l) => l.mint === mint)) {
     launches = [...(launches ?? []), { mint, createdAt: c.market?.createdAt ?? c.intel.detectedAt ?? null }];
@@ -200,7 +204,7 @@ async function buildDev(mint) {
   if (c.market) markets.set(mint, c.market);
   return buildDevText({
     market: c.market, creator, devPct: c.intel.devPct, solBalance,
-    launches: mergeLaunches(launches, markets, mint), source, scannedTx, partial: source !== 'pump',
+    launches: mergeLaunches(launches, markets, mint), source, scannedTx, partial: true,
   });
 }
 
@@ -262,7 +266,7 @@ async function doUnwatch(ctx, mint, { edit = false } = {}) {
 
 bot.command('start', showHome);
 bot.command('help', (ctx) => ctx.reply(
-  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard  /calls  (groups)\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/chart <address>\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
+  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard  /calls  (groups)\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
 ));
 bot.command('token', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
@@ -301,6 +305,24 @@ bot.command('dp', withMint('/dp', async (ctx, mint) => {
   if (!m) return ctx.reply('No market data found for that token yet.');
   return ctx.reply(`${m.symbol ? '$' + esc(m.symbol) : short(mint)}\nDEX Paid: ${m.hasProfile ? '✅ yes' : '❌ no'}`, HTML);
 }));
+bot.command('bm', withMint('/bm', async (ctx, mint) => ctx.reply('Bubblemap (who holds what, and which wallets are linked):', { reply_markup: bubbleButton(new InlineKeyboard(), mint, isGroup(ctx)) })));
+bot.command('c', withMint('/c', async (ctx, mint) => ctx.reply('Open the live chart:', {
+  reply_markup: new InlineKeyboard().url('📈 DexScreener', `https://dexscreener.com/solana/${mint}`).url('Birdeye', `https://birdeye.so/token/${mint}?chain=solana`).row().url('GMGN', `https://gmgn.ai/sol/token/${mint}`).url('🔍 Solscan', `https://solscan.io/token/${mint}`),
+})));
+bot.command('i', (ctx) => showTrending(ctx));
+bot.command('s', async (ctx) => {
+  const q = ctx.match.trim();
+  if (!q) return ctx.reply('Usage: /s <name or symbol>\nExample: /s barber dog');
+  const mint = parseMintInput(q);
+  if (mint) return showToken(ctx, mint);
+  let list;
+  try { list = await withTyping(ctx, () => searchTokens(q)); }
+  catch (e) { console.error('search error:', e.message); return ctx.reply('Search is not working right now. Try again in a minute.'); }
+  if (!list.length) return ctx.reply('No Solana token found for that name.');
+  const kb = new InlineKeyboard();
+  list.forEach((t, i) => { kb.text(`${t.symbol ? '$' + t.symbol : short(t.mint)}${t.marketCapUsd ? ' · ' + formatUsd(t.marketCapUsd) : ''}`, `t:${t.mint}`); if (i % 2 === 1) kb.row(); });
+  return ctx.reply(`Results for "${esc(q)}": tap one for its card.`, { ...HTML, reply_markup: kb });
+});
 bot.command('p', withMint('/p', async (ctx, mint) => {
   const m = await withTyping(ctx, () => getMarket(mint));
   if (!m?.priceUsd) return ctx.reply('No price found for that token yet.');
@@ -417,7 +439,10 @@ bot.start({
       { command: 'soc', description: 'Get social media links' },
       { command: 'dp', description: 'Check DEX Paid status' },
       { command: 'p', description: 'Simple price query' },
-      { command: 'chart', description: 'Open a chart' },
+      { command: 'bm', description: 'View the bubblemap' },
+      { command: 'c', description: 'Open a chart' },
+      { command: 's', description: 'Search for a token' },
+      { command: 'i', description: 'Get top coins' },
       { command: 'trending', description: 'View trending tokens' },
       { command: 'watch', description: 'Your watchlist / watch a token' },
       { command: 'leaderboard', description: 'Group call leaderboard' },

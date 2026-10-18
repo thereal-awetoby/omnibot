@@ -115,6 +115,30 @@ export async function fetchPumpCreated(creator, fetchImpl = fetch) {
   return null;
 }
 
+// ---------- search by name or symbol (DexScreener) ----------
+
+// body: DexScreener search answer. One entry per Solana token (its deepest pool), biggest liquidity first.
+export function parseSearch(body, limit = 8) {
+  const best = new Map();
+  for (const p of Array.isArray(body?.pairs) ? body.pairs : []) {
+    const mint = p?.baseToken?.address;
+    if (p?.chainId !== 'solana' || typeof mint !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) continue;
+    const liq = num(p.liquidity?.usd) ?? 0;
+    if (!best.has(mint) || liq > best.get(mint).liquidityUsd) {
+      best.set(mint, { mint, symbol: str(p.baseToken.symbol), name: str(p.baseToken.name), liquidityUsd: liq, marketCapUsd: num(p.marketCap ?? p.fdv) });
+    }
+  }
+  return [...best.values()].sort((a, b) => b.liquidityUsd - a.liquidityUsd).slice(0, limit);
+}
+
+export async function searchTokens(query, fetchImpl = fetch) {
+  const q = String(query ?? '').trim().slice(0, 60);
+  if (!q) return [];
+  const res = await fetchImpl(`https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(q)}`, { signal: AbortSignal.timeout(8_000) });
+  if (!res.ok) throw new Error(`DexScreener search returned HTTP ${res.status}`);
+  return parseSearch(await res.json());
+}
+
 // ---------- AI "lore": the story behind a token (needs ANTHROPIC_API_KEY) ----------
 
 const loreCache = new Map(); // mint -> { at, text }

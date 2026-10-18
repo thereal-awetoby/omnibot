@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI } from './sources.js';
+import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, parseSearch, searchTokens } from './sources.js';
 
 const json = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
@@ -172,4 +172,28 @@ test('fetchLoreAI: no key means no call; reads the text, caches, respects the da
   await fetchLoreAI({ mint: 'C2' }, { apiKey: 'k', dailyMax: 2 }, counting, later);
   assert.equal(await fetchLoreAI({ mint: 'C3' }, { apiKey: 'k', dailyMax: 2 }, counting, later), null);
   assert.equal(n, 2);
+});
+
+test('parseSearch keeps Solana tokens once each, deepest pool first, and drops junk', () => {
+  const A = 'So11111111111111111111111111111111111111112';
+  const B = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  const body = { pairs: [
+    { chainId: 'solana', baseToken: { address: A, symbol: 'AAA', name: 'Aaa' }, liquidity: { usd: 100 }, marketCap: 1000 },
+    { chainId: 'solana', baseToken: { address: A, symbol: 'AAA', name: 'Aaa' }, liquidity: { usd: 900 }, marketCap: 2000 },
+    { chainId: 'solana', baseToken: { address: B, symbol: 'BBB' }, liquidity: { usd: 5000 } },
+    { chainId: 'ethereum', baseToken: { address: '0xabc', symbol: 'ETH1' }, liquidity: { usd: 99999 } },
+    { chainId: 'solana', baseToken: { address: 'short' }, liquidity: { usd: 1 } },
+  ] };
+  const r = parseSearch(body);
+  assert.deepEqual(r.map((x) => x.symbol), ['BBB', 'AAA']);
+  assert.equal(r[1].marketCapUsd, 2000);
+  assert.deepEqual(parseSearch(null), []);
+});
+
+test('searchTokens calls DexScreener search and throws on HTTP errors', async () => {
+  let url = '';
+  await searchTokens('bar ber', async (u) => { url = u; return { ok: true, json: async () => ({ pairs: [] }) }; });
+  assert.match(url, /search\?q=bar%20ber$/);
+  await assert.rejects(searchTokens('x', async () => ({ ok: false, status: 500 })), /HTTP 500/);
+  assert.deepEqual(await searchTokens('  ', async () => { throw new Error('no call'); }), []);
 });
