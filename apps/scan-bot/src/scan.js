@@ -74,20 +74,21 @@ export function safeUrl(u) {
 }
 
 const SOCIAL_NAMES = { twitter: 'X', x: 'X', telegram: 'Telegram', discord: 'Discord', website: 'Web' };
-export function buildInfoLine(market) {
-  const parts = [market.hasProfile ? '✅ DexScreener profile' : '▫️ No DexScreener profile'];
+// "🔗 Social  X · Telegram · Web": only safe http(s) links, no duplicates, at most 5.
+export function buildSocialLine(market) {
   const links = [];
   for (const w of market.websites ?? []) links.push({ label: w.label && w.label.length <= 12 ? w.label : 'Web', url: w.url });
   for (const x of market.socials ?? []) links.push({ label: SOCIAL_NAMES[String(x.type).toLowerCase()] ?? String(x.type ?? 'Link').slice(0, 12), url: x.url });
+  const parts = [];
   const seen = new Set();
   for (const l of links) {
     const href = safeUrl(l.url);
     if (!href || seen.has(href)) continue;
     seen.add(href);
     parts.push(`<a href="${href}">${esc(l.label)}</a>`);
-    if (seen.size >= 5) break;
+    if (parts.length >= 5) break;
   }
-  return parts.join(' · ');
+  return `🔗 <b>Social</b>  ${parts.length ? parts.join(' · ') : '<i>none listed</i>'}`;
 }
 
 // ---- card layout ----
@@ -103,99 +104,68 @@ export function formatPriceCard(p) {
   return `$0.0${String(zeros).split('').map((d) => SUB[Number(d)]).join('')}${mant.replace('.', '')}`;
 }
 
-const LABEL_W = 8; // longest label is 7 characters, so there is always a gap before the value
+const LABEL_W = 9; // longest label is "DEX Paid" (8), so there is always a gap before the value
 const lab = (t) => `<code>${t.padEnd(LABEL_W)}</code>`;
 const row = (label, value) => `${lab(label)}${value}`;
 const val = (t) => `<b>${t}</b>`;
 const NA = '<i>n/a</i>';
 const tree = (rows) => rows.map((r, i) => `${i === rows.length - 1 ? '└' : '├'} ${r}`);
-const lvl = (v, warnAt, badAt) => (v > badAt ? '⚠️' : v > warnAt ? '🟡' : '✅');
 const pctText = (n, d = 1) => `${n.toFixed(d)}%`;
 
+// Short rows on purpose: each one fits on a phone screen without wrapping.
 function statsBlock(m, now, intel = null) {
   const rows = [];
   const d24 = m.change?.h24 ?? m.change24h;
   rows.push(row('Price', `${val(formatPriceCard(m.priceUsd))}${d24 != null ? `  (${shortPct(d24)})` : ''}`));
   const fdvDiffers = m.fdvUsd != null && m.marketCapUsd != null && Math.abs(m.fdvUsd - m.marketCapUsd) / Math.max(m.marketCapUsd, 1) > 0.01;
   rows.push(row('MCap', `${val(formatUsd(m.marketCapUsd))}${fdvDiffers ? `  ·  FDV ${formatUsd(m.fdvUsd)}` : ''}`));
-  const ratio = m.liquidityUsd > 0 && m.marketCapUsd > 0 ? `  ·  ${(m.marketCapUsd / m.liquidityUsd).toFixed(1)}x MCap/Liq` : '';
-  rows.push(row('Liq', `${val(formatUsd(m.liquidityUsd))}${ratio}`));
-  const v = m.volume;
-  if (v && (v.m5 != null || v.h1 != null || v.h6 != null || v.h24 != null)) {
-    rows.push(row('Vol', `5m ${formatUsd(v.m5)} · 1h ${formatUsd(v.h1)} · 24h ${formatUsd(v.h24)}`));
-  } else if (m.volume24h != null) {
-    rows.push(row('Vol', `24h ${formatUsd(m.volume24h)}`));
-  }
+  rows.push(row('Liq', val(formatUsd(m.liquidityUsd))));
+  const vol = [];
+  if (m.volume?.h1 != null) vol.push(`1h ${formatUsd(m.volume.h1)}`);
+  if (m.volume?.h24 != null) vol.push(`24h ${formatUsd(m.volume.h24)}`);
+  if (!vol.length && m.volume24h != null) vol.push(`24h ${formatUsd(m.volume24h)}`);
+  if (vol.length) rows.push(row('Vol', vol.join(' · ')));
+  const h1 = m.change?.h1 ?? m.change1h;
   const t = m.txns?.h1;
-  if (t && t.buys + t.sells > 0) {
-    rows.push(row('1H', `🟢 ${formatCount(t.buys)} buys · 🔴 ${formatCount(t.sells)} sells  (${Math.round((t.buys / (t.buys + t.sells)) * 100)}% buys)`));
-  }
-  const c = m.change;
-  if (c && (c.m5 != null || c.h1 != null || c.h6 != null || c.h24 != null)) {
-    rows.push(row('Moves', `5m ${shortPct(c.m5)} · 1h ${shortPct(c.h1)} · 6h ${shortPct(c.h6)}`));
-  } else if (m.change1h != null) {
-    rows.push(row('Moves', `1h ${shortPct(m.change1h)}`));
-  }
+  const hour = [];
+  if (h1 != null) hour.push(shortPct(h1));
+  if (t && t.buys + t.sells > 0) hour.push(`🟢 ${formatCount(t.buys)} · 🔴 ${formatCount(t.sells)}`);
+  if (hour.length) rows.push(row('1H', hour.join(' · ')));
   const ath = intel?.ath;
   if (ath && ath.athMcapUsd != null) {
     const ago = formatDuration(now - ath.athAt);
-    rows.push(row('ATH', `${val(formatUsd(ath.athMcapUsd))}  (${shortPct(ath.fromAthPct)}${ago ? ` · ${ago} ago` : ''})`));
+    rows.push(row('ATH', `${val(formatUsd(ath.athMcapUsd))}  (${shortPct(ath.fromAthPct)})${ago ? ` · ${ago}` : ''}`));
   }
   return ['<b>📊 Stats</b>', ...tree(rows)];
 }
 
-// Same rows every time, so the card never changes shape: unknown values show n/a.
-function securityBlock(sec, intel) {
+// Facts only: numbers and on/off states, no ratings. Same rows every time, unknown values show n/a.
+function securityBlock(sec, intel, market) {
   const rows = [];
   rows.push(row('Auth', sec ? `Mint ${sec.mintAuthority ? '⚠️ active' : '✅ off'} · Freeze ${sec.freezeAuthority ? '⚠️ active' : '✅ off'}` : NA));
 
   const lp = intel?.lpLockedPct;
-  rows.push(row('LP', typeof lp === 'number' ? `${val(`${pctText(lp, lp % 1 ? 1 : 0)} locked/burned`)} ${lp >= 90 ? '✅' : lp >= 50 ? '🟡' : '⚠️'}` : NA));
+  rows.push(row('LP', typeof lp === 'number' ? `${val(`${pctText(lp, lp % 1 ? 1 : 0)} locked/burned`)}${lp >= 90 ? ' ✅' : ''}` : NA));
 
   const dev = intel?.devPct;
-  rows.push(row('Dev', typeof dev === 'number'
-    ? (dev === 0 ? `${val('holds 0%')} ✅  (sold or moved)` : `${val(`holds ${pctText(dev)}`)} ${lvl(dev, 5, 15)}`)
-    : NA));
+  rows.push(row('Dev', typeof dev === 'number' ? (dev === 0 ? `${val('holds 0%')}  (sold or moved)` : val(`holds ${pctText(dev)}`)) : NA));
 
   const t10 = intel?.top10Pct;
-  rows.push(row('Top 10', typeof t10 === 'number'
-    ? `${val(pctText(t10))} ${lvl(t10, 30, 50)}  ·  largest ${pctText(intel.top1Pct)} ${lvl(intel.top1Pct, 10, 20)}`
-    : NA));
+  rows.push(row('Top 10', typeof t10 === 'number' ? `${val(pctText(t10))}  ·  largest ${pctText(intel.top1Pct)}` : NA));
   const top = (intel?.top ?? []).slice(0, 5);
   if (top.length) rows.push(row('TH', top.map((h) => h.pct.toFixed(1)).join(' | ')));
 
-  const ip = intel?.insiderPct;
-  if (typeof ip === 'number' || intel?.insiderNetworks) {
-    let txt;
-    if (typeof ip === 'number' && ip > 0) txt = `${val(pctText(ip))} ${lvl(ip, 10, 20)}${intel.insiderNetworks ? `  (${intel.insiderNetworks} linked group${intel.insiderNetworks > 1 ? 's' : ''})` : ''}`;
-    else if (intel.insiderNetworks) txt = `${val(`${intel.insiderNetworks} linked group${intel.insiderNetworks > 1 ? 's' : ''}`)} 🟡${intel.insiderWallets ? `  (${intel.insiderWallets} wallets)` : ''}`;
-    else txt = `${val('none detected')} ✅`;
-    rows.push(row('Insider', txt));
-  } else {
-    rows.push(row('Insider', NA));
-  }
-
-  rows.push(row('Fresh', typeof intel?.fresh7dPct === 'number'
-    ? `1D ${val(pctText(intel.fresh1dPct))} · 7D ${val(pctText(intel.fresh7dPct))}  (top ${intel.walletsChecked})`
-    : NA));
+  rows.push(row('Fresh', typeof intel?.fresh7dPct === 'number' ? `1D ${val(pctText(intel.fresh1dPct))} · 7D ${val(pctText(intel.fresh7dPct))}` : NA));
+  if (market) rows.push(row('DEX Paid', market.hasProfile ? `${val('yes')} ✅` : 'no'));
   rows.push(row('Holders', typeof intel?.holdersTotal === 'number' ? val(Math.round(intel.holdersTotal).toLocaleString('en-US')) : NA));
   return ['<b>🛡 Security</b>', ...tree(rows)];
 }
 
-const RISK_LABEL = { low: '🟢 LOW', medium: '🟡 MEDIUM', high: '🔴 HIGH' };
-function riskBlock(risk) {
-  if (!risk) return [];
-  const lines = [`<b>⚖️ Risk: ${RISK_LABEL[risk.level]}</b>${risk.partial ? '  <i>(on-chain checks missing)</i>' : ''}`];
-  for (const f of risk.flags.slice(0, 5)) lines.push(`▫️ ${esc(f)}`);
-  if (!risk.flags.length) lines.push('▫️ No red flags found in the data we can see');
-  lines.push('<i>Rule-based check on public data. Not advice.</i>');
-  return lines;
-}
-
-export function buildScanCard({ mint, market, security = null, intel = null, risk = null, callLine = null, loading = false, watched = false, now = Date.now() }) {
+// The whole card in one go: nothing here says "loading", the bot waits until it has the data.
+export function buildScanCard({ mint, market, security = null, intel = null, callLine = null, watched = false, now = Date.now() }) {
   if (!market) {
     const lines = [`🪙 <b>Unknown token</b>${watched ? '  ⭐' : ''}`, `<code>${mint}</code>`, '', 'No market data found yet (very new token, or not on a DEX).'];
-    if (!loading && (security || intel)) lines.push('', ...securityBlock(security, intel), '', ...riskBlock(risk));
+    if (security || intel) lines.push('', ...securityBlock(security, intel, null));
     if (callLine) lines.push('', callLine);
     return lines.join('\n');
   }
@@ -208,9 +178,9 @@ export function buildScanCard({ mint, market, security = null, intel = null, ris
     '',
     ...statsBlock(market, now, intel),
     '',
-    ...(loading ? ['⏳ <i>Running safety scan: holders, insiders, LP, dev…</i>'] : [...securityBlock(security, intel), '', ...riskBlock(risk)]),
+    ...securityBlock(security, intel, market),
     '',
-    buildInfoLine(market),
+    buildSocialLine(market),
   ];
   if (callLine) lines.push('', callLine);
   return lines.join('\n');

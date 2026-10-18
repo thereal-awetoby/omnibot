@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth } from './sources.js';
+import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated } from './sources.js';
 
 const json = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
@@ -89,4 +89,41 @@ test('fetchAth picks hourly for young pools, daily for old, caches, and pauses a
   assert.equal(await fetchAth({ pairAddress: 'P4', mint: 'M' }, ok, now + 1000), null); // paused
   assert.equal(urls.length, 2);
   assert.equal(await fetchAth({ pairAddress: null, mint: 'M' }, ok, now + 120_000), null);
+});
+
+test('parseRugCheck keeps the insider flag per holder, the creator info and the token description', () => {
+  const r = parseRugCheck({
+    ...report, detectedAt: '2026-10-17T10:00:00Z',
+    fileMeta: { name: 'Barber Dog', symbol: 'BDOG', description: '  A dog at the barber.  ' },
+  });
+  assert.deepEqual(r.top.map((h) => h.insider), [true, true, false]);
+  assert.deepEqual(r.meta, { name: 'Barber Dog', symbol: 'BDOG', description: 'A dog at the barber.' });
+  assert.equal(r.detectedAt, Date.parse('2026-10-17T10:00:00Z'));
+  const none = parseRugCheck({});
+  assert.deepEqual(none.meta, { name: null, symbol: null, description: null });
+  assert.equal(none.detectedAt, null);
+  assert.equal(parseRugCheck({ fileMeta: { description: 42 }, detectedAt: 'nope' }).meta.description, null);
+});
+
+const A1 = 'So11111111111111111111111111111111111111112';
+test('parsePumpCreated reads coins from a few shapes and drops junk', () => {
+  const coins = [{ mint: A1, symbol: 'AAA', created_timestamp: 1_700_000_000_000 }, { mint: 'bad' }, null, { mint: A1, created_timestamp: 1_700_000_000 }];
+  for (const body of [coins, { coins }, { data: coins }]) {
+    const out = parsePumpCreated(body);
+    assert.equal(out.length, 2);
+    assert.deepEqual(out[0], { mint: A1, symbol: 'AAA', createdAt: 1_700_000_000_000 });
+    assert.equal(out[1].createdAt, 1_700_000_000_000); // seconds are converted to ms
+    assert.equal(out[1].symbol, null);
+  }
+  assert.equal(parsePumpCreated({ message: 'nope' }), null);
+  assert.equal(parsePumpCreated(null), null);
+});
+
+test('fetchPumpCreated asks the creator endpoint and returns null when it fails', async () => {
+  let url;
+  const out = await fetchPumpCreated('CREATOR1', async (u) => { url = u; return json([{ mint: A1 }]); });
+  assert.match(url, /^https:\/\/frontend-api-v3\.pump\.fun\/coins\/user-created-coins\/CREATOR1\?/);
+  assert.equal(out.length, 1);
+  assert.equal(await fetchPumpCreated('C', async () => json({}, 404)), null);
+  assert.equal(await fetchPumpCreated('C', async () => { throw new Error('offline'); }), null);
 });

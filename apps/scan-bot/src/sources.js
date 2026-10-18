@@ -2,6 +2,7 @@
 // and GeckoTerminal (price history for ATH). Parsers are pure so they are unit tested with sample payloads.
 
 const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+const str = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 100) : null);
 
 // ---------- RugCheck ----------
 
@@ -28,10 +29,16 @@ export function parseRugCheck(r) {
     .slice(0, 5)
     .map((x) => ({ name: String(x.name), level: x.level }));
 
-  const top = real.slice(0, 10).map((h) => ({ owner: String(h.owner ?? h.address ?? ''), pct: num(h.pct) ?? 0 }));
+  const top = real.slice(0, 10).map((h) => ({ owner: String(h.owner ?? h.address ?? ''), pct: num(h.pct) ?? 0, insider: h.insider === true }));
   const nets = Array.isArray(r.insiderNetworks) ? r.insiderNetworks : [];
   const insiderWallets = nets.reduce((a, n) => a + (num(n?.size) ?? num(n?.activeAccounts) ?? 0), 0);
+  // The token's own published info (name, description), as the creator wrote it.
+  const fm = r.fileMeta && typeof r.fileMeta === 'object' ? r.fileMeta : {};
+  const tm = r.tokenMeta && typeof r.tokenMeta === 'object' ? r.tokenMeta : {};
+  const description = typeof fm.description === 'string' ? fm.description.trim() : '';
   return {
+    meta: { name: str(fm.name ?? tm.name), symbol: str(fm.symbol ?? tm.symbol), description: description || null },
+    detectedAt: typeof r.detectedAt === 'string' && Number.isFinite(Date.parse(r.detectedAt)) ? Date.parse(r.detectedAt) : null,
     totalHolders: num(r.totalHolders),
     top,
     top1Pct: top.length ? Math.round(top[0].pct * 10) / 10 : null,
@@ -60,6 +67,38 @@ export async function fetchRugCheck(mint, fetchImpl = fetch) {
     return value;
   } catch (e) {
     console.error('rugcheck error:', e.message);
+    return null;
+  }
+}
+
+// ---------- pump.fun: coins a wallet created (best effort) ----------
+
+// The list endpoint answers with an array of coins. Anything unexpected gives null, and the Dev view
+// falls back to reading the wallet's own transactions.
+export function parsePumpCreated(body) {
+  const list = Array.isArray(body) ? body : Array.isArray(body?.coins) ? body.coins : Array.isArray(body?.data) ? body.data : null;
+  if (!list) return null;
+  const out = [];
+  for (const c of list) {
+    if (!c || typeof c.mint !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(c.mint)) continue;
+    const ts = Number(c.created_timestamp);
+    out.push({
+      mint: c.mint,
+      symbol: typeof c.symbol === 'string' && c.symbol ? c.symbol.slice(0, 20) : null,
+      createdAt: Number.isFinite(ts) && ts > 0 ? (ts < 1e11 ? ts * 1000 : ts) : null,
+    });
+  }
+  return out;
+}
+
+export async function fetchPumpCreated(creator, fetchImpl = fetch) {
+  try {
+    const url = `https://frontend-api-v3.pump.fun/coins/user-created-coins/${creator}?offset=0&limit=50&includeNsfw=true`;
+    const res = await fetchImpl(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(4_000) });
+    if (!res.ok) throw new Error(`pump.fun returned HTTP ${res.status}`);
+    return parsePumpCreated(await res.json());
+  } catch (e) {
+    console.error('pump created-coins error:', e.message);
     return null;
   }
 }

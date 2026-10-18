@@ -2,9 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseMintInput, changePct, formatChange, shouldAlert, parseAlertPct, buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText,
-  formatPriceCard, formatCount, shortPct, formatDuration, safeUrl, buildInfoLine, buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, extractMint, multiple,
+  formatPriceCard, formatCount, shortPct, formatDuration, safeUrl, buildSocialLine, buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, extractMint, multiple,
 } from './scan.js';
-import { assessRisk } from './security.js';
 
 const MINT = 'So11111111111111111111111111111111111111112';
 
@@ -79,13 +78,13 @@ test('formatters', () => {
   assert.equal(safeUrl('https://a.io/?x=1&y="2"'), 'https://a.io/?x=1&amp;y=%222%22');
 });
 
-test('buildInfoLine keeps only safe links and flags the profile', () => {
-  const t = buildInfoLine(market);
-  assert.match(t, /✅ DexScreener profile/);
+test('buildSocialLine says Social, keeps only safe links, never mentions DexScreener', () => {
+  const t = buildSocialLine(market);
+  assert.match(t, /^🔗 <b>Social<\/b>  /);
   assert.match(t, /<a href="https:\/\/a\.io\/">Website<\/a>/);
   assert.match(t, />X<\/a>/);
-  assert.doesNotMatch(t, /javascript/);
-  assert.match(buildInfoLine({ websites: [], socials: [] }), /No DexScreener profile/);
+  assert.doesNotMatch(t, /javascript|DexScreener/);
+  assert.match(buildSocialLine({ websites: [], socials: [] }), /none listed/);
 });
 
 test('call line, leaderboard and user calls', () => {
@@ -124,13 +123,6 @@ test('extractMint finds an address inside chat text but not inside longer words'
   assert.equal(extractMint(`${MINT}${MINT}`), null);
 });
 
-test('loading card has market numbers and a scanning note instead of security', () => {
-  const card = buildScanCard({ mint: MINT, market, loading: true, now: NOW });
-  assert.match(card, /Running safety scan/);
-  assert.doesNotMatch(card, /Security/);
-  assert.match(card, /MCap/);
-});
-
 test('formatPriceCard: 4 significant digits and subscript zeros for tiny prices', () => {
   assert.equal(formatPriceCard(0.00002491), '$0.0₄2491');
   assert.equal(formatPriceCard(0.00000312), '$0.0₅3120');
@@ -145,66 +137,76 @@ test('formatPriceCard: 4 significant digits and subscript zeros for tiny prices'
 });
 
 const fullIntel = {
-  lpLockedPct: 100, devPct: 0, insiderPct: 13.5, insiderNetworks: 2, insiderWallets: 9, fresh1dPct: 6.1, fresh7dPct: 13, walletsChecked: 9, holdersTotal: 1812,
+  lpLockedPct: 100, devPct: 0, fresh1dPct: 6.1, fresh7dPct: 13, walletsChecked: 9, holdersTotal: 1812,
   top10Pct: 31.2, top1Pct: 11, top: [{ owner: 'a', pct: 11 }, { owner: 'b', pct: 6.2 }, { owner: 'c', pct: 5 }],
   ath: { athMcapUsd: 1_060_000, fromAthPct: -4, athAt: NOW - 4 * 60_000 },
 };
 
-test('full card: every section, aligned rows, escaped text', () => {
-  const risk = assessRisk({ security, market, intel: fullIntel, now: NOW });
-  const card = buildScanCard({ mint: MINT, market, security, intel: fullIntel, risk, watched: true, now: NOW });
+test('full card: compact rows, facts only, escaped text', () => {
+  const card = buildScanCard({ mint: MINT, market, security, intel: fullIntel, watched: true, now: NOW });
   assert.match(card, /\$A&lt;B/);
   assert.match(card, /N&amp;M/);
   assert.match(card, /⭐/);
   assert.match(card, /└ Solana · Raydium · 🌱 9h · 🔥 2/);
-  assert.match(card, /<code>Price   <\/code><b>\$0\.5<\/b>  \(\+2283%\)/);
-  assert.match(card, /<code>MCap    <\/code><b>\$2\.00M<\/b>  ·  FDV \$2\.50M/);
-  assert.match(card, /40\.0x MCap\/Liq/);
-  assert.match(card, /<code>1H      <\/code>🟢 4\.1K buys · 🔴 2\.9K sells  \(59% buys\)/);
-  assert.match(card, /<code>ATH     <\/code><b>\$1\.06M<\/b>  \(-4\.0% · 4m ago\)/);
+  assert.match(card, /<code>Price    <\/code><b>\$0\.5<\/b>  \(\+2283%\)/);
+  assert.match(card, /<code>MCap     <\/code><b>\$2\.00M<\/b>  ·  FDV \$2\.50M/);
+  assert.match(card, /<code>Liq      <\/code><b>\$50\.00K<\/b>\n/);
+  assert.match(card, /<code>Vol      <\/code>1h \$20\.00K · 24h \$400\.00K\n/);
+  assert.match(card, /<code>1H       <\/code>\+43\.9% · 🟢 4\.1K · 🔴 2\.9K\n/);
+  assert.match(card, /<code>ATH      <\/code><b>\$1\.06M<\/b>  \(-4\.0%\) · 4m\n/);
   assert.match(card, /Mint ✅ off · Freeze ✅ off/);
   assert.match(card, /<b>100% locked\/burned<\/b> ✅/);
-  assert.match(card, /<b>holds 0%<\/b> ✅  \(sold or moved\)/);
-  assert.match(card, /<b>31\.2%<\/b> 🟡  ·  largest 11\.0% 🟡/);
-  assert.match(card, /<code>TH      <\/code>11\.0 \| 6\.2 \| 5\.0/);
-  assert.match(card, /<b>13\.5%<\/b> 🟡  \(2 linked groups\)/);
-  assert.match(card, /1D <b>6\.1%<\/b> · 7D <b>13\.0%<\/b>  \(top 9\)/);
+  assert.match(card, /<b>holds 0%<\/b>  \(sold or moved\)/);
+  assert.match(card, /<b>31\.2%<\/b>  ·  largest 11\.0%/);
+  assert.match(card, /<code>TH       <\/code>11\.0 \| 6\.2 \| 5\.0/);
+  assert.match(card, /1D <b>6\.1%<\/b> · 7D <b>13\.0%<\/b>\n/);
+  assert.match(card, /<code>DEX Paid <\/code><b>yes<\/b> ✅/);
   assert.match(card, /<b>1,812<\/b>/);
-  assert.match(card, /Risk: (🟢 LOW|🟡 MEDIUM)/);
-  assert.match(card, /Not advice/);
+  assert.match(card, /🔗 <b>Social<\/b>/);
   // tree glyphs: the last row of each block closes with └
   assert.equal((card.match(/└/g) ?? []).length, 3); // header line + stats + security
 });
 
+test('the card never contains risk wording, ratings, loading text or the old clutter', () => {
+  const card = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, insiderPct: 40, insiderNetworks: 3, insiderWallets: 9 }, now: NOW });
+  for (const bad of [/risk/i, /MEDIUM|HIGH|LOW/, /Not advice/, /Running safety|loading|⏳/i, /Insider/, /linked group/, /MCap\/Liq/, /Moves/, /DexScreener/, /🟡|⚠️/]) {
+    assert.doesNotMatch(card, bad, String(bad));
+  }
+});
+
+test('risky authorities are shown as plain facts', () => {
+  const card = buildScanCard({ mint: MINT, market, security: { mintAuthority: 'x', freezeAuthority: null }, intel: fullIntel, now: NOW });
+  assert.match(card, /Mint ⚠️ active · Freeze ✅ off/);
+});
+
 test('card keeps the same rows when data is missing (n/a instead of vanishing)', () => {
-  const card = buildScanCard({ mint: MINT, market, security: null, intel: null, risk: assessRisk({ security: null, market, now: NOW }), now: NOW });
-  for (const label of ['Auth', 'LP', 'Dev', 'Top 10', 'Insider', 'Fresh', 'Holders']) assert.match(card, new RegExp(`<code>${label.padEnd(8)}</code><i>n/a</i>`), label);
-  assert.match(card, /on-chain checks missing/);
+  const card = buildScanCard({ mint: MINT, market, security: null, intel: null, now: NOW });
+  for (const label of ['Auth', 'LP', 'Dev', 'Top 10', 'Fresh', 'Holders']) assert.match(card, new RegExp(`<code>${label.padEnd(9)}</code><i>n/a</i>`), label);
+  assert.match(card, /<code>DEX Paid <\/code><b>yes<\/b>/);
+  assert.match(buildScanCard({ mint: MINT, market: { ...market, hasProfile: false }, now: NOW }), /<code>DEX Paid <\/code>no/);
 });
 
-test('insider row never says 0.0% next to linked groups', () => {
-  const intel = { insiderPct: 0, insiderNetworks: 1, insiderWallets: 7 };
-  const card = buildScanCard({ mint: MINT, market, security, intel, risk: assessRisk({ security, market, intel, now: NOW }), now: NOW });
-  assert.match(card, /<b>1 linked group<\/b> 🟡  \(7 wallets\)/);
-  assert.doesNotMatch(card, /0\.0%/);
-  const none = buildScanCard({ mint: MINT, market, security, intel: { insiderPct: 0, insiderNetworks: 0 }, now: NOW });
-  assert.match(none, /<b>none detected<\/b> ✅/);
+test('stats rows only appear when there is data, and stay short', () => {
+  const lean = { symbol: 'X', priceUsd: 1, marketCapUsd: 1000, liquidityUsd: 500, volume24h: 12 };
+  const card = buildScanCard({ mint: MINT, market: lean, now: NOW });
+  assert.match(card, /<code>Vol      <\/code>24h \$12\.00\n/);
+  assert.doesNotMatch(card, /<code>1H /);
+  assert.doesNotMatch(card, /<code>ATH /);
+  for (const line of card.split('\n').filter((l) => /^[├└] <code>/.test(l))) {
+    assert.ok(line.replace(/<[^>]+>/g, '').length <= 44, line); // fits a phone screen without wrapping
+  }
 });
 
-test('RugCheck holders fill in when the RPC is busy, and the risk rules use them', () => {
+test('the full card rows all fit a phone screen', () => {
+  const card = buildScanCard({ mint: MINT, market, security, intel: fullIntel, now: NOW });
+  for (const line of card.split('\n').filter((l) => /^[├└] <code>/.test(l))) {
+    assert.ok(line.replace(/<[^>]+>/g, '').length <= 44, line);
+  }
+});
+
+test('RugCheck holders fill in when the RPC is busy', () => {
   const intel = { top: [{ owner: 'a', pct: 30 }], top10Pct: 62, top1Pct: 30, lpLockedPct: 100 };
-  const risk = assessRisk({ security: null, market, intel, now: NOW });
-  assert.ok(risk.flags.some((f) => /Top 10 holders own 62%/.test(f)));
-  assert.ok(risk.flags.some((f) => /One wallet holds 30%/.test(f)));
-  const card = buildScanCard({ mint: MINT, market, security: null, intel, risk, now: NOW });
-  assert.match(card, /<b>62\.0%<\/b> ⚠️  ·  largest 30\.0% ⚠️/);
+  const card = buildScanCard({ mint: MINT, market, security: null, intel, now: NOW });
+  assert.match(card, /<b>62\.0%<\/b>  ·  largest 30\.0%/);
+  assert.match(buildScanCard({ mint: MINT, market: null, now: NOW }), /No market data/);
 });
-
-test('loading card shows market numbers and a scanning note, no security block', () => {
-  const card = buildScanCard({ mint: MINT, market, loading: true, now: NOW });
-  assert.match(card, /Running safety scan/);
-  assert.doesNotMatch(card, /Security/);
-  assert.match(card, /<code>MCap    <\/code>/);
-  assert.match(buildScanCard({ mint: MINT, market: null }), /No market data/);
-});
-

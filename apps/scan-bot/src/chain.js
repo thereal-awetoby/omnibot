@@ -1,24 +1,30 @@
 // Reads token safety facts straight from Solana (free public RPC works, a paid one is faster).
 import { Connection, PublicKey } from '@solana/web3.js';
 import { computeHolderStats, computeFresh } from './security.js';
+import { createdMintsFromTx } from './detail.js';
 
 const connection = new Connection(process.env.RPC_URL || 'https://api.mainnet-beta.solana.com', 'confirmed');
 const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 
 const cache = new Map(); // mint -> { at, value }
+const inflight = new Map(); // mint -> Promise, so two requests for one token share a single lookup
 const TTL_MS = 60_000;
 
-// { mintAuthority, freezeAuthority, supply, decimals, top1Pct, top5Pct, top10Pct } or null when the mint can't be read.
-// Holder numbers are null if the holder lookup fails but the mint itself was readable.
-export async function getSecurity(mint, { pairAddress = null } = {}) {
+// Everything the RPC can tell us about a mint that does NOT depend on the market data, so it can start
+// at the same time as the DexScreener call: authorities, supply, and the largest token accounts with their owners.
+// Returns null when the mint can't be read. `largest` is null if only the holder lookup failed.
+export function getSecurityRaw(mint) {
   const hit = cache.get(mint);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
-  const value = await load(mint, pairAddress).catch((e) => { console.error('security error:', e.message); return null; });
-  if (value) cache.set(mint, { at: Date.now(), value });
-  return value;
+  if (hit && Date.now() - hit.at < TTL_MS) return Promise.resolve(hit.value);
+  if (inflight.has(mint)) return inflight.get(mint);
+  const p = loadRaw(mint)
+    .catch((e) => { console.error('security error:', e.message); return null; })
+    .then((value) => { if (value) cache.set(mint, { at: Date.now(), value }); inflight.delete(mint); return value; });
+  inflight.set(mint, p);
+  return p;
 }
 
-async function load(mint, pairAddress) {
+async function loadRaw(mint) {
   const mintKey = new PublicKey(mint);
   const info = await connection.getParsedAccountInfo(mintKey);
   const parsed = info.value?.data?.parsed;
@@ -28,21 +34,37 @@ async function load(mint, pairAddress) {
     freezeAuthority: parsed.info.freezeAuthority ?? null,
     supply: BigInt(parsed.info.supply ?? '0'),
     decimals: parsed.info.decimals,
-    top1Pct: null, top5Pct: null, top10Pct: null, top: [],
+    largest: null,
+    owners: null,
   };
   try {
     const largest = (await connection.getTokenLargestAccounts(mintKey)).value.map((a) => ({ address: a.address.toBase58(), amount: a.amount }));
     const accs = await connection.getMultipleParsedAccounts(largest.map((a) => new PublicKey(a.address)));
     const owners = new Map();
     accs.value.forEach((acc, i) => { const o = acc?.data?.parsed?.info?.owner; if (o) owners.set(largest[i].address, o); });
+    out.largest = largest;
+    out.owners = owners;
+  } catch (e) {
+    console.error('holders error:', e.message);
+  }
+  return out;
+}
+
+// Raw RPC facts + the market's pool address -> the numbers the card shows:
+// { mintAuthority, freezeAuthority, supply, decimals, top1Pct, top5Pct, top10Pct, top }.
+export function withHolderStats(raw, mint, pairAddress = null) {
+  if (!raw) return null;
+  const out = {
+    mintAuthority: raw.mintAuthority, freezeAuthority: raw.freezeAuthority, supply: raw.supply, decimals: raw.decimals,
+    top1Pct: null, top5Pct: null, top10Pct: null, top: [],
+  };
+  if (raw.largest && raw.owners) {
     // The pool / bonding curve holds a big chunk of supply by design: don't count it as a "holder".
     const exclude = new Set();
     if (pairAddress) exclude.add(pairAddress);
-    exclude.add(PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), mintKey.toBuffer()], PUMP_PROGRAM_ID)[0].toBase58());
-    const stats = computeHolderStats(largest, owners, out.supply, exclude);
+    exclude.add(PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), new PublicKey(mint).toBuffer()], PUMP_PROGRAM_ID)[0].toBase58());
+    const stats = computeHolderStats(raw.largest, raw.owners, raw.supply, exclude);
     if (stats) Object.assign(out, { top1Pct: stats.top1Pct, top5Pct: stats.top5Pct, top10Pct: stats.top10Pct, top: stats.top });
-  } catch (e) {
-    console.error('holders error:', e.message);
   }
   return out;
 }
@@ -90,6 +112,76 @@ export async function getFreshWallets(top) {
   const ages = new Map();
   const queue = [...top];
   const worker = async () => { for (let h = queue.shift(); h; h = queue.shift()) ages.set(h.owner, await walletAgeDays(h.owner, nowSec)); };
-  await Promise.race([Promise.all([worker(), worker(), worker()]), new Promise((r) => setTimeout(r, 7_000))]);
+  await Promise.race([Promise.all([worker(), worker(), worker()]), new Promise((r) => setTimeout(r, 3_500))]);
   return computeFresh(top, ages);
+}
+
+// ---------- detail views (only run when the user taps a button) ----------
+
+const TOKEN_PROGRAMS = [
+  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', // classic SPL Token
+  'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb', // Token-2022 (newer pump.fun tokens use this)
+];
+
+// Runs `fn` over `items` with a few at a time, and stops waiting after `deadlineMs` (partial results are fine).
+async function pool(items, size, deadlineMs, fn) {
+  const queue = [...items];
+  const worker = async () => { for (let it = queue.shift(); it !== undefined; it = queue.shift()) await fn(it); };
+  await Promise.race([Promise.all(Array.from({ length: size }, worker)), new Promise((r) => setTimeout(r, deadlineMs))]);
+}
+
+export async function getSolBalances(owners) {
+  const out = new Map();
+  try {
+    const infos = await connection.getMultipleAccountsInfo(owners.map((o) => new PublicKey(o)));
+    infos.forEach((acc, i) => out.set(owners[i], (acc?.lamports ?? 0) / 1e9));
+  } catch (e) {
+    console.error('sol balances error:', e.message);
+  }
+  return out;
+}
+
+// What else each wallet holds: Map(owner -> [{ mint, amount }]). Wallets that could not be read are left out.
+export async function getHolderTokens(owners, deadlineMs = 8_000) {
+  const out = new Map();
+  await pool(owners, 4, deadlineMs, async (owner) => {
+    try {
+      const key = new PublicKey(owner);
+      const lists = await Promise.all(TOKEN_PROGRAMS.map((p) => connection.getParsedTokenAccountsByOwner(key, { programId: new PublicKey(p) })));
+      const byMint = new Map();
+      for (const res of lists) {
+        for (const { account } of res.value) {
+          const info = account.data?.parsed?.info;
+          const amt = info?.tokenAmount?.uiAmount;
+          if (info?.mint && typeof amt === 'number' && amt > 0) byMint.set(info.mint, (byMint.get(info.mint) ?? 0) + amt);
+        }
+      }
+      out.set(owner, [...byMint].map(([mint, amount]) => ({ mint, amount })));
+    } catch (e) {
+      console.error('holder tokens error:', e.message);
+    }
+  });
+  return new Map(out);
+}
+
+export async function getSolBalance(owner) {
+  try { return (await connection.getBalance(new PublicKey(owner))) / 1e9; } catch (e) { console.error('sol balance error:', e.message); return null; }
+}
+
+// Tokens a wallet created, found by reading its most recent transactions. Returns { launches, scannedTx } where
+// launches = [{ mint, createdAt (ms) }]. Not the full history: only the last `limit` transactions are read.
+export async function scanCreatedTokens(creator, { limit = 40, deadlineMs = 8_000 } = {}) {
+  const sigs = (await connection.getSignaturesForAddress(new PublicKey(creator), { limit })).filter((s) => !s.err);
+  const launches = [];
+  let scanned = 0;
+  await pool(sigs, 4, deadlineMs, async (s) => {
+    try {
+      const tx = await connection.getParsedTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+      scanned += 1;
+      for (const mint of createdMintsFromTx(tx, creator)) launches.push({ mint, createdAt: tx.blockTime ? tx.blockTime * 1000 : null });
+    } catch (e) {
+      console.error('parsed tx error:', e.message);
+    }
+  });
+  return { launches: [...launches], scannedTx: scanned };
 }

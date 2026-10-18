@@ -10,8 +10,10 @@ import {
   buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText,
   buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText,
 } from './scan.js';
-import { assessRisk } from './security.js';
-import { gatherIntel } from './intel.js';
+import { startIntel, gatherIntel } from './intel.js';
+import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens } from './chain.js';
+import { fetchPumpCreated } from './sources.js';
+import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
 
 if (!process.env.SCAN_BOT_TOKEN) throw new Error('SCAN_BOT_TOKEN is not set');
 const bot = new Bot(process.env.SCAN_BOT_TOKEN);
@@ -62,6 +64,7 @@ async function getMarket(mint) {
 const cardKeyboard = (mint, watched) =>
   new InlineKeyboard()
     .url('⚡ Buy on Omni Trade', tradeLink(mint)).row()
+    .text('👥 Top holders', `h:${mint}`).text('👨‍💻 Dev', `d:${mint}`).text('📖 Lore', `l:${mint}`).row()
     .text(watched ? '✖ Unwatch' : '⭐ Watch', `${watched ? 'uw' : 'w'}:${mint}`).text('↻ Refresh', `r:${mint}`).row()
     .url('📈 DexScreener', `https://dexscreener.com/solana/${mint}`).url('🔍 Solscan', `https://solscan.io/token/${mint}`).row()
     .url('Birdeye', `https://birdeye.so/token/${mint}?chain=solana`).url('GMGN', `https://gmgn.ai/sol/token/${mint}`).url('RugCheck', `https://rugcheck.xyz/tokens/${mint}`).row()
@@ -83,9 +86,35 @@ async function callFor(ctx, mint, market, record) {
   return getFirstCall(ctx.chat.id, mint);
 }
 
+// Keeps Telegram's "typing…" going while we work, instead of posting a "loading" message.
+async function withTyping(ctx, fn) {
+  const send = () => ctx.api.sendChatAction(ctx.chat.id, 'typing').catch(() => {});
+  send();
+  const t = setInterval(send, 4000);
+  try { return await fn(); } finally { clearInterval(t); }
+}
+
+// Recently built cards, so the Top holders / Dev / Lore buttons answer instantly.
+const cardCache = new Map(); // mint -> { at, market, security, intel }
+const CARD_TTL_MS = 10 * 60_000;
+async function loadCard(mint) {
+  const pre = startIntel(mint); // RPC + RugCheck start now, at the same time as the market lookup
+  const market = await getMarket(mint);
+  const { security, intel } = await gatherIntel(mint, market, pre);
+  if (cardCache.size > 200) cardCache.delete(cardCache.keys().next().value);
+  const card = { at: Date.now(), market, security, intel };
+  cardCache.set(mint, card);
+  return card;
+}
+const cachedCard = async (mint) => {
+  const c = cardCache.get(mint);
+  return c && Date.now() - c.at < CARD_TTL_MS ? c : loadCard(mint);
+};
+
 async function showToken(ctx, mint, { edit = false, record = false } = {}) {
   const group = isGroup(ctx);
-  const market = await getMarket(mint);
+  // One complete card, sent once it is ready. No placeholder message.
+  const { market, security, intel } = edit ? await loadCard(mint) : await withTyping(ctx, () => loadCard(mint));
   const [watched, call] = await Promise.all([
     group ? false : isWatching(ctx.from.id, mint), // a group card is shared, so no personal ⭐ state there
     group ? callFor(ctx, mint, market, record).catch((e) => { console.error('call error:', e.message); return null; }) : null,
@@ -96,20 +125,75 @@ async function showToken(ctx, mint, { edit = false, record = false } = {}) {
   const previewUrl = market?.headerUrl || market?.imageUrl || null;
   const preview = previewUrl ? { link_preview_options: { url: previewUrl, show_above_text: true, prefer_large_media: true } } : {};
   const reply = group && !edit && ctx.message ? { reply_parameters: { message_id: ctx.message.message_id, allow_sending_without_reply: true } } : {};
-
-  // Quick first paint (market numbers now), then the slower safety checks fill in by editing the same message.
-  let sent = null;
-  if (!edit) sent = await render(ctx, buildScanCard({ mint, market, callLine, watched, loading: true }), kb, false, { ...preview, ...reply });
-
-  const { security, intel } = await gatherIntel(mint, market);
-  const text = buildScanCard({ mint, market, security, intel, risk: assessRisk({ security, market, intel }), callLine, watched });
-  if (!sent) return render(ctx, text, kb, true, preview);
-  try {
-    await ctx.api.editMessageText(ctx.chat.id, sent.message_id, text, { ...HTML, ...preview, reply_markup: kb });
-  } catch (err) {
-    if (!/not modified/i.test(err.message)) console.error('card edit error:', err.message);
-  }
+  const text = buildScanCard({ mint, market, security, intel, callLine, watched });
+  return render(ctx, text, kb, edit, edit ? preview : { ...preview, ...reply });
 }
+
+// ---- detail views: Top holders, Dev, Lore. Each answers as a new message under the card. ----
+const detailText = new Map(); // `${kind}:${mint}` -> { at, text }
+const DETAIL_TTL_MS = 2 * 60_000;
+const lastDetailAt = new Map(); // userId -> timestamp
+async function showDetail(ctx, kind, mint, build) {
+  await ctx.answerCallbackQuery().catch(() => {});
+  const now = Date.now();
+  if (now - (lastDetailAt.get(ctx.from.id) ?? 0) < 1500) return; // ignore rapid repeat taps
+  lastDetailAt.set(ctx.from.id, now);
+  const key = `${kind}:${mint}`;
+  let text = detailText.get(key)?.at > now - DETAIL_TTL_MS ? detailText.get(key).text : null;
+  if (!text) {
+    try { text = await withTyping(ctx, build); } catch (e) { console.error(`${kind} view error:`, e.message); text = 'Could not load that right now. Try again in a moment.'; }
+    if (detailText.size > 300) detailText.delete(detailText.keys().next().value);
+    detailText.set(key, { at: now, text });
+  }
+  const origin = ctx.callbackQuery?.message?.message_id;
+  return ctx.reply(text, {
+    ...HTML,
+    reply_markup: new InlineKeyboard().text('🗑 Close', 'x'),
+    ...(origin ? { reply_parameters: { message_id: origin, allow_sending_without_reply: true } } : {}),
+  });
+}
+
+async function buildHolders(mint) {
+  const c = await cachedCard(mint);
+  const top = (c.intel.top ?? []).filter((h) => isAddr(h.owner)).slice(0, 10);
+  if (!top.length) return buildHoldersText({ market: c.market, holders: [] });
+  const owners = top.map((h) => h.owner);
+  const [sols, tokens] = await Promise.all([getSolBalances(owners), getHolderTokens(owners)]);
+  const toPrice = [...new Set([...tokens.values()].flat().map((t) => t.mint))].filter((m) => m !== mint).slice(0, 120);
+  let prices = new Map();
+  if (toPrice.length) { try { prices = await fetchPairsByTokens(toPrice); } catch (e) { console.error('holder prices error:', e.message); } }
+  const linked = new Set(c.intel.linked ?? []);
+  const holders = top.map((h) => ({
+    owner: h.owner, pct: h.pct, linked: linked.has(h.owner), sol: sols.get(h.owner) ?? null,
+    holdings: tokens.has(h.owner) ? valueHoldings(tokens.get(h.owner), prices, mint) : null,
+  }));
+  return buildHoldersText({ market: c.market, holders });
+}
+
+async function buildDev(mint) {
+  const c = await cachedCard(mint);
+  const creator = c.intel.creator;
+  if (!creator) return buildDevText({ market: c.market, creator: null });
+  const [solBalance, pumpList] = await Promise.all([getSolBalance(creator), fetchPumpCreated(creator)]);
+  let launches = pumpList;
+  let source = pumpList ? 'pump' : null;
+  let scannedTx = 0;
+  if (!pumpList) {
+    try { const r = await scanCreatedTokens(creator); launches = r.launches; scannedTx = r.scannedTx; source = 'rpc'; }
+    catch (e) { console.error('dev scan error:', e.message); launches = null; }
+  }
+  let markets = new Map();
+  if (launches?.length) { try { markets = await fetchPairsByTokens(launches.map((l) => l.mint).slice(0, 30)); } catch (e) { console.error('launch prices error:', e.message); } }
+  return buildDevText({
+    market: c.market, creator, devPct: c.intel.devPct, solBalance,
+    launches: launches ? mergeLaunches(launches, markets, mint) : null, source, scannedTx,
+  });
+}
+
+const buildLore = async (mint) => {
+  const c = await cachedCard(mint);
+  return buildLoreText({ market: c.market, meta: c.intel.meta, detectedAt: c.intel.detectedAt });
+};
 
 async function showTrending(ctx, { edit = false } = {}) {
   let tokens;
@@ -154,7 +238,7 @@ async function doUnwatch(ctx, mint, { edit = false } = {}) {
 
 bot.command('start', showHome);
 bot.command('help', (ctx) => ctx.reply(
-  'Paste a token address to see its card: stats, safety checks and a risk rating.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard  /calls  (groups)\n\n/token <address>\n/chart <address>\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
+  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard  /calls  (groups)\n\n/token <address>\n/chart <address>\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
 ));
 bot.command('token', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
@@ -212,6 +296,10 @@ bot.callbackQuery('trend', async (ctx) => { await ctx.answerCallbackQuery(); ret
 bot.callbackQuery('wl', async (ctx) => { await ctx.answerCallbackQuery(); return showWatchlist(ctx, { edit: true }); });
 bot.callbackQuery(new RegExp(`^t:${MINT}$`), async (ctx) => { await ctx.answerCallbackQuery(); return showToken(ctx, ctx.match[1]); });
 bot.callbackQuery(new RegExp(`^r:${MINT}$`), async (ctx) => { await ctx.answerCallbackQuery(); return showToken(ctx, ctx.match[1], { edit: true }); });
+bot.callbackQuery(new RegExp(`^h:${MINT}$`), (ctx) => showDetail(ctx, 'h', ctx.match[1], () => buildHolders(ctx.match[1])));
+bot.callbackQuery(new RegExp(`^d:${MINT}$`), (ctx) => showDetail(ctx, 'd', ctx.match[1], () => buildDev(ctx.match[1])));
+bot.callbackQuery(new RegExp(`^l:${MINT}$`), (ctx) => showDetail(ctx, 'l', ctx.match[1], () => buildLore(ctx.match[1])));
+bot.callbackQuery('x', async (ctx) => { await ctx.answerCallbackQuery().catch(() => {}); await ctx.deleteMessage().catch(() => {}); });
 bot.callbackQuery(new RegExp(`^w:${MINT}$`), (ctx) => doWatch(ctx, ctx.match[1], { edit: true }));
 bot.callbackQuery(new RegExp(`^uw:${MINT}$`), (ctx) => doUnwatch(ctx, ctx.match[1], { edit: true }));
 
