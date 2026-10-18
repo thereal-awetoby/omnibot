@@ -152,8 +152,20 @@ test('fetchLoreAI: no key means no call; reads the text, caches, respects the da
   assert.equal(calls, 1);
   assert.equal(await fetchLoreAI({ mint: 'L2' }, { apiKey: 'k' }, async () => json({}, 401), now), null);
   assert.equal(await fetchLoreAI({ mint: 'L3' }, { apiKey: 'k' }, async () => json({ content: [] }), now), null);
+  // per person: 2 new stories a day each, cached ones are free, other people are not affected
+  const d2 = now + 2 * 86_400_000;
+  let u = 0;
+  const cnt = async () => { u += 1; return json({ content: [{ type: 'text', text: 'ok' }] }); };
+  const opt = (userId) => ({ apiKey: 'k', perUserMax: 2, userId });
+  await fetchLoreAI({ mint: 'U1' }, opt(7), cnt, d2);
+  await fetchLoreAI({ mint: 'U1' }, opt(7), cnt, d2); // cached: free
+  await fetchLoreAI({ mint: 'U2' }, opt(7), cnt, d2);
+  assert.equal(await fetchLoreAI({ mint: 'U3' }, opt(7), cnt, d2), null); // user 7 is at 2 new stories
+  assert.equal(await fetchLoreAI({ mint: 'U3' }, opt(8), cnt, d2), 'ok'); // another user is fine
+  assert.equal(await fetchLoreAI({ mint: 'U1' }, opt(7), cnt, d2), 'ok'); // and user 7 still sees cached ones
+  assert.equal(u, 3);
   // daily cap: 2 calls allowed in a new day, third is refused without calling
-  const later = now + 86_400_000;
+  const later = now + 3 * 86_400_000;
   let n = 0;
   const counting = async () => { n += 1; return json({ content: [{ type: 'text', text: 'ok' }] }); };
   await fetchLoreAI({ mint: 'C1' }, { apiKey: 'k', dailyMax: 2 }, counting, later);

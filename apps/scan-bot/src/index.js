@@ -198,7 +198,7 @@ async function buildDev(mint) {
   });
 }
 
-const buildLore = async (mint) => {
+const buildLore = async (mint, userId) => {
   const c = await cachedCard(mint);
   const m = c.market;
   const x = (m?.socials ?? []).find((s) => ['twitter', 'x'].includes(String(s.type).toLowerCase()))?.url ?? null;
@@ -208,7 +208,7 @@ const buildLore = async (mint) => {
       description: c.intel.meta?.description ?? null, xUrl: x,
       ageText: typeof m?.createdAt === 'number' ? `${Math.max(1, Math.round((Date.now() - m.createdAt) / 3_600_000))}h` : null,
     },
-    { apiKey: process.env.ANTHROPIC_API_KEY, model: process.env.LORE_MODEL || undefined, dailyMax: Number(process.env.LORE_DAILY_MAX) || undefined }
+    { apiKey: process.env.ANTHROPIC_API_KEY, model: process.env.LORE_MODEL || undefined, dailyMax: Number(process.env.LORE_DAILY_MAX) || undefined, perUserMax: Number(process.env.LORE_PER_USER_MAX) || undefined, userId }
   );
   return buildLoreText({ market: m, narrative, meta: c.intel.meta, detectedAt: c.intel.detectedAt });
 };
@@ -316,7 +316,7 @@ bot.callbackQuery(new RegExp(`^t:${MINT}$`), async (ctx) => { await ctx.answerCa
 bot.callbackQuery(new RegExp(`^r:${MINT}$`), async (ctx) => { await ctx.answerCallbackQuery(); return showToken(ctx, ctx.match[1], { edit: true }); });
 bot.callbackQuery(new RegExp(`^h:${MINT}$`), (ctx) => showDetail(ctx, 'h', ctx.match[1], () => buildHolders(ctx.match[1])));
 bot.callbackQuery(new RegExp(`^d:${MINT}$`), (ctx) => showDetail(ctx, 'd', ctx.match[1], () => buildDev(ctx.match[1])));
-bot.callbackQuery(new RegExp(`^l:${MINT}$`), (ctx) => showDetail(ctx, 'l', ctx.match[1], () => buildLore(ctx.match[1])));
+bot.callbackQuery(new RegExp(`^l:${MINT}$`), (ctx) => showDetail(ctx, 'l', ctx.match[1], () => buildLore(ctx.match[1], ctx.from.id)));
 bot.callbackQuery('x', async (ctx) => { await ctx.answerCallbackQuery().catch(() => {}); await ctx.deleteMessage().catch(() => {}); });
 bot.callbackQuery(new RegExp(`^w:${MINT}$`), (ctx) => doWatch(ctx, ctx.match[1], { edit: true }));
 bot.callbackQuery(new RegExp(`^uw:${MINT}$`), (ctx) => doUnwatch(ctx, ctx.match[1], { edit: true }));
