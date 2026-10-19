@@ -227,3 +227,12 @@ test('scan card: a pump.fun curve token shows the curve liquidity and fill inste
   assert.match(t, /Bonding curve<\/b> · 74% filled/);
   assert.match(t, /Holders\s*<\/code><b>95/);
 });
+
+test('TH numbers link to the holder wallet when the address is known', () => {
+  const w1 = 'HSnscMsxYENMrEpCjTGqR3aV5DRmyTeBNoTBgBRTV5Dg';
+  const w2 = '4hr8ebBYaGgD8VhDckZXBTh9QV7vR2qK1ysiUeD7G4LT';
+  const market = { priceUsd: 1, marketCapUsd: 1000, symbol: 'T', name: 'T', createdAt: Date.now() };
+  const intel = { top: [{ owner: w1, pct: 3.2 }, { owner: w2, pct: 2.1 }, { owner: 'x', pct: 1 }], top10Pct: 6.3, top1Pct: 3.2 };
+  const card = buildScanCard({ mint: MINT, market, security: null, intel });
+  assert.match(card, new RegExp(`<a href="https://solscan\\.io/account/${w1}">3\\.2</a> \\| <a href="https://solscan\\.io/account/${w2}">2\\.1</a> \\| 1\\.0`));
+});

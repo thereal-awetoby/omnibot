@@ -239,19 +239,19 @@ const loreCache = new Map(); // mint -> { at, result }
 const LORE_TTL = 6 * 3_600_000;
 let loreDay = { day: '', n: 0, users: new Map() };
 
-const LORE_RULES = 'Write 3 to 4 short plain sentences, under 600 characters, no markdown, no lists. Say who or what it references and what happened. Never give price predictions, advice, or any talk of risk.';
-const LORE_SYSTEM_WEB = `You write the "lore" for a Solana memecoin card in a Telegram bot: the story or meme behind the token. Use web search (X posts, news, the project link) to find what it is based on and why it is getting attention. ${LORE_RULES} If you find nothing reliable, say briefly that no public story was found and describe what the name and description suggest.`;
-const LORE_SYSTEM_OFFLINE = `You write the "lore" for a Solana memecoin card in a Telegram bot: the story or meme behind the token. You have NO web access: use only the facts you are given and never invent events, people, numbers or sources. ${LORE_RULES} If the facts do not explain a story, say that briefly and describe only what the name and description suggest.`;
+const LORE_RULES = 'Write 3 to 4 short plain sentences, under 600 characters, no markdown, no lists. Start with what the token is (for example: "X is a memecoin with the ticker Y, shown with an image of ..."). If a logo image is attached, look at it and describe exactly what it shows, then explain the joke or idea behind the name and image. Say who or what it references and what happened when that is known. Be confident and specific. Never say that details are missing or that something is not explained: describe what the name, image and description show. Never give price predictions, advice, or any talk of risk.';
+const LORE_SYSTEM_WEB = `You write the "lore" for a Solana memecoin card in a Telegram bot: the story or meme behind the token. Use web search (X posts, news, the project link) to find what it is based on and why it is getting attention. ${LORE_RULES} If you find nothing reliable online, explain the idea from the name, the logo image and the description.`;
+const LORE_SYSTEM_OFFLINE = `You write the "lore" for a Solana memecoin card in a Telegram bot: the story or meme behind the token. You have NO web access: use only the facts you are given and never invent events, people, numbers or sources. ${LORE_RULES}`;
 
 const cleanStory = (t) => String(t ?? '').replace(/[*_`#]/g, '').replace(/\s+/g, ' ').trim();
 
-async function askAnthropic(facts, { apiKey, model }, fetchImpl) {
+async function askAnthropic(facts, { apiKey, model, image = null }, fetchImpl) {
   const res = await fetchImpl('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
       model, max_tokens: 500, system: LORE_SYSTEM_WEB,
-      messages: [{ role: 'user', content: facts }],
+      messages: [{ role: 'user', content: image ? [{ type: 'image', source: { type: 'base64', media_type: image.mimeType, data: image.data } }, { type: 'text', text: facts }] : facts }],
       tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 2 }],
     }),
     signal: AbortSignal.timeout(25_000),
@@ -380,7 +380,7 @@ export async function fetchLoreStory(
   ].filter(Boolean).join('\n');
   lastLoreError = null;
   const providers = [];
-  if (anthropicKey) providers.push(() => askAnthropic(facts, { apiKey: anthropicKey, model: anthropicModel }, fetchImpl));
+  if (anthropicKey) providers.push(async () => askAnthropic(facts, { apiKey: anthropicKey, model: anthropicModel, image: imageUrl ? await fetchImageInline(imageUrl, fetchImpl) : null }, fetchImpl));
   if (geminiKey) {
     providers.push(async () => {
       const [models, image] = await Promise.all([resolveGeminiModels(geminiKey, geminiModels, fetchImpl, now), imageUrl ? fetchImageInline(imageUrl, fetchImpl) : null]);
@@ -421,7 +421,7 @@ export async function fetchImageInline(url, fetchImpl = fetch) {
     const mimeType = (res.headers?.get?.('content-type') ?? '').split(';')[0].trim().toLowerCase();
     if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mimeType)) return null;
     const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length === 0 || buf.length > 1_500_000) return null;
+    if (buf.length === 0 || buf.length > 4_000_000) return null;
     return { mimeType, data: buf.toString('base64') };
   } catch (e) {
     console.error('lore image error:', e.message);

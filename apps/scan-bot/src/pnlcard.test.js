@@ -39,6 +39,14 @@ test('PnL card can use a picture as the background', () => {
   assert.doesNotMatch(svg, /undefined|NaN/);
 });
 
+test('PnL card has square corners and a Solana mark', () => {
+  const svg = buildPnlSvg({ symbol: 'ABC', callerName: 'x', entryMcap: 1000, nowMcap: 3000, x: 3 });
+  assert.doesNotMatch(svg, /rx=/);
+  assert.doesNotMatch(svg, /clipPath/);
+  assert.match(svg, />Solana</);
+  assert.match(svg, /#9945FF/);
+});
+
 test('captions', () => {
   assert.equal(fmtMult(25), '25x');
   assert.match(buildPnlCaption({ symbol: 'ABC', callerName: '@t', x: 3, milestone: true }), /🚀.*3\.00x/);

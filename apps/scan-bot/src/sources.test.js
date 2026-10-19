@@ -396,7 +396,7 @@ test('fetchImageInline only accepts small https images', async () => {
   const img = (type, size) => async () => ({ ok: true, status: 200, headers: { get: () => type }, arrayBuffer: async () => Buffer.alloc(size, 1) });
   assert.equal((await fetchImageInline('https://i/x.png', img('image/png', 100))).mimeType, 'image/png');
   assert.equal(await fetchImageInline('https://i/x.png', img('text/html', 100)), null);
-  assert.equal(await fetchImageInline('https://i/x.png', img('image/png', 2_000_000)), null);
+  assert.equal(await fetchImageInline('https://i/x.png', img('image/png', 5_000_000)), null);
   assert.equal(await fetchImageInline('http://i/x.png', img('image/png', 100)), null);
   assert.equal(await fetchImageInline('https://i/x.png', async () => { throw new Error('offline'); }), null);
 });

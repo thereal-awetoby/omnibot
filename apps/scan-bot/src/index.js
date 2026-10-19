@@ -11,7 +11,7 @@ import {
   multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel, within } from './intel.js';
-import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, rpcStats } from './chain.js';
+import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { renderPng } from './bubblemap.js';
 import { getArt } from './memeart.js';
@@ -123,7 +123,12 @@ function loadCard(mint) {
   const p = (async () => {
     const t0 = Date.now(); const s0 = rpcStats();
     const pre = startIntel(mint); // RPC + RugCheck start now, at the same time as the market lookup
-    const market = await getMarket(mint);
+    let market = await getMarket(mint);
+    // No picture from DexScreener (a brand-new token)? Read it from the token's own metadata.
+    if (market && !market.imageUrl && !market.headerUrl) {
+      const img = await within(getTokenImage(mint), 3_000, null);
+      if (img) market = { ...market, imageUrl: img };
+    }
     const { security, intel } = await gatherIntel(mint, market, pre);
     const s1 = rpcStats(); // one line per card, handy when something feels slow
     console.log(`card ${short(mint)} ${Date.now() - t0}ms, rpc calls ${s1.calls - s0.calls}, retried ${s1.retries - s0.retries}`);

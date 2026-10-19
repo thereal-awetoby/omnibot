@@ -1,7 +1,7 @@
 // Reads token safety facts straight from Solana (free public RPC works, a paid one is faster).
 import { Connection, PublicKey } from '@solana/web3.js';
 import { computeHolderStats, computeFresh, parseCurveReserves, curveStats } from './security.js';
-import { createdMintsFromTx, createdMintsFromEnhanced, fundingFromTx, parseAssetNames } from './detail.js';
+import { createdMintsFromTx, createdMintsFromEnhanced, fundingFromTx, parseAssetNames, parseAssetImage, imageFromMetadata } from './detail.js';
 import { createRpcPool, parseRpcUrls } from './rpcpool.js';
 import { parseDasAccounts, funderFromTx } from './bubblemap.js';
 
@@ -343,6 +343,31 @@ export async function getTokenNames(mints) {
   }
   if (nameCache.size > 2000) nameCache.clear();
   return out;
+}
+
+// A new token often has no picture on DexScreener yet. Its own metadata always has one (Helius getAsset, then the metadata json).
+const imageCache = new Map();
+export async function getTokenImage(mint) {
+  if (imageCache.has(mint)) return imageCache.get(mint);
+  let url = null;
+  try {
+    const res = await rpcPool.fetchWhere((u) => /helius/i.test(u), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'omni', method: 'getAsset', params: { id: mint } }),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      url = parseAssetImage(json);
+      const jsonUri = json?.result?.content?.json_uri;
+      if (!url && typeof jsonUri === 'string' && /^https:\/\//i.test(jsonUri)) {
+        const m = await fetch(jsonUri, { signal: AbortSignal.timeout(3_000) });
+        if (m.ok) url = imageFromMetadata(await m.json());
+      }
+    }
+  } catch (e) { console.error('token image error:', e.message); }
+  if (imageCache.size > 500) imageCache.clear();
+  if (url) imageCache.set(mint, url); // only a found picture is remembered, a miss is tried again next time
+  return url;
 }
 
 export async function getSolBalance(owner) {

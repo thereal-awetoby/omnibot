@@ -161,7 +161,9 @@ function securityBlock(sec, intel, market) {
   const t10 = intel?.top10Pct;
   rows.push(row('Top 10', typeof t10 === 'number' ? `${val(pctText(t10))}  ·  largest ${pctText(intel.top1Pct)}` : NA));
   const top = (intel?.top ?? []).slice(0, 5);
-  if (top.length) rows.push(row('TH', top.map((h) => h.pct.toFixed(1)).join(' | ')));
+  // Each number opens that holder's wallet page.
+  const thNum = (h) => (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(h.owner ?? '') ? `<a href="https://solscan.io/account/${h.owner}">${h.pct.toFixed(1)}</a>` : h.pct.toFixed(1));
+  if (top.length) rows.push(row('TH', top.map(thNum).join(' | ')));
 
   rows.push(row('Fresh', typeof intel?.fresh7dPct === 'number' ? `1D ${val(pctText(intel.fresh1dPct))} · 7D ${val(pctText(intel.fresh7dPct))}` : NA));
   const b = intel?.bundle;

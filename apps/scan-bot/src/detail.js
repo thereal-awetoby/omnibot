@@ -86,6 +86,24 @@ export function parseAssetNames(json) {
   return out;
 }
 
+// Helius getAsset answer -> the token's picture as an https link (ipfs:// links go through a public gateway), or null.
+export function parseAssetImage(json) {
+  const c = json?.result?.content;
+  const file = Array.isArray(c?.files) ? c.files[0] : null;
+  const pick = [file?.cdn_uri, c?.links?.image, file?.uri].find((u) => typeof u === 'string' && u.trim());
+  return imageHttps(pick);
+}
+export function imageHttps(u) {
+  if (typeof u !== 'string') return null;
+  const x = u.trim();
+  if (/^ipfs:\/\//i.test(x)) return `https://ipfs.io/ipfs/${x.slice(7).replace(/^ipfs\//i, '')}`;
+  return /^https:\/\/[^\s]+$/i.test(x) ? x : null;
+}
+// The token's metadata json (content.json_uri) -> its image link, or null.
+export function imageFromMetadata(meta) {
+  return imageHttps(meta?.image) ?? imageHttps(meta?.image_uri) ?? imageHttps(meta?.properties?.files?.[0]?.uri);
+}
+
 // launches: [{ mint, createdAt }]; markets: Map(mint -> market from DexScreener). Newest first.
 // The token being scanned stays in the list, flagged `current`.
 export function mergeLaunches(launches, markets, currentMint) {

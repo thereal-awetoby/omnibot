@@ -36,8 +36,8 @@ export function buildPnlSvg({ symbol, callerName, entryMcap, nowMcap, x, ageText
     `<radialGradient id="glow" cx="0.8" cy="0.1" r="0.7"><stop offset="0" stop-color="${col}" stop-opacity="0.28"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></radialGradient>`,
     '<linearGradient id="shade" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#000" stop-opacity="0.78"/><stop offset="0.6" stop-color="#000" stop-opacity="0.4"/><stop offset="1" stop-color="#000" stop-opacity="0.1"/></linearGradient>',
     '<linearGradient id="shadeb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.8"/></linearGradient>',
-    '<clipPath id="r"><rect width="1000" height="563" rx="28"/></clipPath></defs>',
-    '<g clip-path="url(#r)">',
+    '<linearGradient id="sol" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#9945FF"/><stop offset="1" stop-color="#14F195"/></linearGradient></defs>',
+    '<g>',
     ...bgLayer,
     `<text x="50" y="80" ${f} font-size="30" font-weight="700" fill="#e5e7eb">Omni Scan</text>`,
     `<text x="950" y="80" text-anchor="end" ${f} font-size="24" fill="#e5e7eb"${thin}>${groupName ? esc(groupName) : 'Group call'}</text>`,
@@ -48,6 +48,9 @@ export function buildPnlSvg({ symbol, callerName, entryMcap, nowMcap, x, ageText
     '<rect x="50" y="450" width="900" height="2" fill="#1f2a44"/>',
     `<text x="50" y="505" ${f} font-size="24" fill="#e5e7eb"${thin}>Called at</text><text x="200" y="505" ${f} font-size="30" font-weight="700" fill="#e5e7eb">${formatUsd(entryMcap)}</text>`,
     `<text x="520" y="505" ${f} font-size="24" fill="#e5e7eb"${thin}>Now</text><text x="590" y="505" ${f} font-size="30" font-weight="700" fill="#e5e7eb">${formatUsd(nowMcap)}</text>`,
+    // Chain mark, bottom right.
+    '<g transform="translate(772 484)"><polygon points="10,0 64,0 54,13 0,13" fill="url(#sol)"/><polygon points="0,19 54,19 64,32 10,32" fill="url(#sol)"/><polygon points="10,38 64,38 54,51 0,51" fill="url(#sol)"/>',
+    `<text x="80" y="36" ${f} font-size="30" font-weight="700" fill="#ffffff"${thin}>Solana</text></g>`,
     '</g></svg>',
   ].join('');
 }

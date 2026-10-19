@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAssetNames, createdMintsFromEnhanced, fundingFromTx, createdMintsFromTx, mergeLaunches, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink, usdShort } from './detail.js';
+import { parseAssetImage, imageFromMetadata, parseAssetNames, createdMintsFromEnhanced, fundingFromTx, createdMintsFromTx, mergeLaunches, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink, usdShort } from './detail.js';
 
 const DEV = 'DevWa11etDevWa11etDevWa11etDevWa11etDevW1';
 const M1 = 'So11111111111111111111111111111111111111112';
@@ -226,4 +226,13 @@ test('parseAssetNames: symbol (or name) per mint from a Helius asset batch', () 
   assert.equal(m.get('B'), 'Nekyia');
   assert.equal(m.has('C'), false);
   assert.equal(parseAssetNames(null).size, 0);
+});
+
+test('parseAssetImage finds the token picture and turns ipfs links into https', () => {
+  assert.equal(parseAssetImage({ result: { content: { files: [{ cdn_uri: 'https://cdn.example/x.png', uri: 'https://a/b.png' }], links: { image: 'https://l/i.png' } } } }), 'https://cdn.example/x.png');
+  assert.equal(parseAssetImage({ result: { content: { links: { image: 'ipfs://QmAbc' } } } }), 'https://ipfs.io/ipfs/QmAbc');
+  assert.equal(parseAssetImage({ result: { content: { links: { image: 'http://insecure/x.png' } } } }), null);
+  assert.equal(parseAssetImage({}), null);
+  assert.equal(imageFromMetadata({ image: 'https://ipfs.io/ipfs/Qm1' }), 'https://ipfs.io/ipfs/Qm1');
+  assert.equal(imageFromMetadata(null), null);
 });
