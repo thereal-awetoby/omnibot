@@ -192,3 +192,11 @@ test('fundingFromTx + buildDevText: shows who funded the dev, how much, and when
   assert.match(t, /funded <b>0\.056 SOL<\/b>/);
   assert.match(t, /32d ago/);
 });
+
+test('createdMintsFromTx: reads a pump.fun creation from a plain JSON transaction (string keys)', () => {
+  const PUMP = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+  const M = 'GGzNLq89NV4d495XC4uwjC2ub6rPdSw1vsRYcibVpump';
+  const tx = { blockTime: 1, meta: { err: null, innerInstructions: [] }, transaction: { message: { accountKeys: [{ pubkey: DEV, signer: true }], instructions: [{ programId: PUMP, accounts: [M, 'x'], data: 'abc' }] } } };
+  assert.deepEqual(createdMintsFromTx(tx, DEV), [M]);
+  assert.deepEqual(createdMintsFromTx(tx, 'OTHER'), []);
+});

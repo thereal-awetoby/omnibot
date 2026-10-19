@@ -332,6 +332,43 @@ const heliusKey = () => {
   return null;
 };
 
+// Helius's "oldest/newest first" history method can skip failed transactions, which matters for serial launchers:
+// their wallets are full of failed attempts that would otherwise use up the whole scan. 100 full transactions per request.
+async function scanCreatedTokensSucceeded(creator, { limit, deadlineMs }) {
+  const stop = Date.now() + deadlineMs;
+  const launches = [];
+  let scanned = 0;
+  let token = null;
+  let useFilter = true;
+  let pages = 0;
+  while (pages < Math.ceil(limit / 100) && Date.now() < stop) {
+    const params = { transactionDetails: 'full', encoding: 'jsonParsed', sortOrder: 'desc', limit: 100, maxSupportedTransactionVersion: 0 };
+    if (useFilter) params.filters = { status: 'succeeded' };
+    if (token) params.paginationToken = token;
+    let body;
+    try {
+      const res = await rpcPool.fetchWhere((u) => /helius/i.test(u), {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'omni', method: 'getTransactionsForAddress', params: [creator, params] }),
+      });
+      body = res.ok ? await res.json() : null;
+    } catch { body = null; }
+    if (body?.error && useFilter && pages === 0) { useFilter = false; continue; } // try once more without the filter
+    const rows = body?.result?.data;
+    if (!Array.isArray(rows)) { if (pages === 0) return null; break; }
+    pages += 1;
+    scanned += rows.length;
+    for (const row of rows) {
+      const tx = { transaction: row.transaction, meta: row.meta, blockTime: row.blockTime };
+      for (const mint of createdMintsFromTx(tx, creator)) launches.push({ mint, createdAt: row.blockTime ? row.blockTime * 1000 : null });
+    }
+    token = body.result.paginationToken ?? null;
+    if (!token || rows.length < 100) break;
+  }
+  console.log(`dev scan (helius, successful only${useFilter ? '' : ', unfiltered'}): ${creator.slice(0, 6)}… read ${scanned} transactions, found ${launches.length} created token(s)`);
+  return { launches, scannedTx: scanned };
+}
+
 // Helius returns 100 already-decoded transactions per request, so far more history fits in the time limit.
 async function scanCreatedTokensHelius(creator, { limit, deadlineMs }) {
   const key = heliusKey();
@@ -360,6 +397,8 @@ async function scanCreatedTokensHelius(creator, { limit, deadlineMs }) {
 // Tokens a wallet created, found by reading its most recent transactions. Returns { launches, scannedTx } where
 // launches = [{ mint, createdAt (ms) }]. Not the full history: only the last `limit` transactions are read.
 export async function scanCreatedTokens(creator, { limit = Number(process.env.DEV_SCAN_TX) || 500, deadlineMs = 20_000 } = {}) {
+  const fastest = await scanCreatedTokensSucceeded(creator, { limit, deadlineMs });
+  if (fastest) return fastest;
   const fast = await scanCreatedTokensHelius(creator, { limit, deadlineMs });
   if (fast) return fast;
   const sigs = (await connection.getSignaturesForAddress(new PublicKey(creator), { limit })).filter((s) => !s.err).map((s) => s.signature);
