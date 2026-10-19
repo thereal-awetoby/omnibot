@@ -56,3 +56,25 @@ export function findBundle(entries, window = 1) {
   if (group.length < 2) return { count: 0, pct: 0, slot: null };
   return { count: group.length, pct: Math.round(group.reduce((a, e) => a + e.pct, 0) * 10) / 10, slot: first };
 }
+
+// ---------- pump.fun bonding curve ----------
+// The curve account holds: virtual token reserves @8, virtual SOL @16, real token @24, real SOL @32 (u64 each),
+// supply @40, "complete" flag @48. Real SOL is what buyers actually put in: that is the curve's liquidity.
+const CURVE_START_TOKENS = 793_100_000_000_000; // 793.1M tokens (6 decimals) are for sale on the curve
+
+export function parseCurveReserves(data) {
+  if (!data || data.length < 49) return null;
+  const b = Buffer.from(data);
+  return { vTok: b.readBigUInt64LE(8), vSol: b.readBigUInt64LE(16), rTok: b.readBigUInt64LE(24), rSol: b.readBigUInt64LE(32), complete: b[48] === 1 };
+}
+
+// priceUsd lets us recover the SOL price from the curve's own price (no extra lookup).
+// Returns { complete, progressPct, realSol, solUsd, liquidityUsd }.
+export function curveStats(res, priceUsd) {
+  if (!res) return null;
+  const progressPct = res.complete ? 100 : Math.max(0, Math.min(100, (1 - Number(res.rTok) / CURVE_START_TOKENS) * 100));
+  const solPerToken = Number(res.vTok) > 0 ? (Number(res.vSol) / 1e9) / (Number(res.vTok) / 1e6) : 0;
+  const solUsd = priceUsd > 0 && solPerToken > 0 ? priceUsd / solPerToken : null;
+  const realSol = Number(res.rSol) / 1e9;
+  return { complete: res.complete, progressPct, realSol, solUsd, liquidityUsd: !res.complete && solUsd ? realSol * solUsd : null };
+}

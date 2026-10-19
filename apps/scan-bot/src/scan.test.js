@@ -218,3 +218,12 @@ test('bundlers row: none, unknown and counted', () => {
   const unknown = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, bundle: null }, now: NOW });
   assert.match(unknown, /<code>Bundlers <\/code><i>n\/a<\/i>/);
 });
+
+test('scan card: a pump.fun curve token shows the curve liquidity and fill instead of n/a', () => {
+  const market = { symbol: 'ERC', name: 'European Relief Collective', priceUsd: 0.0000143, marketCapUsd: 14_300, liquidityUsd: null, dex: 'pump.fun curve', change: {}, volume: {} };
+  const intel = { curve: { complete: false, progressPct: 74.4, liquidityUsd: 3795 }, holdersTotal: 95 };
+  const t = buildScanCard({ mint: 'GGzNLq89NV4d495XC4uwjC2ub6rPdSw1vsRYcibVpump', market, intel });
+  assert.match(t, /Liq\s*<\/code><b>\$3\.79K/);
+  assert.match(t, /Bonding curve<\/b> · 74% filled/);
+  assert.match(t, /Holders\s*<\/code><b>95/);
+});

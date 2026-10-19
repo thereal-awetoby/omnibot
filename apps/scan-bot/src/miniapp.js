@@ -5,7 +5,7 @@ import http from 'node:http';
 const ADDR_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 // loaded: { built, groups, funders, layout, checked, total, curve } from bubbleload.js. Pure: shapes the JSON the page draws.
-export function buildMapPayload({ symbol = null, name = null, loaded }) {
+export function buildMapPayload({ symbol = null, name = null, market = null, loaded }) {
   const { built, groups = [], funders = new Map(), layout, checked = 0, total = 0, curve = false } = loaded;
   const bubbles = [...layout.bubbles]
     .sort((a, b) => (a.kind === 'pool') - (b.kind === 'pool') || b.pct - a.pct)
@@ -17,8 +17,11 @@ export function buildMapPayload({ symbol = null, name = null, loaded }) {
       rank: b.kind === 'pool' ? null : i + 1,
       x: Math.round(b.x * 10) / 10, y: Math.round(b.y * 10) / 10, r: Math.round(b.r * 10) / 10,
     }));
+  const supply = market?.fdvUsd > 0 && market?.priceUsd > 0 ? Math.round(market.fdvUsd / market.priceUsd) : null;
   return {
     symbol, name,
+    mcapUsd: market?.marketCapUsd ?? market?.fdvUsd ?? null,
+    supply,
     poolLabel: curve ? 'Bonding curve' : 'Liquidity pool',
     topPct: Math.round(built.topPct * 10) / 10,
     poolPct: Math.round(built.poolPct * 10) / 10,
@@ -110,6 +113,12 @@ svg{width:100%;height:100%;display:block;touch-action:none;cursor:grab}svg:activ
 .btn{border:1px solid var(--line);background:#1a2a4d;color:var(--fg);padding:9px 14px;border-radius:10px;font-size:13px;text-decoration:none;cursor:pointer}
 .btn.pri{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
 .btn.ok{background:#15803d;border-color:#15803d}
+#info{max-height:48vh;overflow:auto}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.stats div{background:#00000030;border:1px solid #ffffff10;border-radius:10px;padding:8px 4px;text-align:center}
+.stats b{display:block;font-size:15px}.stats span{font-size:11px;color:var(--mut)}
+.clu{margin-top:8px;padding:8px 10px;border-left:3px solid var(--acc);background:#00000030;border-radius:8px;font-size:12px;color:#c9d4ea}
+.hub{cursor:pointer}
 #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mut);text-align:center;padding:20px}
 </style></head><body>
 <div id="top"><div id="title">Bubblemap</div><div id="sub"></div></div>
@@ -129,11 +138,14 @@ var NS='http://www.w3.org/2000/svg',data=null,selEl=null,k=1,tx=0,ty=0,vc={x:470
 function el(n,a,p){var e=document.createElementNS(NS,n);for(var i in a)e.setAttribute(i,a[i]);if(p)p.appendChild(e);return e;}
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function short(a){return a?a.slice(0,4)+'…'+a.slice(-4):'';}
+function abbr(n){return n>=1e9?(n/1e9).toFixed(2)+'B':n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':n.toFixed(0);}
 function fmt(p){return p>=10?p.toFixed(0):p>=1?p.toFixed(1):p.toFixed(2);}
 function colour(b){return b.kind==='pool'?C.pool:b.kind==='dev'?C.dev:b.kind==='insider'?C.insider:b.group!==null?GROUPS[b.group%GROUPS.length]:C.holder;}
 function mix(a,b,t){var pa=parseInt(a.slice(1),16),pb=parseInt(b.slice(1),16),r='';[16,8,0].forEach(function(sh){var x=Math.round(((pa>>sh)&255)*(1-t)+((pb>>sh)&255)*t);r+=('0'+x.toString(16)).slice(-2);});return '#'+r;}
 var gid={},defs=null;
 function grad(col){if(gid[col])return gid[col];var id='g'+Object.keys(gid).length;gid[col]=id;var g=el('radialGradient',{id:id,cx:'35%',cy:'28%',r:'80%'},defs);el('stop',{offset:'0','stop-color':mix(col,'#ffffff',0.5)},g);el('stop',{offset:'0.55','stop-color':col},g);el('stop',{offset:'1','stop-color':mix(col,'#000000',0.28)},g);return id;}
+var mk={};
+function marker(col){if(mk[col])return mk[col];var id='m'+Object.keys(mk).length;mk[col]=id;var m=el('marker',{id:id,markerWidth:7,markerHeight:7,refX:6,refY:3.5,orient:'auto',markerUnits:'userSpaceOnUse'},defs);el('path',{d:'M0,0 L7,3.5 L0,7 z',fill:col},m);return id;}
 function apply(){vp.setAttribute('transform','translate('+tx+' '+ty+') scale('+k+')');}
 function zoomAt(f,cx,cy){var nk=Math.max(0.6,Math.min(8,k*f));f=nk/k;tx=cx-(cx-tx)*f;ty=cy-(cy-ty)*f;k=nk;apply();}
 function toSvg(ev){var p=svg.createSVGPoint();p.x=ev.clientX;p.y=ev.clientY;return p.matrixTransform(svg.getScreenCTM().inverse());}
@@ -148,7 +160,13 @@ function select(b,node){
   var h;
   if(b.kind==='pool'){info.innerHTML='<div class="hd"><span class="big">'+fmt(b.pct)+'%</span><span class="pill">'+esc(data.poolLabel)+'</span></div><code>Not a holder: this is where the token trades.</code>';return;}
   var tags=[];if(b.kind==='dev')tags.push('Dev');if(b.kind==='insider')tags.push('Flagged linked');if(b.group!==null)tags.push('Linked group');
-  h='<div class="hd"><span class="big">'+fmt(b.pct)+'%</span><span class="pill">#'+b.rank+' holder</span>'+tags.map(function(t){return '<span class="pill">'+t+'</span>';}).join('')+'</div>'+
+  var st='<div><b>'+fmt(b.pct)+'%</b><span>Of supply</span></div>';
+  if(data.supply)st+='<div><b>'+abbr(b.pct/100*data.supply)+'</b><span>Amount</span></div>';
+  if(data.mcapUsd)st+='<div><b>$'+abbr(b.pct/100*data.mcapUsd)+'</b><span>Value</span></div>';
+  var g=b.group!==null?data.groups[b.group]:null;
+  h='<div class="hd"><span class="big">'+esc(short(b.owner))+'</span><span class="pill">#'+b.rank+'</span>'+tags.map(function(t){return '<span class="pill">'+t+'</span>';}).join('')+'</div>'+
+    '<div class="stats">'+st+'</div>'+
+    (g?'<div class="clu">Cluster supply: <b>'+fmt(g.pct)+'%</b> · '+g.count+' wallets funded by '+esc(short(g.funder))+'</div>':'')+
     '<code>'+esc(b.owner)+'</code>'+
     '<div class="row"><button class="btn pri" id="cp">Copy address</button><a class="btn" id="sl" href="https://solscan.io/account/'+esc(b.owner)+'">Solscan</a>'+
     (b.funder?'<button class="btn" id="cf">Copy funder '+esc(short(b.funder))+'</button>':'')+'</div>';
@@ -156,6 +174,15 @@ function select(b,node){
   document.getElementById('cp').onclick=function(){copy(b.owner,this);};
   document.getElementById('sl').onclick=function(e){e.preventDefault();openLink(this.href);};
   if(b.funder)document.getElementById('cf').onclick=function(){copy(b.funder,this);};
+}
+function selectHub(c,node){
+  if(selEl)selEl.classList.remove('sel');selEl=node;node.classList.add('sel');
+  var g=data.groups[c.group];if(!g)return;
+  info.innerHTML='<div class="hd"><span class="big">'+esc(short(g.funder))+'</span><span class="pill">Funder</span></div>'+
+    '<div class="stats"><div><b>'+g.count+'</b><span>Wallets</span></div><div><b>'+fmt(g.pct)+'%</b><span>Of supply</span></div>'+(data.mcapUsd?'<div><b>$'+abbr(g.pct/100*data.mcapUsd)+'</b><span>Value</span></div>':'')+'</div>'+
+    '<code>'+esc(g.funder)+'</code><div class="row"><button class="btn pri" id="cp">Copy funder</button><a class="btn" id="sl" href="https://solscan.io/account/'+esc(g.funder)+'">Solscan</a></div>';
+  document.getElementById('cp').onclick=function(){copy(g.funder,this);};
+  document.getElementById('sl').onclick=function(e){e.preventDefault();openLink(this.href);};
 }
 function render(d){
   data=d;defs=el('defs',{},vp);
@@ -169,6 +196,14 @@ function render(d){
   else if(d.checked>0)chips.push('<span class="chip">No shared funders found</span>');
   document.getElementById('sub').innerHTML=chips.join('');
   d.clusters.forEach(function(c){var col=GROUPS[c.group%GROUPS.length];el('circle',{cx:c.x,cy:c.y,r:c.r,fill:col,'fill-opacity':'0.08',stroke:col,'stroke-width':3,'stroke-dasharray':'10 8'},vp);});
+  var hubs={};
+  d.clusters.forEach(function(c){hubs[c.group]=c;});
+  d.bubbles.forEach(function(b){
+    var c=b.group!==null?hubs[b.group]:null;if(!c)return;
+    var col=GROUPS[b.group%GROUPS.length],dx=b.x-c.x,dy=b.y-c.y,len=Math.hypot(dx,dy);if(len<1)return;
+    var ux=dx/len,uy=dy/len;
+    el('line',{x1:c.x+ux*11,y1:c.y+uy*11,x2:b.x-ux*(b.r+3),y2:b.y-uy*(b.r+3),stroke:col,'stroke-width':2.2,'stroke-opacity':0.85,'marker-end':'url(#'+marker(col)+')'},vp);
+  });
   d.bubbles.forEach(function(b){
     var col=colour(b),g=el('circle',{cx:b.x,cy:b.y,r:b.r,fill:'url(#'+grad(col)+')',stroke:mix(col,'#ffffff',0.4),'stroke-width':1.5,'class':'b'},vp);
     if(b.r>=15){var sz=Math.max(10,Math.min(b.r*0.5,28));var t=el('text',{x:b.x,y:b.y+sz*0.35,'text-anchor':'middle','font-size':sz,'font-weight':700,fill:'#06101f','pointer-events':'none'},vp);t.textContent=fmt(b.pct)+'%';}
@@ -177,7 +212,14 @@ function render(d){
     g.addEventListener('mouseleave',function(){tip.style.display='none';});
     g.addEventListener('click',function(ev){if(moved>5)return;select(b,g);});
   });
-  var items=[['Wallet',C.holder],['Linked group',GROUPS[0]],['Flagged linked',C.insider],['Dev',C.dev],['Pool',C.pool]];
+  d.clusters.forEach(function(c){
+    var col=GROUPS[c.group%GROUPS.length],hub=el('circle',{cx:c.x,cy:c.y,r:10,fill:'#0b1220',stroke:col,'stroke-width':2.5,'stroke-dasharray':'4 3','class':'b hub'},vp);
+    hub.addEventListener('mouseenter',function(){tip.style.display='block';tip.textContent='Funder '+short((data.groups[c.group]||{}).funder||'');});
+    hub.addEventListener('mousemove',function(ev){var r=document.getElementById('stage').getBoundingClientRect();tip.style.left=Math.min(ev.clientX-r.left+12,r.width-170)+'px';tip.style.top=(ev.clientY-r.top+12)+'px';});
+    hub.addEventListener('mouseleave',function(){tip.style.display='none';});
+    hub.addEventListener('click',function(){if(moved>5)return;selectHub(c,hub);});
+  });
+  var items=[['Wallet',C.holder],['Linked group',GROUPS[0]],['Funder link','#ffffff'],['Flagged linked',C.insider],['Dev',C.dev],['Pool',C.pool]];
   document.getElementById('legend').innerHTML=items.map(function(i){return '<span><i style="background:'+i[1]+'"></i>'+i[0]+'</span>';}).join('');
 }
 // pan, wheel zoom and two-finger pinch

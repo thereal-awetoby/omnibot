@@ -1,7 +1,7 @@
 // Reads token safety facts straight from Solana (free public RPC works, a paid one is faster).
 import { Connection, PublicKey } from '@solana/web3.js';
-import { computeHolderStats, computeFresh } from './security.js';
-import { createdMintsFromTx } from './detail.js';
+import { computeHolderStats, computeFresh, parseCurveReserves, curveStats } from './security.js';
+import { createdMintsFromTx, createdMintsFromEnhanced, fundingFromTx } from './detail.js';
 import { createRpcPool, parseRpcUrls } from './rpcpool.js';
 import { parseDasAccounts, funderFromTx } from './bubblemap.js';
 
@@ -179,18 +179,46 @@ export async function getHolderTokens(owners, deadlineMs = 8_000) {
 // 1) pump.fun tokens: the bonding curve account stores its creator.  2) any token: the wallet that paid
 // for the mint's first transaction. Returns an address or null.
 const curveCreatorCache = new Map(); // mint -> address | null
-// pump.fun tokens: the creator stored in the bonding-curve account (it stays there after the token graduates).
-export async function getCurveCreator(mint) {
-  if (curveCreatorCache.has(mint)) return curveCreatorCache.get(mint);
-  let creator = null;
+const curveCache = new Map(); // mint -> { at, value }  (reserves change with every trade, so only kept 10 seconds)
+// The curve account for a mint: { creator, vTok, vSol, rTok, rSol, complete }, null if the mint has no curve,
+// undefined if the RPC failed.
+async function readCurve(mint) {
+  const hit = curveCache.get(mint);
+  if (hit && Date.now() - hit.at < 10_000) return hit.value;
+  let value;
   try {
     const curve = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), new PublicKey(mint).toBuffer()], PUMP_PROGRAM_ID)[0];
     const info = await connection.getAccountInfo(curve);
-    if (info && info.owner.equals(PUMP_PROGRAM_ID) && info.data.length >= 81) creator = new PublicKey(info.data.subarray(49, 81)).toBase58();
-  } catch (e) { console.error('creator (curve) error:', e.message); }
+    value = null;
+    if (info && info.owner.equals(PUMP_PROGRAM_ID) && info.data.length >= 81) value = { ...parseCurveReserves(info.data), creator: new PublicKey(info.data.subarray(49, 81)).toBase58() };
+  } catch (e) { console.error('curve read error:', e.message); return undefined; }
+  if (curveCache.size > 300) curveCache.clear();
+  curveCache.set(mint, { at: Date.now(), value });
+  return value;
+}
+
+// pump.fun tokens: the creator stored in the bonding-curve account (it stays there after the token graduates).
+export async function getCurveCreator(mint) {
+  if (curveCreatorCache.has(mint)) return curveCreatorCache.get(mint);
+  const r = await readCurve(mint);
+  if (r === undefined) return null;
   if (curveCreatorCache.size > 500) curveCreatorCache.clear();
-  curveCreatorCache.set(mint, creator);
-  return creator;
+  curveCreatorCache.set(mint, r?.creator ?? null);
+  return r?.creator ?? null;
+}
+
+// pump.fun tokens still on the curve have no pool, so DexScreener shows no liquidity. The curve's own numbers
+// give it: { complete, progressPct, realSol, solUsd, liquidityUsd } (null when the token has no curve).
+export async function getCurveState(mint, priceUsd) {
+  const r = await readCurve(mint);
+  return r ? curveStats(r, priceUsd) : null;
+}
+
+// How many wallets hold a token (counted from Helius's token-account list; null if too many or unavailable).
+export async function getHolderCount(mint) {
+  const res = await getHolderAccountsDas(mint, { maxPages: 3, pageSize: 1000 });
+  if (!res?.complete) return null;
+  return new Set(res.rows.map((r) => r.owner)).size;
 }
 
 export async function getCreatorOnChain(mint) {
@@ -235,6 +263,16 @@ async function oldestSignatureHelius(mint) {
   } catch { return null; }
 }
 
+async function pageToOldest(key, pages) {
+  let before;
+  for (let p = 0; p < pages; p++) {
+    const sigs = await connection.getSignaturesForAddress(key, { limit: 1000, before });
+    if (sigs.length < 1000) return sigs.filter((x) => !x.err).at(-1)?.signature ?? null;
+    before = sigs.at(-1).signature;
+  }
+  return null; // too busy: the oldest transaction is too far back to reach cheaply
+}
+
 async function oldestSignatureByPaging(mint, { pages = 8 } = {}) {
   const key = new PublicKey(mint);
   try { // metadata account first: very few signatures, oldest = creation
@@ -243,13 +281,21 @@ async function oldestSignatureByPaging(mint, { pages = 8 } = {}) {
     const ok = sigs.filter((x) => !x.err);
     if (ok.length && sigs.length < 100) return ok.at(-1).signature;
   } catch (e) { console.error('deployer (metadata) error:', e.message); }
-  let before;
-  for (let p = 0; p < pages; p++) {
-    const sigs = await connection.getSignaturesForAddress(key, { limit: 1000, before });
-    if (sigs.length < 1000) return sigs.filter((x) => !x.err).at(-1)?.signature ?? null;
-    before = sigs.at(-1).signature;
-  }
-  return null; // too busy a token: the creation is too far back to reach cheaply
+  return pageToOldest(key, pages);
+}
+
+// Who first funded a wallet, how much, and when: { funder, sol, at } or null.
+const fundingCache = new Map();
+export async function getWalletFunding(owner) {
+  if (fundingCache.has(owner)) return fundingCache.get(owner);
+  let out = null;
+  try {
+    const sig = (await oldestSignatureHelius(owner)) ?? (await pageToOldest(new PublicKey(owner), 3));
+    if (sig) out = fundingFromTx(await connection.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }), owner);
+  } catch (e) { console.error('funding error:', e.message); return null; }
+  if (fundingCache.size > 500) fundingCache.clear();
+  fundingCache.set(owner, out);
+  return out;
 }
 
 export async function getDeployerOnChain(mint) {
@@ -281,9 +327,41 @@ export async function getSolBalance(owner) {
   try { return (await connection.getBalance(new PublicKey(owner))) / 1e9; } catch (e) { console.error('sol balance error:', e.message); return null; }
 }
 
+const heliusKey = () => {
+  for (const u of rpcUrls) { try { const x = new URL(u); if (/helius/i.test(x.host)) return x.searchParams.get('api-key'); } catch { /* skip */ } }
+  return null;
+};
+
+// Helius returns 100 already-decoded transactions per request, so far more history fits in the time limit.
+async function scanCreatedTokensHelius(creator, { limit, deadlineMs }) {
+  const key = heliusKey();
+  if (!key) return null;
+  const stop = Date.now() + deadlineMs;
+  const launches = [];
+  let scanned = 0;
+  let before = null;
+  for (let page = 0; page < Math.ceil(limit / 100) && Date.now() < stop; page++) {
+    let txs;
+    try {
+      const res = await fetch(`https://api.helius.xyz/v0/addresses/${creator}/transactions?api-key=${key}&limit=100${before ? `&before=${before}` : ''}`, { signal: AbortSignal.timeout(8_000) });
+      if (!res.ok) { if (page === 0) return null; break; }
+      txs = await res.json();
+    } catch { if (page === 0) return null; break; }
+    if (!Array.isArray(txs)) { if (page === 0) return null; break; }
+    scanned += txs.length;
+    launches.push(...createdMintsFromEnhanced(txs, creator));
+    if (txs.length < 100) break;
+    before = txs.at(-1).signature;
+  }
+  console.log(`dev scan (helius): ${creator.slice(0, 6)}… read ${scanned} transactions, found ${launches.length} created token(s)`);
+  return { launches, scannedTx: scanned };
+}
+
 // Tokens a wallet created, found by reading its most recent transactions. Returns { launches, scannedTx } where
 // launches = [{ mint, createdAt (ms) }]. Not the full history: only the last `limit` transactions are read.
-export async function scanCreatedTokens(creator, { limit = Number(process.env.DEV_SCAN_TX) || 300, deadlineMs = 20_000 } = {}) {
+export async function scanCreatedTokens(creator, { limit = Number(process.env.DEV_SCAN_TX) || 500, deadlineMs = 20_000 } = {}) {
+  const fast = await scanCreatedTokensHelius(creator, { limit, deadlineMs });
+  if (fast) return fast;
   const sigs = (await connection.getSignaturesForAddress(new PublicKey(creator), { limit })).filter((s) => !s.err).map((s) => s.signature);
   const launches = [];
   let scanned = 0;

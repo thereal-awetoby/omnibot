@@ -28,8 +28,45 @@ export function createdMintsFromTx(tx, creator) {
   for (const ix of steps) {
     const p = ix?.parsed;
     if (p && typeof p.type === 'string' && p.type.startsWith('initializeMint') && isAddr(p.info?.mint)) mints.push(p.info.mint);
+    const m = pumpCreateMint(ix?.programId, ix?.accounts);
+    if (m) mints.push(m);
   }
   return [...new Set(mints)];
+}
+
+const PUMP_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+const str = (x) => (x == null ? '' : String(x?.toBase58 ? x.toBase58() : x));
+// pump.fun's "create" step lists the new mint first, and every pump.fun mint address ends in "pump".
+function pumpCreateMint(programId, accounts) {
+  if (str(programId) !== PUMP_PROGRAM) return null;
+  const first = str(accounts?.[0]);
+  return first.endsWith('pump') && isAddr(first) ? first : null;
+}
+
+// Helius "enhanced" transactions (100 per request, already decoded) -> launches [{ mint, createdAt }] made by `creator`.
+export function createdMintsFromEnhanced(txs, creator) {
+  const out = [];
+  for (const tx of txs ?? []) {
+    if (!tx || tx.transactionError || tx.feePayer !== creator) continue;
+    const steps = [...(tx.instructions ?? []), ...(tx.instructions ?? []).flatMap((i) => i.innerInstructions ?? [])];
+    for (const ix of steps) {
+      const m = pumpCreateMint(ix?.programId, ix?.accounts);
+      if (m && !out.some((o) => o.mint === m)) out.push({ mint: m, createdAt: tx.timestamp ? tx.timestamp * 1000 : null });
+    }
+  }
+  return out;
+}
+
+// A wallet's oldest transaction (parsed) -> who first sent it SOL, how much, and when. null if not a plain transfer.
+export function fundingFromTx(tx, owner) {
+  const ixs = [...(tx?.transaction?.message?.instructions ?? []), ...((tx?.meta?.innerInstructions ?? []).flatMap((i) => i.instructions ?? []))];
+  for (const ix of ixs) {
+    const p = ix?.parsed;
+    if (ix?.program !== 'system' || !p?.info) continue;
+    const to = p.type === 'transfer' ? p.info.destination : (p.type === 'createAccount' || p.type === 'createAccountWithSeed') ? p.info.newAccount : null;
+    if (to === owner && p.info.source && p.info.source !== owner) return { funder: p.info.source, sol: Number(p.info.lamports) / 1e9, at: tx.blockTime ? tx.blockTime * 1000 : null };
+  }
+  return null;
 }
 
 // launches: [{ mint, createdAt }]; markets: Map(mint -> market from DexScreener). Newest first.
@@ -65,7 +102,7 @@ const launchLine = (l, now) => {
 };
 
 // launches: result of mergeLaunches (or null when they could not be loaded).
-export function buildDevText({ market, creator, creatorFees = null, devPct, solBalance, launches, source, scannedTx, partial = false, now = Date.now() }) {
+export function buildDevText({ market, creator, creatorFees = null, funding = null, devPct, solBalance, launches, source, scannedTx, partial = false, now = Date.now() }) {
   if (!creator) return `👨‍💻 <b>Dev</b> · ${name(market)}\n\nThe dev wallet for this token is not known yet. Try again in a minute.`;
   const head = [`👨‍💻 ${walletLink(creator)}`];
   const facts = [];
@@ -73,6 +110,10 @@ export function buildDevText({ market, creator, creatorFees = null, devPct, solB
   if (launches && launches.length >= 2 && dated.length >= 2) {
     const days = Math.max(1, (now - Math.min(...dated)) / 86_400_000);
     facts.push(`Deploys/day: <b>${(launches.length / days).toFixed(launches.length / days >= 10 ? 0 : 1)}</b>`);
+  }
+  if (funding?.funder) {
+    const when = funding.at ? formatDuration(now - funding.at) : null;
+    facts.push(`${walletLink(funding.funder)} funded <b>${funding.sol >= 1 ? funding.sol.toFixed(2) : funding.sol.toFixed(3)} SOL</b>${when ? ` <i>(${when} ago)</i>` : ''}`);
   }
   if (typeof solBalance === 'number') facts.push(`Balance: ◎ ${solBalance.toFixed(solBalance >= 10 ? 1 : 2)} SOL`);
   if (creatorFees && creatorFees !== creator) facts.push(`Fee wallet: ${walletLink(creatorFees)}`);

@@ -21,7 +21,9 @@ const loaded = {
 };
 
 test('buildMapPayload ranks holders, puts the pool last, and carries funders and groups', () => {
-  const p = buildMapPayload({ symbol: 'BDOG', name: 'Barber Dog', loaded });
+  const p = buildMapPayload({ symbol: 'BDOG', name: 'Barber Dog', market: { marketCapUsd: 1_000_000, fdvUsd: 1_000_000, priceUsd: 0.001 }, loaded });
+  assert.equal(p.mcapUsd, 1_000_000);
+  assert.equal(p.supply, 1_000_000_000);
   assert.deepEqual(p.bubbles.map((b) => [b.owner, b.rank]), [['dev', 1], ['w2', 2], ['w3', 3], [null, null]]);
   assert.equal(p.bubbles[1].funder, 'FUNDER');
   assert.equal(p.bubbles[3].pct, 30.04);

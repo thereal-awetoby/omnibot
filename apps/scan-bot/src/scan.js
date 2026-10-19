@@ -124,7 +124,7 @@ function statsBlock(m, now, intel = null) {
   rows.push(row('Price', `${val(formatPriceCard(m.priceUsd))}${d24 != null ? `  (${shortPct(d24)})` : ''}`));
   const fdvDiffers = m.fdvUsd != null && m.marketCapUsd != null && Math.abs(m.fdvUsd - m.marketCapUsd) / Math.max(m.marketCapUsd, 1) > 0.01;
   rows.push(row('MCap', `${val(formatUsd(m.marketCapUsd))}${fdvDiffers ? `  ·  FDV ${formatUsd(m.fdvUsd)}` : ''}`));
-  rows.push(row('Liq', val(formatUsd(m.liquidityUsd))));
+  rows.push(row('Liq', val(formatUsd(m.liquidityUsd > 0 ? m.liquidityUsd : intel?.curve?.liquidityUsd ?? m.liquidityUsd))));
   // Volume: one window per line, aligned, so it reads as a small table.
   const vol = [];
   if (m.volume?.h1 != null) vol.push(['1h', m.volume.h1]);
@@ -151,7 +151,9 @@ function securityBlock(sec, intel, market) {
   rows.push(row('Auth', sec ? `Mint ${sec.mintAuthority ? '⚠️ active' : '✅ off'} · Freeze ${sec.freezeAuthority ? '⚠️ active' : '✅ off'}` : NA));
 
   const lp = intel?.lpLockedPct;
-  rows.push(row('LP', typeof lp === 'number' ? `${val(`${pctText(lp, lp % 1 ? 1 : 0)} locked/burned`)}${lp >= 90 ? ' ✅' : ''}` : NA));
+  const curve = intel?.curve;
+  if (typeof lp !== 'number' && curve && !curve.complete) rows.push(row('LP', `${val('Bonding curve')} · ${Math.round(curve.progressPct)}% filled`));
+  else rows.push(row('LP', typeof lp === 'number' ? `${val(`${pctText(lp, lp % 1 ? 1 : 0)} locked/burned`)}${lp >= 90 ? ' ✅' : ''}` : NA));
 
   const dev = intel?.devPct;
   rows.push(row('Dev', typeof dev === 'number' ? (dev === 0 ? `${val('holds 0%')}  (sold or moved)` : val(`holds ${pctText(dev)}`)) : NA));

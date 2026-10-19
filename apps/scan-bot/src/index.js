@@ -10,8 +10,8 @@ import {
   buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText,
   buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
 } from './scan.js';
-import { startIntel, gatherIntel } from './intel.js';
-import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, rpcStats } from './chain.js';
+import { startIntel, gatherIntel, within } from './intel.js';
+import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
@@ -75,7 +75,7 @@ const bubbleButton = (kb, mint, group = false) => (MINIAPP_URL && !group ? kb.we
 async function loadMapData(mint) {
   const card = await cachedCard(mint);
   const loaded = await loadBubbleData(mint, card);
-  return loaded ? buildMapPayload({ symbol: card.market?.symbol ?? null, name: card.market?.name ?? null, loaded }) : null;
+  return loaded ? buildMapPayload({ symbol: card.market?.symbol ?? null, name: card.market?.name ?? null, market: card.market ?? null, loaded }) : null;
 }
 
 const cardKeyboard = (mint, watched, group = false) =>
@@ -236,12 +236,14 @@ async function buildDev(mint) {
   const devPct = !stored || creator === stored ? c.intel.devPct : await getHoldingPct(creator, mint);
   // pump.fun's public list is gone, so read the wallet's own transactions (fast on a Helius RPC).
   const solBalancePromise = getSolBalance(creator);
+  const fundingPromise = within(getWalletFunding(creator), 6_000);
   let launches = null;
   let scannedTx = 0;
   try { const r = await scanCreatedTokens(creator); launches = r.launches; scannedTx = r.scannedTx; }
   catch (e) { console.error('dev scan error:', e.message); }
   const source = 'rpc';
   const solBalance = await solBalancePromise;
+  const funding = await fundingPromise;
   // This token was made by this wallet, so it always belongs in the list.
   if (!launches?.some((l) => l.mint === mint)) {
     launches = [...(launches ?? []), { mint, createdAt: c.market?.createdAt ?? c.intel.detectedAt ?? null }];
@@ -250,7 +252,7 @@ async function buildDev(mint) {
   try { markets = await fetchPairsByTokens(launches.map((l) => l.mint).slice(0, 30)); } catch (e) { console.error('launch prices error:', e.message); }
   if (c.market) markets.set(mint, c.market);
   return buildDevText({
-    market: c.market, creator, creatorFees: stored, devPct, solBalance,
+    market: c.market, creator, creatorFees: stored, funding, devPct, solBalance,
     launches: mergeLaunches(launches, markets, mint), source, scannedTx, partial: true,
   });
 }

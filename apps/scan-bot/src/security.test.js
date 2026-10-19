@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeHolderStats, computeFresh, findBundle } from './security.js';
+import { computeHolderStats, computeFresh, findBundle, parseCurveReserves, curveStats } from './security.js';
 
 const acc = (address, amount) => ({ address, amount: String(amount) });
 
@@ -47,4 +47,23 @@ test('findBundle groups holders who first got the token in the same block as the
   assert.equal(findBundle([e('a', 3, null), e('b', 2, undefined)]), null);
   assert.equal(findBundle(null), null);
   assert.deepEqual(findBundle([e('a', 1, 10), e('b', 1, 12)], 2), { count: 2, pct: 2, slot: 10 }); // wider window
+});
+
+test('curve reserves: liquidity is the real SOL in the curve, progress from tokens left', () => {
+  const b = Buffer.alloc(81);
+  b.writeBigUInt64LE(483_000_000_000_000n, 8); // virtual tokens
+  b.writeBigUInt64LE(66_600_000_000n, 16); // virtual SOL (66.6)
+  b.writeBigUInt64LE(203_000_000_000_000n, 24); // real tokens left
+  b.writeBigUInt64LE(36_600_000_000n, 32); // real SOL (36.6)
+  const res = parseCurveReserves(b);
+  assert.equal(res.complete, false);
+  const s = curveStats(res, 66.6 / 483_000_000 * 103.7);
+  assert.ok(Math.abs(s.solUsd - 103.7) < 0.5);
+  assert.ok(Math.abs(s.liquidityUsd - 3795) < 40);
+  assert.equal(Math.round(s.progressPct), 74);
+  b[48] = 1;
+  const done = curveStats(parseCurveReserves(b), 0.00001);
+  assert.equal(done.progressPct, 100);
+  assert.equal(done.liquidityUsd, null);
+  assert.equal(parseCurveReserves(Buffer.alloc(10)), null);
 });

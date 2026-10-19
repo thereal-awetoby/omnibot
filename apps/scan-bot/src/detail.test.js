@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createdMintsFromTx, mergeLaunches, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink, usdShort } from './detail.js';
+import { createdMintsFromEnhanced, fundingFromTx, createdMintsFromTx, mergeLaunches, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink, usdShort } from './detail.js';
 
 const DEV = 'DevWa11etDevWa11etDevWa11etDevWa11etDevW1';
 const M1 = 'So11111111111111111111111111111111111111112';
@@ -168,4 +168,27 @@ test('buildDevText: shows the fee wallet when it differs from the deployer', () 
   assert.match(t, /Fee wallet/);
   assert.ok(t.includes(`<code>${DEV}</code>`));
   assert.doesNotMatch(buildDevText({ market: { symbol: 'X' }, creator: DEV, creatorFees: DEV, launches: [], now: NOW }), /Fee wallet/);
+});
+
+test('createdMintsFromEnhanced: finds pump.fun creations paid for by the wallet, ignores buys and other payers', () => {
+  const PUMP = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+  const M1 = 'GGzNLq89NV4d495XC4uwjC2ub6rPdSw1vsRYcibVpump';
+  const GLOBAL = '4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf';
+  const txs = [
+    { signature: 's1', timestamp: 1_700_000_000, feePayer: DEV, instructions: [{ programId: PUMP, accounts: [M1, 'x'], innerInstructions: [] }] },
+    { signature: 's2', timestamp: 1_700_000_100, feePayer: DEV, instructions: [{ programId: PUMP, accounts: [GLOBAL, 'x', M1], innerInstructions: [] }] },
+    { signature: 's3', timestamp: 1_700_000_200, feePayer: 'SOMEONEELSE', instructions: [{ programId: PUMP, accounts: [M1], innerInstructions: [] }] },
+    { signature: 's4', timestamp: 1_700_000_300, feePayer: DEV, transactionError: { err: 1 }, instructions: [{ programId: PUMP, accounts: [M1], innerInstructions: [] }] },
+  ];
+  assert.deepEqual(createdMintsFromEnhanced(txs, DEV), [{ mint: M1, createdAt: 1_700_000_000_000 }]);
+});
+
+test('fundingFromTx + buildDevText: shows who funded the dev, how much, and when', () => {
+  const FUND = '7GbuQ7xT1b2sQmZk3vUVhGSS5v3Vh1f9n2x6Zd9uquAB';
+  const tx = { blockTime: 1_700_000_000, transaction: { message: { instructions: [{ program: 'system', parsed: { type: 'transfer', info: { source: FUND, destination: DEV, lamports: 56_000_000 } } }] } } };
+  const f = fundingFromTx(tx, DEV);
+  assert.deepEqual(f, { funder: FUND, sol: 0.056, at: 1_700_000_000_000 });
+  const t = buildDevText({ market: { symbol: 'X' }, creator: DEV, funding: f, launches: [], now: 1_700_000_000_000 + 32 * 86_400_000 });
+  assert.match(t, /funded <b>0\.056 SOL<\/b>/);
+  assert.match(t, /32d ago/);
 });
