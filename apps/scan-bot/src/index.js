@@ -528,6 +528,7 @@ bot.on('message:text', async (ctx) => {
   if (isGroup(ctx)) {
     const mint = extractMint(text);
     if (!mint) return;
+    console.log(`group ${ctx.chat.id}: address ${short(mint)} from ${callerName(ctx.from)}`);
     const now = Date.now();
     if (now - (lastGroupCard.get(ctx.chat.id) ?? 0) < 1000) return;
     lastGroupCard.set(ctx.chat.id, now);
@@ -602,6 +603,9 @@ bot.catch((err) => console.error('bot error:', err.error?.message ?? err.message
 bot.start({
   onStart: (me) => {
     console.log(`Omni Scan Bot running as @${me.username}`);
+    console.log(me.can_read_all_group_messages
+      ? 'Groups: I can read every message (Group Privacy is off).'
+      : 'Groups: Group Privacy is ON, so I only see /commands in groups. Turn it off in BotFather, then remove me from the group and add me again.');
     if (MINIAPP_URL) startMiniApp({ port: Number(process.env.MINIAPP_PORT) || 3000, loadData: loadMapData });
     else console.log('Bubblemap mini app: off (set MINIAPP_URL to turn it on). The picture version is used.');
     console.log(`RPC endpoints: ${rpcStats().endpoints.map((e) => e.host).join(', ')}`);
