@@ -30,6 +30,15 @@ test('PnL card turns red below 1x', () => {
   assert.match(svg, /#ef4444/);
 });
 
+test('PnL card can use a picture as the background', () => {
+  const art = { mime: 'image/jpeg', buf: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]) };
+  const svg = buildPnlSvg({ symbol: 'ABC', callerName: 'x', entryMcap: 1000, nowMcap: 3000, x: 3, art });
+  assert.match(svg, /<image [^>]*data:image\/jpeg;base64,/);
+  assert.match(svg, /preserveAspectRatio="xMidYMid slice"/);
+  assert.match(svg, /height="563"/);
+  assert.doesNotMatch(svg, /undefined|NaN/);
+});
+
 test('captions', () => {
   assert.equal(fmtMult(25), '25x');
   assert.match(buildPnlCaption({ symbol: 'ABC', callerName: '@t', x: 3, milestone: true }), /🚀.*3\.00x/);

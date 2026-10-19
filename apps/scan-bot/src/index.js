@@ -14,6 +14,7 @@ import { startIntel, gatherIntel, within } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { renderPng } from './bubblemap.js';
+import { getArt } from './memeart.js';
 import { buildPnlSvg, buildPnlCaption, newMilestone } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
@@ -353,7 +354,7 @@ async function doUnwatch(ctx, mint, { edit = false } = {}) {
 
 bot.command('start', showHome);
 bot.command('help', (ctx) => ctx.reply(
-  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard  /calls  /pnl  (groups)\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
+  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard  /calls  /pnl  (groups)\n/meme  random crypto meme\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
 ));
 bot.command('token', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
@@ -484,18 +485,25 @@ async function pnlPng(call, prices, groupName) {
   if (x === null) return null;
   const nowMcap = p?.marketCapUsd ?? (call.mcap_usd ? call.mcap_usd * x : null);
   const ageText = formatDuration(Date.now() - new Date(call.created_at).getTime());
-  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, nowMcap, x, ageText, groupName }));
+  const art = await getArt().catch(() => null); // a random meme behind the card; plain card if none
+  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, nowMcap, x, ageText, groupName, art }));
   return { png, x };
 }
 bot.command('pnl', async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('PnL cards work in groups. Post a token address in your group to make a call, then send /pnl there.');
   const mint = parseMintInput(ctx.match);
   const call = mint ? await getFirstCall(ctx.chat.id, mint) : (await listUserCalls(ctx.chat.id, ctx.from.id, { limit: 1 }))[0];
-  if (!call) return ctx.reply(mint ? 'Nobody has called that token in this group yet.' : 'You have no calls in this group yet. Post a token address that nobody has called.');
+  if (!call) return ctx.reply(mint ? 'I have no call for that token in this group. I only count tokens posted here after I joined, so post the address once and I will track it from then.' : 'You have no calls in this group yet. Post a token address that nobody has called.');
   const prices = await pricesFor([call.mint]);
   const r = await pnlPng(call, prices, ctx.chat.title);
   if (!r) return ctx.reply('No price found for that token right now.');
   return ctx.replyWithPhoto(new InputFile(r.png, 'pnl.png'), { caption: buildPnlCaption({ symbol: call.symbol, callerName: call.caller_name, x: r.x }), parse_mode: 'HTML' });
+});
+bot.command('meme', async (ctx) => {
+  const art = await getArt().catch(() => null);
+  if (!art) return ctx.reply('No meme right now, try again in a moment.');
+  const extra = art.title ? { caption: esc(art.title), parse_mode: 'HTML' } : {};
+  return ctx.replyWithPhoto(new InputFile(art.buf, art.mime === 'image/png' ? 'meme.png' : 'meme.jpg'), extra);
 });
 bot.command('trade', (ctx) => ctx.reply(`https://t.me/${TRADE_USERNAME}`));
 bot.command('launch', (ctx) => ctx.reply(`https://t.me/${LAUNCH_USERNAME}`));
@@ -616,6 +624,7 @@ bot.start({
       { command: 'leaderboard', description: 'Group call leaderboard' },
       { command: 'calls', description: 'Your calls in this group' },
       { command: 'pnl', description: 'PnL card of a call (groups)' },
+      { command: 'meme', description: 'A random crypto meme' },
       { command: 'help', description: 'All commands' },
     ]).catch((e) => console.error('setMyCommands error:', e.message));
     setInterval(checkAlerts, 60_000);
