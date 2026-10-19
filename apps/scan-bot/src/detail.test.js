@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createdMintsFromEnhanced, fundingFromTx, createdMintsFromTx, mergeLaunches, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink, usdShort } from './detail.js';
+import { parseAssetNames, createdMintsFromEnhanced, fundingFromTx, createdMintsFromTx, mergeLaunches, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink, usdShort } from './detail.js';
 
 const DEV = 'DevWa11etDevWa11etDevWa11etDevWa11etDevW1';
 const M1 = 'So11111111111111111111111111111111111111112';
@@ -212,4 +212,18 @@ test('buildDevText: says whether the whole history was read', () => {
   assert.match(full, /full history \(1,234 transactions\)/);
   const part = buildDevText({ market: { symbol: 'X' }, creator: DEV, launches: [], source: 'rpc', scannedTx: 800, scanning: true, now: NOW });
   assert.match(part, /800 transactions so far/);
+});
+
+test('parseAssetNames: symbol (or name) per mint from a Helius asset batch', () => {
+  const json = { result: [
+    { id: 'A', content: { metadata: { name: 'Elio Token', symbol: 'ELIO' } } },
+    { id: 'B', content: { metadata: { name: 'Nekyia', symbol: '' } } },
+    { id: 'C', content: { metadata: {} } },
+    null,
+  ] };
+  const m = parseAssetNames(json);
+  assert.equal(m.get('A'), 'ELIO');
+  assert.equal(m.get('B'), 'Nekyia');
+  assert.equal(m.has('C'), false);
+  assert.equal(parseAssetNames(null).size, 0);
 });

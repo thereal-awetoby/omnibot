@@ -74,6 +74,18 @@ export function fundingFromTx(tx, owner) {
   return null;
 }
 
+// Helius getAssetBatch answer -> Map(mint -> symbol). Tokens with no readable symbol are left out.
+export function parseAssetNames(json) {
+  const out = new Map();
+  for (const a of Array.isArray(json?.result) ? json.result : []) {
+    const sym = a?.content?.metadata?.symbol ?? a?.token_info?.symbol;
+    const nm = a?.content?.metadata?.name;
+    const label = typeof sym === 'string' && sym.trim() ? sym.trim() : typeof nm === 'string' && nm.trim() ? nm.trim() : null;
+    if (a?.id && label) out.set(a.id, label.slice(0, 20));
+  }
+  return out;
+}
+
 // launches: [{ mint, createdAt }]; markets: Map(mint -> market from DexScreener). Newest first.
 // The token being scanned stays in the list, flagged `current`.
 export function mergeLaunches(launches, markets, currentMint) {

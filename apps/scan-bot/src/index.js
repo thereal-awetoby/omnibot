@@ -11,7 +11,7 @@ import {
   buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel, within } from './intel.js';
-import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, rpcStats } from './chain.js';
+import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
@@ -266,6 +266,12 @@ async function buildDev(mint) {
     let markets = new Map();
     try { markets = await fetchPairsByTokens(launches.map((l) => l.mint).slice(0, 30)); } catch (e) { console.error('launch prices error:', e.message); }
     if (c.market) markets.set(mint, c.market);
+    // dead launches have no DexScreener listing: read their names from the chain
+    const unnamed = launches.filter((l) => !markets.get(l.mint)?.symbol).map((l) => l.mint).slice(0, 60);
+    if (unnamed.length) {
+      const names = await within(getTokenNames(unnamed), 4_000, new Map());
+      launches = launches.map((l) => (names.has(l.mint) ? { ...l, symbol: names.get(l.mint) } : l));
+    }
     return buildDevText({
       market: c.market, creator, creatorFees: stored, funding, devPct, solBalance,
       launches: mergeLaunches(launches, markets, mint), source: 'rpc', scannedTx: s?.scannedTx ?? 0, partial: !s,

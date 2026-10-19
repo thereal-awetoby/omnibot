@@ -33,6 +33,10 @@ test('buildMapPayload ranks holders, puts the pool last, and carries funders and
   assert.equal(p.poolLabel, 'Liquidity pool');
   assert.equal(buildMapPayload({ loaded: { ...loaded, curve: true } }).poolLabel, 'Bonding curve');
   assert.equal(p.clusters[0].r, 55.6);
+  const more = [{ owner: 'w9', pct: 0.4, kind: 'holder' }, { owner: 'w10', pct: 0.3, kind: 'holder' }];
+  const q = buildMapPayload({ symbol: 'BDOG', loaded: { ...loaded, more } });
+  assert.deepEqual(q.others.map((o) => [o.owner, o.rank]), [['w9', 4], ['w10', 5]]);
+  assert.equal(q.wallets, 3 + 2);
 });
 
 test('mini app server: page, data, bad address, cache, errors', async () => {

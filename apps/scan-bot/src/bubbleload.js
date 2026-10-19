@@ -35,7 +35,7 @@ async function collect(mint, card) {
   const rows = full ? das.rows : rowsFromRaw(raw);
   const exclude = new Set([bondingCurveOf(mint)]);
   if (card.market?.pairAddress) exclude.add(card.market.pairAddress);
-  const built = buildNodes({ rows, supply: raw.supply, exclude, creator: card.intel?.creator ?? null, insiders: card.intel?.linked ?? [], topN: full ? 40 : 20 });
+  const built = buildNodes({ rows, supply: raw.supply, exclude, creator: card.intel?.creator ?? null, insiders: card.intel?.linked ?? [], topN: full ? 100 : 20 });
   if (!built || built.nodes.length === 0) return null;
 
   const toCheck = built.nodes.slice(0, FUNDING_CHECK).map((n) => n.owner);
@@ -44,8 +44,12 @@ async function collect(mint, card) {
   const groups = clusterByFunder(built.nodes, funders);
 
   const curve = /curve/i.test(card.market?.dex ?? '');
-  const layout = layoutBubbles(built.nodes, built.poolPct, { hasPool: built.poolPct > 0.05 });
-  return { built, groups, funders, layout, checked, total: toCheck.length, curve, source: full ? 'das' : 'rpc' };
+  // The picture shows the biggest 40; the interactive map also gets the rest of the top 100 (small, unlinked).
+  const PICTURE_N = 40;
+  const pic = { ...built, nodes: built.nodes.slice(0, PICTURE_N), topPct: built.nodes.slice(0, PICTURE_N).reduce((a, n) => a + n.pct, 0) };
+  const more = built.nodes.slice(PICTURE_N);
+  const layout = layoutBubbles(pic.nodes, built.poolPct, { hasPool: built.poolPct > 0.05 });
+  return { built: pic, more, groups, funders, layout, checked, total: toCheck.length, curve, source: full ? 'das' : 'rpc' };
 }
 
 async function build(mint, card) {

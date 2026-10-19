@@ -1,7 +1,7 @@
 // Reads token safety facts straight from Solana (free public RPC works, a paid one is faster).
 import { Connection, PublicKey } from '@solana/web3.js';
 import { computeHolderStats, computeFresh, parseCurveReserves, curveStats } from './security.js';
-import { createdMintsFromTx, createdMintsFromEnhanced, fundingFromTx } from './detail.js';
+import { createdMintsFromTx, createdMintsFromEnhanced, fundingFromTx, parseAssetNames } from './detail.js';
 import { createRpcPool, parseRpcUrls } from './rpcpool.js';
 import { parseDasAccounts, funderFromTx } from './bubblemap.js';
 
@@ -321,6 +321,28 @@ export async function getHoldingPct(owner, mint) {
     const sup = await connection.getTokenSupply(new PublicKey(mint));
     return await getDevHolding(owner, mint, sup.value.amount);
   } catch (e) { console.error('holding error:', e.message); return null; }
+}
+
+// Names of tokens DexScreener does not list (dead launches), from Helius: Map(mint -> symbol).
+const nameCache = new Map();
+export async function getTokenNames(mints) {
+  const out = new Map();
+  const need = [];
+  for (const m of mints) { if (nameCache.has(m)) { if (nameCache.get(m)) out.set(m, nameCache.get(m)); } else need.push(m); }
+  for (let i = 0; i < need.length; i += 100) {
+    const ids = need.slice(i, i + 100);
+    try {
+      const res = await rpcPool.fetchWhere((u) => /helius/i.test(u), {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'omni', method: 'getAssetBatch', params: { ids } }),
+      });
+      if (!res.ok) continue;
+      const got = parseAssetNames(await res.json());
+      for (const id of ids) { nameCache.set(id, got.get(id) ?? null); if (got.has(id)) out.set(id, got.get(id)); }
+    } catch (e) { console.error('token names error:', e.message); }
+  }
+  if (nameCache.size > 2000) nameCache.clear();
+  return out;
 }
 
 export async function getSolBalance(owner) {
