@@ -1,3 +1,4 @@
+import dns from 'node:dns';
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
@@ -21,6 +22,10 @@ import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchToke
 import { formatDuration } from './scan.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
 
+// Windows often tries IPv6 first and waits for it to fail; going straight to IPv4 makes every web request faster
+// and fixes many "fetch failed" errors.
+dns.setDefaultResultOrder('ipv4first');
+
 if (!process.env.SCAN_BOT_TOKEN) throw new Error('SCAN_BOT_TOKEN is not set');
 const bot = new Bot(process.env.SCAN_BOT_TOKEN);
 
@@ -30,9 +35,19 @@ const HTML = { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }
 const tradeLink = (mint) => `https://t.me/${TRADE_USERNAME}?start=buy_${mint}`;
 const short = (a) => `${a.slice(0, 4)}…${a.slice(-4)}`;
 
+// The user row is saved once per person per run (and waited for at most 2.5 s), not on every message.
+const savedUsers = new Map(); // id -> username last saved
 bot.use(async (ctx, next) => {
-  if (ctx.from) await upsertUser({ id: ctx.from.id, username: ctx.from.username });
+  const t0 = Date.now();
+  const u = ctx.from;
+  if (u && savedUsers.get(u.id) !== (u.username ?? '')) {
+    const save = upsertUser({ id: u.id, username: u.username }).then(() => savedUsers.set(u.id, u.username ?? ''));
+    save.catch((e) => console.error('user save error:', e.message));
+    await within(save, 2_500);
+  }
   await next();
+  const ms = Date.now() - t0;
+  if (ms > 4_000) console.log(`slow reply: ${ms}ms (${ctx.message?.text?.slice(0, 20) ?? ctx.callbackQuery?.data?.slice(0, 20) ?? 'update'})`);
 });
 
 // Show text by editing the current message (button taps) or sending a new one.
@@ -124,14 +139,13 @@ function loadCard(mint) {
     const t0 = Date.now(); const s0 = rpcStats();
     const pre = startIntel(mint); // RPC + RugCheck start now, at the same time as the market lookup
     let market = await getMarket(mint);
-    // No picture from DexScreener (a brand-new token)? Read it from the token's own metadata.
-    if (market && !market.imageUrl && !market.headerUrl) {
-      const img = await within(getTokenImage(mint), 3_000, null);
-      if (img) market = { ...market, imageUrl: img };
-    }
-    const { security, intel } = await gatherIntel(mint, market, pre);
+    const tMarket = Date.now() - t0;
+    // No picture from DexScreener (a brand-new token)? Read it from the token's own metadata, while the rest loads.
+    const imgP = market && !market.imageUrl && !market.headerUrl ? within(getTokenImage(mint), 3_000, null) : null;
+    const [{ security, intel }, img] = await Promise.all([gatherIntel(mint, market, pre), imgP]);
+    if (img) market = { ...market, imageUrl: img };
     const s1 = rpcStats(); // one line per card, handy when something feels slow
-    console.log(`card ${short(mint)} ${Date.now() - t0}ms, rpc calls ${s1.calls - s0.calls}, retried ${s1.retries - s0.retries}`);
+    console.log(`card ${short(mint)} ${Date.now() - t0}ms (market ${tMarket}ms), rpc calls ${s1.calls - s0.calls}, retried ${s1.retries - s0.retries}`);
     if (cardCache.size > 200) cardCache.delete(cardCache.keys().next().value);
     const card = { at: Date.now(), market, security, intel };
     cardCache.set(mint, card);
@@ -152,8 +166,8 @@ async function showToken(ctx, mint, { edit = false, record = false } = {}) {
   const fresh = !edit && cardCache.get(mint);
   const { market, security, intel } = fresh && Date.now() - fresh.at < 20_000 ? fresh : edit ? await loadCard(mint) : await withTyping(ctx, () => loadCard(mint));
   const [watched, call] = await Promise.all([
-    group ? false : isWatching(ctx.from.id, mint), // a group card is shared, so no personal ⭐ state there
-    group ? callFor(ctx, mint, market, record).catch((e) => { console.error('call error:', e.message); return null; }) : null,
+    group ? false : within(isWatching(ctx.from.id, mint), 1_500, false), // a group card is shared, so no personal ⭐ state there
+    group ? within(callFor(ctx, mint, market, record).catch((e) => { console.error('call error:', e.message); return null; }), 2_500, null) : null,
   ]);
   const callLine = buildCallLine(call, market?.priceUsd);
   const kb = cardKeyboard(mint, watched, group);

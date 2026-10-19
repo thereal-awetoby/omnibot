@@ -56,16 +56,24 @@ export function parseRugCheck(r) {
 const rugCache = new Map(); // mint -> { at, value }
 const RUG_TTL = 120_000;
 
+// When RugCheck cannot be reached at all (common on some home connections), asking again on every card only makes
+// every card wait. After two failed lookups in a row it is skipped for two minutes.
+let rugFailStreak = 0;
+let rugDownUntil = 0;
+export const resetRugBreaker = () => { rugFailStreak = 0; rugDownUntil = 0; };
+
 export async function fetchRugCheck(mint, fetchImpl = fetch) {
   const hit = rugCache.get(mint);
   if (hit && Date.now() - hit.at < RUG_TTL) return hit.value;
+  if (Date.now() < rugDownUntil) return null;
   let lastErr = null;
   for (let attempt = 0; attempt < 2; attempt++) { // a network hiccup is common: one quick retry
     try {
-      const res = await fetchImpl(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { signal: AbortSignal.timeout(7_000) });
+      const res = await fetchImpl(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { signal: AbortSignal.timeout(4_500) });
       if (!res.ok) throw new Error(`RugCheck returned HTTP ${res.status}`);
       const value = parseRugCheck(await res.json());
       if (value) rugCache.set(mint, { at: Date.now(), value });
+      rugFailStreak = 0;
       return value;
     } catch (e) {
       lastErr = e;
@@ -74,6 +82,7 @@ export async function fetchRugCheck(mint, fetchImpl = fetch) {
     }
   }
   console.error('rugcheck error:', lastErr?.message, lastErr?.cause?.code ?? '');
+  if (!/HTTP 4\d\d/.test(lastErr?.message ?? '') && ++rugFailStreak >= 2) { rugDownUntil = Date.now() + 120_000; console.error('rugcheck unreachable: skipping it for 2 minutes'); }
   return null;
 }
 

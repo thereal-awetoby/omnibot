@@ -6,7 +6,10 @@ let pool;
 export function getPool() {
   if (!pool) {
     if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is not set');
-    pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+    // A database that cannot be reached must fail fast instead of making every reply wait, and an idle
+    // connection that drops (Neon sleeps, Wi-Fi blips) must never crash the bot.
+    pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 8_000, idleTimeoutMillis: 60_000, keepAlive: true });
+    pool.on('error', (e) => console.error('db pool error:', e.message));
   }
   return pool;
 }

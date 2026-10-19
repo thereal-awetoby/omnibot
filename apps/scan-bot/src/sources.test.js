@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, fetchLoreStory, pickGeminiModels, getLastLoreError, parseTweetOembed, fetchTweetText, fetchImageInline, parseNewsRss, fetchNews, parseSearch, searchTokens, parseDexPaid, fetchDexPaid, fetchPriceSeries, buildChartUrl, parseGeckoHolders, fetchHolderCount } from './sources.js';
+import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, fetchLoreStory, pickGeminiModels, getLastLoreError, parseTweetOembed, fetchTweetText, fetchImageInline, parseNewsRss, fetchNews, parseSearch, searchTokens, parseDexPaid, fetchDexPaid, fetchPriceSeries, buildChartUrl, parseGeckoHolders, fetchHolderCount, resetRugBreaker } from './sources.js';
 
 const json = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
@@ -43,6 +43,20 @@ test('parseRugCheck survives empty and odd payloads', () => {
   assert.deepEqual(r.risks, []);
   assert.equal(parseRugCheck({ rugged: true }).rugged, true);
   assert.equal(parseRugCheck({ markets: [{ lp: { lpLockedPct: 250 } }] }).lpLockedPct, 100);
+});
+
+test('fetchRugCheck: after two unreachable lookups it stops asking for a while', async () => {
+  resetRugBreaker();
+  let calls = 0;
+  const down = async () => { calls += 1; throw new Error('fetch failed'); };
+  assert.equal(await fetchRugCheck('MINT_BRK_1', down), null);
+  assert.equal(await fetchRugCheck('MINT_BRK_2', down), null);
+  const before = calls;
+  assert.equal(await fetchRugCheck('MINT_BRK_3', down), null);
+  assert.equal(calls, before); // skipped: no request was made
+  resetRugBreaker();
+  assert.equal((await fetchRugCheck('MINT_BRK_4', async () => json({ markets: [] }, 200))) === undefined, false);
+  resetRugBreaker();
 });
 
 test('fetchRugCheck calls the keyless endpoint, caches, and returns null on errors', async () => {
