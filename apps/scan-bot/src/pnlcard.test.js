@@ -1,0 +1,37 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { newMilestone, buildPnlSvg, buildPnlCaption, fmtMult } from './pnlcard.js';
+
+test('newMilestone announces each multiple once', () => {
+  assert.equal(newMilestone(1, 1.9), null);
+  assert.equal(newMilestone(1, 2.1), 2);
+  assert.equal(newMilestone(2, 2.9), null);
+  assert.equal(newMilestone(2, 3.2), 3);
+  assert.equal(newMilestone(1, 12), 10); // jumps straight to the biggest one reached
+  assert.equal(newMilestone(10, 12), null);
+  assert.equal(newMilestone(1, null), null);
+});
+
+test('PnL card shows the multiple, names and market caps', () => {
+  const svg = buildPnlSvg({ symbol: 'ABC', callerName: '@toby', entryMcap: 10000, nowMcap: 45000, x: 4.5, ageText: '3h', groupName: 'Alpha <Chat>' });
+  assert.match(svg, /\$ABC/);
+  assert.match(svg, /4\.50x/);
+  assert.match(svg, /\+350%/);
+  assert.match(svg, /@toby/);
+  assert.match(svg, /Alpha &lt;Chat&gt;/);
+  assert.match(svg, /#22c55e/);
+  assert.doesNotMatch(svg, /undefined|NaN/);
+});
+
+test('PnL card turns red below 1x', () => {
+  const svg = buildPnlSvg({ symbol: 'ABC', callerName: 'x', entryMcap: 10000, nowMcap: 4000, x: 0.4 });
+  assert.match(svg, /0\.40x/);
+  assert.match(svg, /-60\.0%/);
+  assert.match(svg, /#ef4444/);
+});
+
+test('captions', () => {
+  assert.equal(fmtMult(25), '25x');
+  assert.match(buildPnlCaption({ symbol: 'ABC', callerName: '@t', x: 3, milestone: true }), /🚀.*3\.00x/);
+  assert.match(buildPnlCaption({ symbol: 'ABC', callerName: '@t', x: 1.5 }), /📊/);
+});

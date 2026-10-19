@@ -41,3 +41,17 @@ export async function listUserCalls(chatId, callerId, { limit = 10 } = {}) {
   );
   return rows;
 }
+
+// Calls from the last `days` days across all groups, for the multiplier announcements.
+export async function listLiveCalls({ days = 7, limit = 1000 } = {}) {
+  const { rows } = await query(
+    `SELECT chat_id, mint, symbol, caller_id, caller_name, price_usd, mcap_usd, created_at, last_x
+     FROM calls WHERE created_at > now() - make_interval(days => $1) ORDER BY created_at DESC LIMIT $2`,
+    [days, limit]
+  );
+  return rows;
+}
+
+export async function setCallMilestone(chatId, mint, x) {
+  await query('UPDATE calls SET last_x = $3 WHERE chat_id = $1 AND mint = $2', [chatId, mint, x]);
+}

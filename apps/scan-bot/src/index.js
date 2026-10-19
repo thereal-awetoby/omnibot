@@ -2,17 +2,19 @@ import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
-  recordFirstCall, getFirstCall, listChatCalls, listUserCalls,
+  recordFirstCall, getFirstCall, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone,
   MAX_WATCHES,
 } from '@omnibot/shared';
 import {
   parseMintInput, extractMint, looksLikeMint, parseAlertPct, shouldAlert,
   buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText,
-  buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
+  multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel, within } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
+import { renderPng } from './bubblemap.js';
+import { buildPnlSvg, buildPnlCaption, newMilestone } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
 import { formatDuration } from './scan.js';
@@ -351,7 +353,7 @@ async function doUnwatch(ctx, mint, { edit = false } = {}) {
 
 bot.command('start', showHome);
 bot.command('help', (ctx) => ctx.reply(
-  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard  /calls  (groups)\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
+  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard  /calls  /pnl  (groups)\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
 ));
 bot.command('token', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
@@ -475,6 +477,26 @@ bot.command('calls', async (ctx) => {
   const prices = await pricesFor(calls.map((c) => c.mint));
   return ctx.reply(buildUserCallsText(calls, prices, callerName(ctx.from)), HTML);
 });
+// A call as a share card: /pnl (your latest call here) or /pnl <address> (whoever called it first).
+async function pnlPng(call, prices, groupName) {
+  const p = prices.get(call.mint);
+  const x = multiple(call.price_usd, p?.priceUsd);
+  if (x === null) return null;
+  const nowMcap = p?.marketCapUsd ?? (call.mcap_usd ? call.mcap_usd * x : null);
+  const ageText = formatDuration(Date.now() - new Date(call.created_at).getTime());
+  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, nowMcap, x, ageText, groupName }));
+  return { png, x };
+}
+bot.command('pnl', async (ctx) => {
+  if (!isGroup(ctx)) return ctx.reply('PnL cards work in groups. Post a token address in your group to make a call, then send /pnl there.');
+  const mint = parseMintInput(ctx.match);
+  const call = mint ? await getFirstCall(ctx.chat.id, mint) : (await listUserCalls(ctx.chat.id, ctx.from.id, { limit: 1 }))[0];
+  if (!call) return ctx.reply(mint ? 'Nobody has called that token in this group yet.' : 'You have no calls in this group yet. Post a token address that nobody has called.');
+  const prices = await pricesFor([call.mint]);
+  const r = await pnlPng(call, prices, ctx.chat.title);
+  if (!r) return ctx.reply('No price found for that token right now.');
+  return ctx.replyWithPhoto(new InputFile(r.png, 'pnl.png'), { caption: buildPnlCaption({ symbol: call.symbol, callerName: call.caller_name, x: r.x }), parse_mode: 'HTML' });
+});
 bot.command('trade', (ctx) => ctx.reply(`https://t.me/${TRADE_USERNAME}`));
 bot.command('launch', (ctx) => ctx.reply(`https://t.me/${LAUNCH_USERNAME}`));
 bot.command('scan', showTrending);
@@ -539,6 +561,35 @@ async function checkAlerts() {
   }
 }
 
+// Posts a card in the group when a call reaches 2x, 3x, 5x, 10x... (each one once).
+let checkingCalls = false;
+async function checkCalls() {
+  if (checkingCalls) return;
+  checkingCalls = true;
+  try {
+    const rows = await listLiveCalls({ days: 7 });
+    if (!rows.length) return;
+    const prices = await fetchPairsByTokens([...new Set(rows.map((r) => r.mint))]);
+    for (const r of rows) {
+      const x = multiple(r.price_usd, prices.get(r.mint)?.priceUsd);
+      const m = newMilestone(r.last_x, x);
+      if (!m) continue;
+      await setCallMilestone(r.chat_id, r.mint, m); // first, so a failed send never repeats
+      try {
+        const title = (await bot.api.getChat(r.chat_id).catch(() => null))?.title;
+        const card = await pnlPng(r, prices, title);
+        if (!card) continue;
+        await bot.api.sendPhoto(r.chat_id, new InputFile(card.png, 'pnl.png'), { caption: buildPnlCaption({ symbol: r.symbol, callerName: r.caller_name, x: card.x, milestone: true }), parse_mode: 'HTML' });
+      } catch (e) { console.error('multiplier post error:', e.message); }
+      await new Promise((res) => setTimeout(res, 100));
+    }
+  } catch (e) {
+    console.error('call check error:', e.message);
+  } finally {
+    checkingCalls = false;
+  }
+}
+
 bot.catch((err) => console.error('bot error:', err.error?.message ?? err.message));
 bot.start({
   onStart: (me) => {
@@ -564,8 +615,10 @@ bot.start({
       { command: 'watch', description: 'Your watchlist / watch a token' },
       { command: 'leaderboard', description: 'Group call leaderboard' },
       { command: 'calls', description: 'Your calls in this group' },
+      { command: 'pnl', description: 'PnL card of a call (groups)' },
       { command: 'help', description: 'All commands' },
     ]).catch((e) => console.error('setMyCommands error:', e.message));
     setInterval(checkAlerts, 60_000);
+    setInterval(checkCalls, 90_000);
   },
 });
