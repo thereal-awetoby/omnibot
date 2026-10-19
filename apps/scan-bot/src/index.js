@@ -11,7 +11,7 @@ import {
   buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel, within } from './intel.js';
-import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, rpcStats } from './chain.js';
+import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
@@ -168,17 +168,32 @@ async function showDetail(ctx, kind, mint, build) {
   lastDetailAt.set(ctx.from.id, now);
   const key = `${kind}:${mint}`;
   let text = detailText.get(key)?.at > now - DETAIL_TTL_MS ? detailText.get(key).text : null;
+  let later = null;
   if (!text) {
-    try { text = await withTyping(ctx, build); } catch (e) { console.error(`${kind} view error:`, e.message); text = 'Could not load that right now. Try again in a moment.'; }
+    try {
+      const out = await withTyping(ctx, build);
+      text = typeof out === 'string' ? out : out.text;
+      later = typeof out === 'string' ? null : out.later;
+    } catch (e) { console.error(`${kind} view error:`, e.message); text = 'Could not load that right now. Try again in a moment.'; }
     if (detailText.size > 300) detailText.delete(detailText.keys().next().value);
     detailText.set(key, { at: now, text });
   }
   const origin = ctx.callbackQuery?.message?.message_id ?? ctx.message?.message_id;
-  return ctx.reply(text, {
+  const closeKb = new InlineKeyboard().text('🗑 Close', 'x');
+  const sent = await ctx.reply(text, {
     ...HTML,
-    reply_markup: new InlineKeyboard().text('🗑 Close', 'x'),
+    reply_markup: closeKb,
     ...(origin ? { reply_parameters: { message_id: origin, allow_sending_without_reply: true } } : {}),
   });
+  // A longer job (the Dev scan of a big wallet) finishes after the first answer: the message is updated in place.
+  if (later) {
+    later.then(async (t) => {
+      if (!t) return;
+      detailText.set(key, { at: Date.now(), text: t });
+      await ctx.api.editMessageText(sent.chat.id, sent.message_id, t, { ...HTML, reply_markup: closeKb }).catch(() => {});
+    }).catch((e) => console.error('late update error:', e.message));
+  }
+  return sent;
 }
 
 // The bubblemap: one picture of the biggest holders and which of them were funded by the same wallet.
@@ -234,27 +249,33 @@ async function buildDev(mint) {
   console.log(`dev wallet: ${sh(creator)} (deployer ${sh(deployer)}, stored creator ${sh(stored)}, RugCheck ${sh(c.intel.rugCreator)})`);
   if (!creator) return buildDevText({ market: c.market, creator: null });
   const devPct = !stored || creator === stored ? c.intel.devPct : await getHoldingPct(creator, mint);
-  // pump.fun's public list is gone, so read the wallet's own transactions (fast on a Helius RPC).
   const solBalancePromise = getSolBalance(creator);
   const fundingPromise = within(getWalletFunding(creator), 6_000);
-  let launches = null;
-  let scannedTx = 0;
-  try { const r = await scanCreatedTokens(creator); launches = r.launches; scannedTx = r.scannedTx; }
-  catch (e) { console.error('dev scan error:', e.message); }
-  const source = 'rpc';
-  const solBalance = await solBalancePromise;
-  const funding = await fundingPromise;
-  // This token was made by this wallet, so it always belongs in the list.
-  if (!launches?.some((l) => l.mint === mint)) {
-    launches = [...(launches ?? []), { mint, createdAt: c.market?.createdAt ?? c.intel.detectedAt ?? null }];
-  }
-  let markets = new Map();
-  try { markets = await fetchPairsByTokens(launches.map((l) => l.mint).slice(0, 30)); } catch (e) { console.error('launch prices error:', e.message); }
-  if (c.market) markets.set(mint, c.market);
-  return buildDevText({
-    market: c.market, creator, creatorFees: stored, funding, devPct, solBalance,
-    launches: mergeLaunches(launches, markets, mint), source, scannedTx, partial: true,
-  });
+  // The wallet's history is scanned for token creations (all of it when Helius is available). The first answer
+  // goes out after a few seconds; if the scan is still going, `later` carries the finished text.
+  const scan = scanDevLaunches(creator);
+  let snap = null;
+  try { snap = await scan.first; } catch (e) { console.error('dev scan error:', e.message); }
+  const cur = scan.current?.(); // a repeat tap should see everything the background scan found since
+  if (cur && cur.scannedTx > (snap?.scannedTx ?? 0)) snap = cur;
+  const [solBalance, funding] = await Promise.all([solBalancePromise, fundingPromise]);
+  const make = async (s) => {
+    let launches = s ? [...s.launches] : null;
+    // This token was made by this wallet, so it always belongs in the list.
+    if (!launches?.some((l) => l.mint === mint)) launches = [...(launches ?? []), { mint, createdAt: c.market?.createdAt ?? c.intel.detectedAt ?? null }];
+    let markets = new Map();
+    try { markets = await fetchPairsByTokens(launches.map((l) => l.mint).slice(0, 30)); } catch (e) { console.error('launch prices error:', e.message); }
+    if (c.market) markets.set(mint, c.market);
+    return buildDevText({
+      market: c.market, creator, creatorFees: stored, funding, devPct, solBalance,
+      launches: mergeLaunches(launches, markets, mint), source: 'rpc', scannedTx: s?.scannedTx ?? 0, partial: !s,
+      scanDone: !!s?.reachedEnd, scanning: !!s && !s.reachedEnd && !s.final,
+    });
+  };
+  const text = await make(snap);
+  if (snap?.reachedEnd) return text;
+  const later = scan.done.then((f) => (f && (f.scannedTx > (snap?.scannedTx ?? 0) || f.launches.length > (snap?.launches.length ?? 0)) ? make({ ...f, final: true }) : null)).catch(() => null);
+  return { text, later };
 }
 
 const buildLore = async (mint, userId) => {

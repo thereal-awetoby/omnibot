@@ -59,14 +59,43 @@ const RUG_TTL = 120_000;
 export async function fetchRugCheck(mint, fetchImpl = fetch) {
   const hit = rugCache.get(mint);
   if (hit && Date.now() - hit.at < RUG_TTL) return hit.value;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) { // a network hiccup is common: one quick retry
+    try {
+      const res = await fetchImpl(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { signal: AbortSignal.timeout(7_000) });
+      if (!res.ok) throw new Error(`RugCheck returned HTTP ${res.status}`);
+      const value = parseRugCheck(await res.json());
+      if (value) rugCache.set(mint, { at: Date.now(), value });
+      return value;
+    } catch (e) {
+      lastErr = e;
+      if (/HTTP 4\d\d/.test(e.message)) break; // a refusal will not change on retry
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+  console.error('rugcheck error:', lastErr?.message, lastErr?.cause?.code ?? '');
+  return null;
+}
+
+// GeckoTerminal knows how many wallets hold a token (used when RugCheck cannot be reached).
+export function parseGeckoHolders(body) {
+  const n = Number(body?.data?.attributes?.holders?.count);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+}
+const holderCountCache = new Map(); // mint -> { at, value }
+export async function fetchHolderCount(mint, fetchImpl = fetch, now = Date.now()) {
+  const hit = holderCountCache.get(mint);
+  if (hit && now - hit.at < 120_000) return hit.value;
+  if (now < geckoPausedUntil) return null;
   try {
-    const res = await fetchImpl(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { signal: AbortSignal.timeout(8_000) });
-    if (!res.ok) throw new Error(`RugCheck returned HTTP ${res.status}`);
-    const value = parseRugCheck(await res.json());
-    if (value) rugCache.set(mint, { at: Date.now(), value });
+    const res = await fetchImpl(`https://api.geckoterminal.com/api/v2/networks/solana/tokens/${mint}/info`, { signal: AbortSignal.timeout(5_000), headers: { accept: 'application/json' } });
+    if (res.status === 429) { geckoPausedUntil = now + 60_000; throw new Error('GeckoTerminal rate limit, pausing 60s'); }
+    if (!res.ok) throw new Error(`GeckoTerminal returned HTTP ${res.status}`);
+    const value = parseGeckoHolders(await res.json());
+    if (value) holderCountCache.set(mint, { at: now, value });
     return value;
   } catch (e) {
-    console.error('rugcheck error:', e.message);
+    console.error('holder count error:', e.message);
     return null;
   }
 }

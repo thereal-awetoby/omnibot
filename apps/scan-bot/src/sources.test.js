@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, fetchLoreStory, pickGeminiModels, getLastLoreError, parseTweetOembed, fetchTweetText, fetchImageInline, parseNewsRss, fetchNews, parseSearch, searchTokens, parseDexPaid, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
+import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, fetchLoreStory, pickGeminiModels, getLastLoreError, parseTweetOembed, fetchTweetText, fetchImageInline, parseNewsRss, fetchNews, parseSearch, searchTokens, parseDexPaid, fetchDexPaid, fetchPriceSeries, buildChartUrl, parseGeckoHolders, fetchHolderCount } from './sources.js';
 
 const json = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
@@ -416,4 +416,16 @@ test('fetchLoreStory (Gemini): a 429 on the searched call falls back to a plain 
   // every model out of quota: nothing is written and the reason is kept for LORE_DEBUG
   assert.equal(await fetchLoreStory({ mint: 'Q2', ...FACTS }, { geminiKey: 'GK', geminiModels: ['m1'] }, async () => httpErr(429)), null);
   assert.match(getLastLoreError(), /HTTP 429/);
+});
+
+test('holder count from GeckoTerminal: parsed, cached, and a refusal gives null', async () => {
+  assert.equal(parseGeckoHolders({ data: { attributes: { holders: { count: 35375 } } } }), 35375);
+  assert.equal(parseGeckoHolders({ data: { attributes: {} } }), null);
+  const mint = 'HoldersTestMint1111111111111111111111111111';
+  const ok = async () => ({ ok: true, status: 200, json: async () => ({ data: { attributes: { holders: { count: 95 } } } }) });
+  assert.equal(await fetchHolderCount(mint, ok, 9e15), 95);
+  let calls = 0;
+  assert.equal(await fetchHolderCount(mint, async () => { calls += 1; return ok(); }, 9e15 + 1000), 95); // cached
+  assert.equal(calls, 0);
+  assert.equal(await fetchHolderCount('Other1111111111111111111111111111111111111', async () => ({ ok: false, status: 404 }), 9e15), null);
 });

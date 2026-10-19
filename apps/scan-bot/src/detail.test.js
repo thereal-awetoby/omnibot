@@ -200,3 +200,16 @@ test('createdMintsFromTx: reads a pump.fun creation from a plain JSON transactio
   assert.deepEqual(createdMintsFromTx(tx, DEV), [M]);
   assert.deepEqual(createdMintsFromTx(tx, 'OTHER'), []);
 });
+
+test('createdMintsFromTx: a pump mint that signs the wallet-paid transaction is a creation', () => {
+  const M = 'GGzNLq89NV4d495XC4uwjC2ub6rPdSw1vsRYcibVpump';
+  const tx = { meta: { err: null }, transaction: { message: { accountKeys: [{ pubkey: DEV, signer: true }, { pubkey: M, signer: true }, { pubkey: 'x'.repeat(44), signer: false }], instructions: [] } } };
+  assert.deepEqual(createdMintsFromTx(tx, DEV), [M]);
+});
+
+test('buildDevText: says whether the whole history was read', () => {
+  const full = buildDevText({ market: { symbol: 'X' }, creator: DEV, launches: [], source: 'rpc', scannedTx: 1234, scanDone: true, now: NOW });
+  assert.match(full, /full history \(1,234 transactions\)/);
+  const part = buildDevText({ market: { symbol: 'X' }, creator: DEV, launches: [], source: 'rpc', scannedTx: 800, scanning: true, now: NOW });
+  assert.match(part, /800 transactions so far/);
+});

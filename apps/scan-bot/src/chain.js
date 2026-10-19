@@ -332,41 +332,71 @@ const heliusKey = () => {
   return null;
 };
 
-// Helius's "oldest/newest first" history method can skip failed transactions, which matters for serial launchers:
-// their wallets are full of failed attempts that would otherwise use up the whole scan. 100 full transactions per request.
-async function scanCreatedTokensSucceeded(creator, { limit, deadlineMs }) {
-  const stop = Date.now() + deadlineMs;
-  const launches = [];
-  let scanned = 0;
-  let token = null;
-  let useFilter = true;
-  let pages = 0;
-  while (pages < Math.ceil(limit / 100) && Date.now() < stop) {
-    const params = { transactionDetails: 'full', encoding: 'jsonParsed', sortOrder: 'desc', limit: 100, maxSupportedTransactionVersion: 0 };
-    if (useFilter) params.filters = { status: 'succeeded' };
-    if (token) params.paginationToken = token;
-    let body;
-    try {
-      const res = await rpcPool.fetchWhere((u) => /helius/i.test(u), {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 'omni', method: 'getTransactionsForAddress', params: [creator, params] }),
-      });
-      body = res.ok ? await res.json() : null;
-    } catch { body = null; }
-    if (body?.error && useFilter && pages === 0) { useFilter = false; continue; } // try once more without the filter
-    const rows = body?.result?.data;
-    if (!Array.isArray(rows)) { if (pages === 0) return null; break; }
-    pages += 1;
-    scanned += rows.length;
-    for (const row of rows) {
-      const tx = { transaction: row.transaction, meta: row.meta, blockTime: row.blockTime };
-      for (const mint of createdMintsFromTx(tx, creator)) launches.push({ mint, createdAt: row.blockTime ? row.blockTime * 1000 : null });
+// The whole history of a wallet, newest first, 100 full transactions per request, failed ones skipped
+// (a serial launcher's wallet is full of failed attempts). It keeps going past the first answer: `first` resolves
+// after a few seconds with what is found so far (or sooner when the history ends), `done` when the scan ends.
+const FIRST_ANSWER_MS = 10_000;
+function startDeepScan(creator, { maxTx = Number(process.env.DEV_SCAN_TX) || 3_000, backgroundMs = 90_000 } = {}) {
+  const state = { launches: new Map(), scanned: 0, reachedEnd: false, failed: false, finished: false };
+  const snapshot = () => ({ launches: [...state.launches].map(([mint, createdAt]) => ({ mint, createdAt })), scannedTx: state.scanned, reachedEnd: state.reachedEnd, failed: state.failed, final: state.finished });
+  const started = Date.now();
+  const run = (async () => {
+    let token = null; let lastSlot = null; let useFilter = true; let pages = 0;
+    while (pages < Math.ceil(maxTx / 100) && Date.now() - started < backgroundMs) {
+      const params = { transactionDetails: 'full', encoding: 'jsonParsed', sortOrder: 'desc', limit: 100, maxSupportedTransactionVersion: 0 };
+      if (useFilter) params.filters = { status: 'succeeded' };
+      if (token) params.paginationToken = token;
+      else if (lastSlot) params.filters = { ...(params.filters ?? {}), slot: { lt: lastSlot } }; // no token given: continue below the last slot seen
+      let body = null;
+      try {
+        const res = await rpcPool.fetchWhere((u) => /helius/i.test(u), {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'omni', method: 'getTransactionsForAddress', params: [creator, params] }),
+        });
+        body = res.ok ? await res.json() : null;
+      } catch { body = null; }
+      if (body?.error && useFilter && pages === 0) { console.error('dev scan: filter refused:', String(body.error.message ?? '').slice(0, 80)); useFilter = false; continue; }
+      const rows = body?.result?.data;
+      if (!Array.isArray(rows)) { if (pages === 0) state.failed = true; break; }
+      if (pages === 0 && rows.length && !rows[0]?.transaction?.message) { console.error(`dev scan: unexpected history shape (keys: ${Object.keys(rows[0]).join(',')})`); state.failed = true; break; }
+      pages += 1;
+      state.scanned += rows.length;
+      for (const row of rows) {
+        const tx = { transaction: row.transaction, meta: row.meta, blockTime: row.blockTime };
+        for (const mint of createdMintsFromTx(tx, creator)) if (!state.launches.has(mint)) state.launches.set(mint, row.blockTime ? row.blockTime * 1000 : null);
+      }
+      if (rows.length < 100) { state.reachedEnd = true; break; }
+      token = body.result.paginationToken ?? null;
+      lastSlot = rows.at(-1)?.slot ?? null;
+      if (!token && !lastSlot) { console.error('dev scan: no way to continue past the first page'); break; }
     }
-    token = body.result.paginationToken ?? null;
-    if (!token || rows.length < 100) break;
+    state.finished = true;
+    console.log(`dev scan (helius, full history): ${creator.slice(0, 6)}… read ${state.scanned} transactions in ${pages} request(s)${state.reachedEnd ? ', reached the start of its history' : ''}, found ${state.launches.size} created token(s) in ${Math.round((Date.now() - started) / 1000)}s`);
+  })();
+  const first = Promise.race([run, new Promise((r) => setTimeout(r, FIRST_ANSWER_MS))]).then(snapshot);
+  const done = run.then(snapshot);
+  return { first, done, snapshot };
+}
+
+const devScans = new Map(); // wallet -> { at, scan }
+// Launches made by a wallet: { first, done } promises of { launches, scannedTx, reachedEnd }. The scan result is
+// kept for 10 minutes, so tapping Dev again is instant.
+export function scanDevLaunches(creator) {
+  const hit = devScans.get(creator);
+  if (hit && Date.now() - hit.at < 10 * 60_000) return hit.scan;
+  const fallback = async () => { const r = await scanCreatedTokens(creator); return { launches: r.launches, scannedTx: r.scannedTx, reachedEnd: false, final: true }; };
+  let scan;
+  if (heliusKey()) {
+    const deep = startDeepScan(creator);
+    const first = deep.first.then((s) => (s.failed ? fallback() : s));
+    scan = { first, done: deep.done.then((s) => (s.failed ? first : s)), current: () => { const c = deep.snapshot(); return c.failed ? null : c; } };
+  } else {
+    const first = fallback();
+    scan = { first, done: first };
   }
-  console.log(`dev scan (helius, successful only${useFilter ? '' : ', unfiltered'}): ${creator.slice(0, 6)}… read ${scanned} transactions, found ${launches.length} created token(s)`);
-  return { launches, scannedTx: scanned };
+  if (devScans.size > 100) devScans.delete(devScans.keys().next().value);
+  devScans.set(creator, { at: Date.now(), scan });
+  return scan;
 }
 
 // Helius returns 100 already-decoded transactions per request, so far more history fits in the time limit.
@@ -397,8 +427,6 @@ async function scanCreatedTokensHelius(creator, { limit, deadlineMs }) {
 // Tokens a wallet created, found by reading its most recent transactions. Returns { launches, scannedTx } where
 // launches = [{ mint, createdAt (ms) }]. Not the full history: only the last `limit` transactions are read.
 export async function scanCreatedTokens(creator, { limit = Number(process.env.DEV_SCAN_TX) || 500, deadlineMs = 20_000 } = {}) {
-  const fastest = await scanCreatedTokensSucceeded(creator, { limit, deadlineMs });
-  if (fastest) return fastest;
   const fast = await scanCreatedTokensHelius(creator, { limit, deadlineMs });
   if (fast) return fast;
   const sigs = (await connection.getSignaturesForAddress(new PublicKey(creator), { limit })).filter((s) => !s.err).map((s) => s.signature);

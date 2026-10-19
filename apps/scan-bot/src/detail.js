@@ -25,6 +25,11 @@ export function createdMintsFromTx(tx, creator) {
     ...(tx.meta?.innerInstructions ?? []).flatMap((i) => i.instructions ?? []),
   ];
   const mints = [];
+  // A new token's mint address signs the transaction that creates it, and pump.fun mint addresses end in "pump".
+  for (const k of keys) {
+    const a = str(k?.pubkey ?? k);
+    if (k?.signer && a !== creator && a.endsWith('pump') && isAddr(a)) mints.push(a);
+  }
   for (const ix of steps) {
     const p = ix?.parsed;
     if (p && typeof p.type === 'string' && p.type.startsWith('initializeMint') && isAddr(p.info?.mint)) mints.push(p.info.mint);
@@ -102,7 +107,7 @@ const launchLine = (l, now) => {
 };
 
 // launches: result of mergeLaunches (or null when they could not be loaded).
-export function buildDevText({ market, creator, creatorFees = null, funding = null, devPct, solBalance, launches, source, scannedTx, partial = false, now = Date.now() }) {
+export function buildDevText({ market, creator, creatorFees = null, funding = null, devPct, solBalance, launches, source, scannedTx, partial = false, scanDone = false, scanning = false, now = Date.now() }) {
   if (!creator) return `👨‍💻 <b>Dev</b> · ${name(market)}\n\nThe dev wallet for this token is not known yet. Try again in a minute.`;
   const head = [`👨‍💻 ${walletLink(creator)}`];
   const facts = [];
@@ -132,7 +137,9 @@ export function buildDevText({ market, creator, creatorFees = null, funding = nu
     if (top.length > 1) lines.push('', '🚀 <b>Top launches</b> (market cap now)', `<blockquote>${top.map((l) => launchLine(l, now)).join('\n')}</blockquote>`);
   }
   lines.push('', `<code>${creator}</code>`);
-  if (source === 'rpc' && scannedTx > 0) lines.push(`<i>Based on this wallet's last ${scannedTx} transactions.</i>`);
+  if (scanDone && scannedTx > 0) lines.push(`<i>Read this wallet's full history (${scannedTx.toLocaleString('en-US')} transactions).</i>`);
+  else if (scanning && scannedTx > 0) lines.push(`<i>Read ${scannedTx.toLocaleString('en-US')} transactions so far. This message updates by itself when the scan finishes.</i>`);
+  else if (source === 'rpc' && scannedTx > 0) lines.push(`<i>Based on this wallet's last ${scannedTx} transactions.</i>`);
   else if (partial) lines.push('<i>Could not read this wallet\'s full history right now, so older launches may be missing. Tap Dev again in a moment.</i>');
   return lines.join('\n');
 }
