@@ -47,6 +47,13 @@ test('PnL card has square corners and a Solana mark', () => {
   assert.match(svg, /#9945FF/);
 });
 
+test('emoji in the group name and caller name are dropped from the card', () => {
+  const svg = buildPnlSvg({ symbol: 'ABC', callerName: 'Winter Arc 🪖', entryMcap: 1000, nowMcap: 3000, x: 3, groupName: "I'm tired of losing 🙏" });
+  assert.match(svg, /I'm tired of losing</);
+  assert.match(svg, /called by Winter Arc</);
+  assert.doesNotMatch(svg, /🙏|🪖/u);
+});
+
 test('captions', () => {
   assert.equal(fmtMult(25), '25x');
   assert.match(buildPnlCaption({ symbol: 'ABC', callerName: '@t', x: 3, milestone: true }), /🚀.*3\.00x/);

@@ -149,9 +149,9 @@ export function buildBubbleSvg({ symbol, nodes, poolPct = 0, clusters = [], layo
 }
 
 // SVG text -> PNG bytes. resvg is loaded only when a map is drawn, so the rest of the bot never depends on it.
-export async function renderPng(svg) {
+export async function renderPng(svg, width = 1000) {
   const { Resvg } = await import('@resvg/resvg-js');
-  const r = new Resvg(svg, { fitTo: { mode: 'width', value: 1000 }, font: { loadSystemFonts: true, defaultFontFamily: 'Arial' } });
+  const r = new Resvg(svg, { fitTo: { mode: 'width', value: width }, font: { loadSystemFonts: true, defaultFontFamily: 'Arial' } });
   return r.render().asPng();
 }
 

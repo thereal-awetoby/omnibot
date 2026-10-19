@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sniffMime, parseMemePosts, pickLocalImage, fetchOnlineMeme } from './memeart.js';
+import { imageSize, sniffMime, parseMemePosts, pickLocalImage, fetchOnlineMeme } from './memeart.js';
 
 const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(40)]);
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(40)]);
@@ -50,4 +50,12 @@ test('fetchOnlineMeme downloads one safe meme', async () => {
   assert.equal(m.mime, 'image/jpeg');
   assert.equal(m.title, 'gm');
   assert.equal(await fetchOnlineMeme({ fetchFn: async () => ({ ok: false }), tries: 2 }), null);
+});
+
+test('imageSize reads png and jpeg dimensions', () => {
+  const png = Buffer.alloc(32); png.set([0x89, 0x50, 0x4e, 0x47]); png.writeUInt32BE(1200, 16); png.writeUInt32BE(800, 20);
+  assert.deepEqual(imageSize(png), { w: 1200, h: 800 });
+  const jpg = Buffer.alloc(40); jpg.set([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08]); jpg.writeUInt16BE(600, 7); jpg.writeUInt16BE(900, 9);
+  assert.deepEqual(imageSize(Buffer.concat([Buffer.from([0xff, 0xd8]), jpg.subarray(2)])), { h: 600, w: 900 });
+  assert.equal(imageSize(Buffer.from('nope')), null);
 });

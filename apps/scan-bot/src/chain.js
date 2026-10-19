@@ -1,7 +1,7 @@
 // Reads token safety facts straight from Solana (free public RPC works, a paid one is faster).
 import { Connection, PublicKey } from '@solana/web3.js';
 import { computeHolderStats, computeFresh, parseCurveReserves, curveStats } from './security.js';
-import { createdMintsFromTx, createdMintsFromEnhanced, fundingFromTx, parseAssetNames, parseAssetImage, imageFromMetadata } from './detail.js';
+import { createdMintsFromTx, createdMintsFromEnhanced, fundingFromTx, parseAssetNames, parseAssetImage, imageFromMetadata, deployerFromTx } from './detail.js';
 import { createRpcPool, parseRpcUrls } from './rpcpool.js';
 import { parseDasAccounts, funderFromTx } from './bubblemap.js';
 
@@ -243,14 +243,14 @@ export async function getCreatorOnChain(mint) {
 // 3) otherwise page back through the mint's history, for a limited number of pages.
 const METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
 const deployerCache = new Map(); // mint -> address | null
-let oldestListWorks = true; // Helius's "oldest first" method; switched off after the first refusal
+let oldestListFailedAt = 0; // Helius's "oldest first" method; after a refusal it is skipped for 5 minutes, then tried again
 const payerOf = (tx) => {
   const k0 = tx?.transaction?.message?.accountKeys?.[0];
   return k0?.pubkey?.toBase58?.() ?? (typeof k0?.pubkey === 'string' ? k0.pubkey : typeof k0 === 'string' ? k0 : null);
 };
 
 async function oldestSignatureHelius(mint) {
-  if (!oldestListWorks) return null;
+  if (Date.now() - oldestListFailedAt < 300_000) return null;
   try {
     const res = await rpcPool.fetchWhere((u) => /helius/i.test(u), {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -258,7 +258,7 @@ async function oldestSignatureHelius(mint) {
     });
     const body = res.ok ? await res.json() : null;
     const rows = body?.result?.data ?? (Array.isArray(body?.result) ? body.result : null);
-    if (!rows) { oldestListWorks = false; return null; }
+    if (!rows) { oldestListFailedAt = Date.now(); console.error('oldest-first lookup refused, using the slower way for a while'); return null; }
     return rows.find((r) => !r.err)?.signature ?? null;
   } catch { return null; }
 }
@@ -306,8 +306,12 @@ export async function getDeployerOnChain(mint) {
     let sig = await oldestSignatureHelius(mint);
     if (sig) how = 'helius'; else { sig = await oldestSignatureByPaging(mint); if (sig) how = 'paging'; }
     if (sig) {
-      const tx = await connection.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
-      deployer = payerOf(tx);
+      let tx = await connection.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+      if (!tx) { await new Promise((r) => setTimeout(r, 800)); tx = await connection.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }); }
+      const r = deployerFromTx(tx);
+      deployer = r.deployer;
+      const s = (a) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : 'none');
+      console.log(`creation tx ${sig.slice(0, 8)}…: ${tx ? 'read' : 'NOT READABLE'}, signer ${s(r.user)}, fee payer ${s(r.payer)}`);
     }
   } catch (e) { console.error('deployer error:', e.message); }
   console.log(`deployer lookup: ${deployer ? deployer.slice(0, 6) + '…' + deployer.slice(-4) : 'not found'} (via ${how})`);

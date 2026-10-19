@@ -243,6 +243,7 @@ const LORE_RULES = 'Write 3 to 4 short plain sentences, under 600 characters, no
 const LORE_SYSTEM_WEB = `You write the "lore" for a Solana memecoin card in a Telegram bot: the story or meme behind the token. Use web search (X posts, news, the project link) to find what it is based on and why it is getting attention. ${LORE_RULES} If you find nothing reliable online, explain the idea from the name, the logo image and the description.`;
 const LORE_SYSTEM_OFFLINE = `You write the "lore" for a Solana memecoin card in a Telegram bot: the story or meme behind the token. You have NO web access: use only the facts you are given and never invent events, people, numbers or sources. ${LORE_RULES}`;
 
+const isTimeout = (e) => e?.name === 'TimeoutError' || e?.name === 'AbortError' || /aborted due to timeout|timed out/i.test(String(e?.message ?? ''));
 const cleanStory = (t) => String(t ?? '').replace(/[*_`#]/g, '').replace(/\s+/g, ' ').trim();
 
 async function askAnthropic(facts, { apiKey, model, image = null }, fetchImpl) {
@@ -322,7 +323,8 @@ async function askGemini(facts, { apiKey, models, image = null }, fetchImpl) {
         // Thinking models spend part of this budget on their own reasoning, so it must be generous or the answer comes back empty.
         generationConfig: { maxOutputTokens: 2048, temperature: 0.4 },
       }),
-      signal: AbortSignal.timeout(30_000),
+      // the searched call gets less time: if it is slow, the plain call (from the facts and the logo) answers instead
+      signal: AbortSignal.timeout(grounded ? 18_000 : 25_000),
     });
     if (!res.ok) throw await geminiError(res);
     const body = await res.json();
@@ -342,7 +344,7 @@ async function askGemini(facts, { apiKey, models, image = null }, fetchImpl) {
     const a = await attempt(model, true);
     if (a.r) return a.r;
     if (a.e?.status === 404) continue;
-    if (a.e && ![400, 403, 429].includes(a.e.status)) throw a.e;
+    if (a.e && ![400, 403, 429].includes(a.e.status) && !isTimeout(a.e)) throw a.e;
     // Search not allowed, search quota used up (429), or an empty answer: ask again WITHOUT search.
     const b = await attempt(model, false);
     if (b.r) return b.r;

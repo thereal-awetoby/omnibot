@@ -491,7 +491,7 @@ async function pnlPng(call, prices, groupName) {
   const nowMcap = p?.marketCapUsd ?? (call.mcap_usd ? call.mcap_usd * x : null);
   const ageText = formatDuration(Date.now() - new Date(call.created_at).getTime());
   const art = await getArt().catch(() => null); // a random meme behind the card; plain card if none
-  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, nowMcap, x, ageText, groupName, art }));
+  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, nowMcap, x, ageText, groupName, art }), 1920);
   return { png, x };
 }
 bot.command('pnl', async (ctx) => {

@@ -418,6 +418,17 @@ test('fetchLoreStory (Gemini): a 429 on the searched call falls back to a plain 
   assert.match(getLastLoreError(), /HTTP 429/);
 });
 
+test('fetchLoreStory (Gemini): a slow searched call times out and the plain call answers', async () => {
+  const impl = async (u, o) => {
+    const b = JSON.parse(o.body);
+    if (b.tools) { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; }
+    return gem('It is a memecoin shown with a green starter pack.', false);
+  };
+  const r = await fetchLoreStory({ mint: 'T1', ...FACTS }, { geminiKey: 'GK', geminiModels: ['m1'] }, impl);
+  assert.equal(r.text, 'It is a memecoin shown with a green starter pack.');
+  assert.equal(r.grounded, false);
+});
+
 test('holder count from GeckoTerminal: parsed, cached, and a refusal gives null', async () => {
   assert.equal(parseGeckoHolders({ data: { attributes: { holders: { count: 35375 } } } }), 35375);
   assert.equal(parseGeckoHolders({ data: { attributes: {} } }), null);

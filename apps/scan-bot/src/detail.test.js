@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAssetImage, imageFromMetadata, parseAssetNames, createdMintsFromEnhanced, fundingFromTx, createdMintsFromTx, mergeLaunches, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink, usdShort } from './detail.js';
+import { deployerFromTx, pumpCreateSigners, parseAssetImage, imageFromMetadata, parseAssetNames, createdMintsFromEnhanced, fundingFromTx, createdMintsFromTx, mergeLaunches, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink, usdShort } from './detail.js';
 
 const DEV = 'DevWa11etDevWa11etDevWa11etDevWa11etDevW1';
 const M1 = 'So11111111111111111111111111111111111111112';
@@ -235,4 +235,28 @@ test('parseAssetImage finds the token picture and turns ipfs links into https', 
   assert.equal(parseAssetImage({}), null);
   assert.equal(imageFromMetadata({ image: 'https://ipfs.io/ipfs/Qm1' }), 'https://ipfs.io/ipfs/Qm1');
   assert.equal(imageFromMetadata(null), null);
+});
+
+const PUMP_P = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+const MINT_P = 'GGzNLq89NV4d495XC4uwjC2ub6rPdSw1vsRYcibVpump';
+const RELAY = '9GmpVduSQtjvMgiE9EtTCfe1xpEcqkS7Qbd9s5StGzib';
+const USER = 'EFiw6kbcsK1QaWEGUFBf3miWBRBNY1mCMr8EdEjpDNje';
+const launcherTx = { meta: { err: null, innerInstructions: [] }, transaction: { message: {
+  accountKeys: [{ pubkey: RELAY, signer: true }, { pubkey: USER, signer: true }, { pubkey: MINT_P, signer: true }, { pubkey: 'Gl0bal1111111111111111111111111111111111111', signer: false }],
+  instructions: [{ programId: PUMP_P, accounts: [MINT_P, 'Authority1111111111111111111111111111111111', 'Gl0bal1111111111111111111111111111111111111', USER], data: 'abc' }],
+} } };
+
+test('deployerFromTx: the signer of the pump create step is the dev, not a relay that paid the fee', () => {
+  assert.deepEqual(pumpCreateSigners(launcherTx), [USER]);
+  assert.deepEqual(deployerFromTx(launcherTx), { deployer: USER, payer: RELAY, user: USER });
+  const plain = { transaction: { message: { accountKeys: [{ pubkey: DEV, signer: true }], instructions: [] } } };
+  assert.deepEqual(deployerFromTx(plain), { deployer: DEV, payer: DEV, user: null });
+  assert.deepEqual(deployerFromTx(null), { deployer: null, payer: null, user: null });
+});
+
+test('launches made through a fee-paying relay count for the signing dev', () => {
+  assert.deepEqual(createdMintsFromTx(launcherTx, USER), [MINT_P]);
+  const enhanced = [{ feePayer: RELAY, timestamp: 5, instructions: [{ programId: PUMP_P, accounts: [MINT_P, 'x', 'y', USER] }] }];
+  assert.deepEqual(createdMintsFromEnhanced(enhanced, USER).map((l) => l.mint), [MINT_P]);
+  assert.deepEqual(createdMintsFromEnhanced(enhanced, 'SOMEONEELSE'), []);
 });

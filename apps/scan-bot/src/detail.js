@@ -19,16 +19,19 @@ export function createdMintsFromTx(tx, creator) {
   const keys = tx.transaction?.message?.accountKeys ?? [];
   const k0 = keys[0]?.pubkey ?? keys[0];
   const payer = typeof k0 === 'string' ? k0 : String(k0?.toBase58?.() ?? k0 ?? '');
-  if (!creator || payer !== creator) return [];
   const steps = [
     ...(tx.transaction?.message?.instructions ?? []),
     ...(tx.meta?.innerInstructions ?? []).flatMap((i) => i.instructions ?? []),
   ];
+  // The wallet either paid for the transaction or is the signer named in pump.fun's create step
+  // (a launch tool can pay the fee while the dev signs).
+  const paid = payer === creator;
+  if (!creator || (!paid && !pumpCreateSigners(tx).includes(creator))) return [];
   const mints = [];
   // A new token's mint address signs the transaction that creates it, and pump.fun mint addresses end in "pump".
   for (const k of keys) {
     const a = str(k?.pubkey ?? k);
-    if (k?.signer && a !== creator && a.endsWith('pump') && isAddr(a)) mints.push(a);
+    if (paid && k?.signer && a !== creator && a.endsWith('pump') && isAddr(a)) mints.push(a);
   }
   for (const ix of steps) {
     const p = ix?.parsed;
@@ -48,15 +51,41 @@ function pumpCreateMint(programId, accounts) {
   return first.endsWith('pump') && isAddr(first) ? first : null;
 }
 
+// Wallets that sign pump.fun's create step (the "user" of the launch), in a parsed transaction.
+export function pumpCreateSigners(tx) {
+  const keys = tx?.transaction?.message?.accountKeys ?? [];
+  const signers = new Set(keys.filter((k) => k?.signer).map((k) => str(k?.pubkey ?? k)));
+  const steps = [
+    ...(tx?.transaction?.message?.instructions ?? []),
+    ...(tx?.meta?.innerInstructions ?? []).flatMap((i) => i.instructions ?? []),
+  ];
+  const out = [];
+  for (const ix of steps) {
+    if (!pumpCreateMint(ix?.programId, ix?.accounts)) continue;
+    for (const a of (ix.accounts ?? []).slice(1).map(str)) if (signers.has(a) && !a.endsWith('pump') && !out.includes(a)) out.push(a);
+  }
+  return out;
+}
+
+// The dev of a token = who launched it: the signer of the pump.fun create step, else whoever paid for the transaction.
+export function deployerFromTx(tx) {
+  const k0 = tx?.transaction?.message?.accountKeys?.[0];
+  const payer = str(k0?.pubkey ?? k0) || null;
+  const user = pumpCreateSigners(tx)[0] ?? null;
+  return { deployer: user ?? payer, payer, user };
+}
+
 // Helius "enhanced" transactions (100 per request, already decoded) -> launches [{ mint, createdAt }] made by `creator`.
 export function createdMintsFromEnhanced(txs, creator) {
   const out = [];
   for (const tx of txs ?? []) {
-    if (!tx || tx.transactionError || tx.feePayer !== creator) continue;
+    if (!tx || tx.transactionError) continue;
     const steps = [...(tx.instructions ?? []), ...(tx.instructions ?? []).flatMap((i) => i.innerInstructions ?? [])];
     for (const ix of steps) {
       const m = pumpCreateMint(ix?.programId, ix?.accounts);
-      if (m && !out.some((o) => o.mint === m)) out.push({ mint: m, createdAt: tx.timestamp ? tx.timestamp * 1000 : null });
+      // paid for by the wallet, or the wallet is one of the accounts of the create step (the signing user)
+      const mine = tx.feePayer === creator || (ix?.accounts ?? []).slice(1).map(str).includes(creator);
+      if (m && mine && !out.some((o) => o.mint === m)) out.push({ mint: m, createdAt: tx.timestamp ? tx.timestamp * 1000 : null });
     }
   }
   return out;

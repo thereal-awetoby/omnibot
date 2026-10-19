@@ -14,13 +14,16 @@ export function newMilestone(lastX, x) {
 export const fmtMult = (x) => (x >= 10 ? x.toFixed(0) : x.toFixed(2)) + 'x';
 const fmtPct = (x) => { const p = (x - 1) * 100; return `${p >= 0 ? '+' : '-'}${Math.abs(p) >= 100 ? Math.abs(p).toFixed(0) : Math.abs(p).toFixed(1)}%`; };
 
+// The card is drawn without emoji fonts, so emoji in names are dropped (they would show as empty boxes).
+const plain = (s) => String(s ?? '').replace(/[\p{Extended_Pictographic}\uFE0F\u200D\u{1F3FB}-\u{1F3FF}\u{1F1E6}-\u{1F1FF}]/gu, '').replace(/\s+/g, ' ').trim();
+
 // One call as a share card (SVG, drawn to PNG by renderPng).
 // `art` is an optional { buf, mime } picture used as the background (cropped to 16:9).
 export function buildPnlSvg({ symbol, callerName, entryMcap, nowMcap, x, ageText, groupName, art = null }) {
   const up = x >= 1;
   const col = up ? '#22c55e' : '#ef4444';
   const name = symbol ? `$${esc(symbol)}` : 'Token';
-  const who = callerName ? esc(callerName) : 'someone';
+  const who = plain(callerName) ? esc(plain(callerName)) : 'someone';
   const f = 'font-family="Arial, Helvetica, sans-serif"';
   const bgLayer = art
     ? [
@@ -40,7 +43,7 @@ export function buildPnlSvg({ symbol, callerName, entryMcap, nowMcap, x, ageText
     '<g>',
     ...bgLayer,
     `<text x="50" y="80" ${f} font-size="30" font-weight="700" fill="#e5e7eb">Omni Scan</text>`,
-    `<text x="950" y="80" text-anchor="end" ${f} font-size="24" fill="#e5e7eb"${thin}>${groupName ? esc(groupName) : 'Group call'}</text>`,
+    `<text x="950" y="80" text-anchor="end" ${f} font-size="24" fill="#e5e7eb"${thin}>${plain(groupName) ? esc(plain(groupName)) : 'Group call'}</text>`,
     `<text x="50" y="190" ${f} font-size="64" font-weight="700" fill="#ffffff">${name}</text>`,
     `<text x="50" y="240" ${f} font-size="26" fill="#e5e7eb"${thin}>called by ${who}${ageText ? ` · ${esc(ageText)} ago` : ''}</text>`,
     `<text x="50" y="410" ${f} font-size="150" font-weight="700" fill="${col}"${stroke}>${fmtMult(x)}</text>`,
