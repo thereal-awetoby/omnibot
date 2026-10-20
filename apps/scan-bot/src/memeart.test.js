@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { imageSize, sniffMime, parseMemePosts, pickLocalImage, fetchMemeBatch, getArt } from './memeart.js';
+import { imageSize, sniffMime, parseMemePosts, pickLocalImage, fetchMemeBatch, getArt, clearOldCache } from './memeart.js';
 
 const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(40)]);
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(40)]);
@@ -81,4 +81,15 @@ test('getArt never waits for the internet, and is null (plain card) rather than 
   await writeFile(join(dir, 'cache', 'saved.png'), PNG);
   assert.equal((await getArt({ fetchFn: never, dir })).mime, 'image/png');
   assert.equal(await getArt({ fetchFn: never, dir }), null); // used once, gone
+});
+
+test('clearOldCache works without arguments and clears saved memes once', async () => {
+  await clearOldCache(); // default folder must not throw
+  const dir = await mkdtemp(join(tmpdir(), 'art-'));
+  await mkdir(join(dir, 'cache'));
+  await writeFile(join(dir, 'cache', 'old.png'), PNG);
+  await clearOldCache(dir);
+  await writeFile(join(dir, 'cache', 'new.png'), PNG);
+  await clearOldCache(dir); // second time: leaves new files alone
+  assert.deepEqual((await readdir(join(dir, 'cache'))).sort(), ['.crypto-only', 'new.png']);
 });

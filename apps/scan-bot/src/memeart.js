@@ -138,7 +138,7 @@ export async function fetchMemeBatch({ fetchFn = fetch, subs = SUBS, need = 8, d
 }
 
 // One-time cleanup: memes saved by the older version included general jokes, so they are dropped once.
-export async function clearOldCache(dir) {
+export async function clearOldCache(dir = DIR) {
   const c = join(dir, 'cache');
   try { await readFile(join(c, '.crypto-only')); return; } catch { /* not yet */ }
   try {
