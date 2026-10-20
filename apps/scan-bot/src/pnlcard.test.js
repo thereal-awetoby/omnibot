@@ -40,8 +40,7 @@ test('PnL card has square corners and a Solana mark, with or without a picture',
   const art = { mime: 'image/jpeg', buf: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]) };
   const withArt = buildPnlSvg({ symbol: 'ABC', callerName: 'x', entryMcap: 1000, peakMcap: 3000, x: 3, art });
   assert.match(withArt, /data:image\/jpeg;base64,/);
-  assert.match(withArt, /feGaussianBlur/);               // a soft backdrop from the same picture
-  assert.match(withArt, /preserveAspectRatio="xMidYMid meet"/); // the sharp picture is never stretched
+  assert.match(withArt, /preserveAspectRatio="xMidYMid slice"/); // the picture fills the whole card
   assert.doesNotMatch(withArt, /rx=/);
   assert.match(withArt, />Solana</);
 });

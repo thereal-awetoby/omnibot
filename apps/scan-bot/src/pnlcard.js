@@ -26,8 +26,8 @@ export function peakMultiple(entryPrice, ...prices) {
 
 const SOL_MARK = '<polygon points="10,0 64,0 54,13 0,13" fill="url(#sol)"/><polygon points="0,19 54,19 64,32 10,32" fill="url(#sol)"/><polygon points="10,38 64,38 54,51 0,51" fill="url(#sol)"/>';
 
-// One call as a share card (SVG, drawn to PNG by renderPng): the meme sharp on the left, the numbers on the right.
-// `art` is an optional { buf, mime } picture. It is also used, blurred, as the backdrop, so a small picture never looks stretched.
+// One call as a share card (SVG, drawn to PNG by renderPng): the picture fills the whole card, the numbers sit on top.
+// `art` is an optional { buf, mime } picture (cropped to 16:9).
 export function buildPnlSvg({ symbol, callerName, entryMcap, peakMcap, x, ageText, groupName, art = null }) {
   const col = '#22c55e';
   const sym = symbol ? `$${esc(plain(symbol))}` : 'Token';
@@ -35,40 +35,33 @@ export function buildPnlSvg({ symbol, callerName, entryMcap, peakMcap, x, ageTex
   const f = 'font-family="Arial, Helvetica, sans-serif"';
   const thin = art ? ' stroke="#000" stroke-opacity="0.6" stroke-width="4" paint-order="stroke"' : '';
   const stroke = art ? ' stroke="#000" stroke-opacity="0.55" stroke-width="7" paint-order="stroke"' : '';
-  const symSize = sym.length > 11 ? 44 : sym.length > 8 ? 56 : 68;
-  const href = art ? `data:${art.mime};base64,${art.buf.toString('base64')}` : null;
-  const back = art
+  const symSize = sym.length > 11 ? 44 : sym.length > 8 ? 52 : 64;
+  const bgLayer = art
     ? [
-      `<image xlink:href="${href}" x="-60" y="-60" width="1120" height="683" preserveAspectRatio="xMidYMid slice" filter="url(#blur)"/>`,
-      '<rect width="1000" height="563" fill="#000" fill-opacity="0.55"/>',
-      '<rect x="36" y="36" width="430" height="491" fill="#000" fill-opacity="0.4"/>',
-      `<image xlink:href="${href}" x="36" y="36" width="430" height="491" preserveAspectRatio="xMidYMid meet"/>`,
-      '<rect x="36" y="36" width="430" height="491" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="2"/>',
+      `<image xlink:href="data:${art.mime};base64,${art.buf.toString('base64')}" x="0" y="0" width="1000" height="563" preserveAspectRatio="xMidYMid slice"/>`,
+      '<rect width="1000" height="563" fill="url(#shade)"/><rect y="330" width="1000" height="233" fill="url(#shadeb)"/>',
     ]
-    : [
-      '<rect width="1000" height="563" fill="url(#bg)"/><rect width="1000" height="563" fill="url(#glow)"/>',
-      `<rect x="36" y="36" width="430" height="491" fill="#ffffff" fill-opacity="0.04" stroke="#ffffff" stroke-opacity="0.15" stroke-width="2"/><g transform="translate(110 200) scale(4.2)" opacity="0.9">${SOL_MARK}</g>`,
-    ];
+    : ['<rect width="1000" height="563" fill="url(#bg)"/><rect width="1000" height="563" fill="url(#glow)"/>'];
   return [
     '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1000" height="563" viewBox="0 0 1000 563">',
     '<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1220"/><stop offset="1" stop-color="#111c33"/></linearGradient>',
     `<radialGradient id="glow" cx="0.8" cy="0.1" r="0.7"><stop offset="0" stop-color="${col}" stop-opacity="0.28"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></radialGradient>`,
-    '<filter id="blur" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="24"/></filter>',
+    '<linearGradient id="shade" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#000" stop-opacity="0.78"/><stop offset="0.6" stop-color="#000" stop-opacity="0.4"/><stop offset="1" stop-color="#000" stop-opacity="0.1"/></linearGradient>',
+    '<linearGradient id="shadeb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.8"/></linearGradient>',
     '<linearGradient id="sol" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#9945FF"/><stop offset="1" stop-color="#14F195"/></linearGradient></defs>',
     '<g>',
-    ...back,
-    `<text x="964" y="62" text-anchor="end" ${f} font-size="28" font-weight="700" fill="#ffffff"${thin}>Omni Scan</text>`,
-    `<text x="964" y="90" text-anchor="end" ${f} font-size="20" fill="#e5e7eb"${thin}>${plain(groupName) ? esc(plain(groupName)) : 'Group call'}</text>`,
-    `<text x="964" y="170" text-anchor="end" ${f} font-size="${symSize}" font-weight="700" fill="#ffffff"${thin}>${sym}</text>`,
-    `<text x="964" y="208" text-anchor="end" ${f} font-size="21" fill="#e5e7eb"${thin}>called by ${who}${ageText ? ` · ${esc(ageText)} ago` : ''}</text>`,
-    `<text x="964" y="332" text-anchor="end" ${f} font-size="128" font-weight="700" fill="${col}"${stroke}>${fmtMult(x)}</text>`,
-    `<text x="964" y="390" text-anchor="end" ${f} font-size="48" font-weight="700" fill="${col}"${stroke}>${fmtPct(x)}</text>`,
-    '<rect x="520" y="412" width="444" height="2" fill="#ffffff" fill-opacity="0.2"/>',
-    `<text x="964" y="452" text-anchor="end" ${f} font-size="26"${thin}><tspan fill="#cbd5e1">Called at  </tspan><tspan font-weight="700" fill="#ffffff">${formatUsd(entryMcap)}</tspan></text>`,
-    `<text x="964" y="488" text-anchor="end" ${f} font-size="26"${thin}><tspan fill="#cbd5e1">Peak  </tspan><tspan font-weight="700" fill="${col}">${formatUsd(peakMcap)}</tspan></text>`,
-    // Chain mark, bottom right.
-    `<g transform="translate(838 500) scale(0.5)">${SOL_MARK}</g>`,
-    `<text x="964" y="524" text-anchor="end" ${f} font-size="26" font-weight="700" fill="#ffffff"${thin}>Solana</text>`,
+    ...bgLayer,
+    `<text x="50" y="80" ${f} font-size="30" font-weight="700" fill="#e5e7eb">Omni Scan</text>`,
+    `<text x="950" y="80" text-anchor="end" ${f} font-size="24" fill="#e5e7eb"${thin}>${plain(groupName) ? esc(plain(groupName)) : 'Group call'}</text>`,
+    `<text x="50" y="190" ${f} font-size="${symSize}" font-weight="700" fill="#ffffff">${sym}</text>`,
+    `<text x="50" y="240" ${f} font-size="26" fill="#e5e7eb"${thin}>called by ${who}${ageText ? ` · ${esc(ageText)} ago` : ''}</text>`,
+    `<text x="50" y="410" ${f} font-size="150" font-weight="700" fill="${col}"${stroke}>${fmtMult(x)}</text>`,
+    `<text x="950" y="410" text-anchor="end" ${f} font-size="64" font-weight="700" fill="${col}"${stroke}>${fmtPct(x)}</text>`,
+    '<rect x="50" y="450" width="900" height="2" fill="#ffffff" fill-opacity="0.25"/>',
+    `<text x="50" y="505" ${f} font-size="24" fill="#e5e7eb"${thin}>Called at</text><text x="200" y="505" ${f} font-size="30" font-weight="700" fill="#e5e7eb">${formatUsd(entryMcap)}</text>`,
+    `<text x="400" y="505" ${f} font-size="24" fill="#e5e7eb"${thin}>Peak</text><text x="470" y="505" ${f} font-size="30" font-weight="700" fill="${col}">${formatUsd(peakMcap)}</text>`,
+    `<g transform="translate(740 480) scale(0.62)">${SOL_MARK}</g>`,
+    `<text x="950" y="515" text-anchor="end" ${f} font-size="30" font-weight="700" fill="#ffffff"${thin}>Solana</text>`,
     '</g></svg>',
   ].join('');
 }
