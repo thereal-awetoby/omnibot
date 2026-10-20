@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { imageSize, sniffMime, parseMemePosts, pickLocalImage, fetchOnlineMeme, getArt } from './memeart.js';
+import { imageSize, sniffMime, parseMemePosts, pickLocalImage, fetchMemeBatch, getArt } from './memeart.js';
 
 const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(40)]);
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(40)]);
@@ -28,39 +28,50 @@ test('parseMemePosts keeps only safe direct images', () => {
   assert.deepEqual(parseMemePosts(null), []);
 });
 
-test('pickLocalImage reads a random image from a folder, null when empty', async () => {
+test('pickLocalImage uses each picture once, then retires it', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'bg-'));
   assert.equal(await pickLocalImage(dir), null);
   await writeFile(join(dir, 'notes.txt'), 'hello');
   await writeFile(join(dir, 'fake.jpg'), 'this is not an image');
   assert.equal(await pickLocalImage(dir), null);
-  await writeFile(join(dir, 'one.png'), PNG);
-  const got = await pickLocalImage(dir);
-  assert.equal(got.mime, 'image/png');
-  assert.equal(got.source, 'local');
+  const a = Buffer.concat([PNG, Buffer.from('a')]);
+  const b = Buffer.concat([PNG, Buffer.from('b')]);
+  await writeFile(join(dir, 'one.png'), a);
+  await mkdir(join(dir, 'cache'));
+  await writeFile(join(dir, 'cache', 'two.png'), b);
+  const first = await pickLocalImage(dir);
+  const second = await pickLocalImage(dir);
+  assert.equal(first.mime, 'image/png');
+  assert.notDeepEqual(first.buf, second.buf);
+  assert.equal(await pickLocalImage(dir), null); // nothing fresh left: no reuse
+  assert.equal((await readdir(join(dir, 'used'))).length >= 2, true);
   assert.equal(await pickLocalImage(join(dir, 'missing')), null);
 });
 
-test('fetchOnlineMeme downloads one safe meme', async () => {
+test('the same picture under another name is not shown twice', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bg-'));
+  const a = Buffer.concat([PNG, Buffer.from('same')]);
+  await writeFile(join(dir, 'x.png'), a);
+  assert.ok(await pickLocalImage(dir));
+  await writeFile(join(dir, 'copy-of-x.png'), a);
+  assert.equal(await pickLocalImage(dir), null);
+});
+
+test('fetchMemeBatch downloads only memes it has never downloaded before', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bg-'));
+  const bytes = (tag) => Buffer.concat([JPG, Buffer.from(tag)]);
   const fetchFn = async (url) => {
-    if (url.startsWith('https://meme-api.com/')) return { ok: true, json: async () => ({ memes: [{ url: 'https://i.redd.it/a.jpg', title: 'gm' }] }) };
-    return { ok: true, arrayBuffer: async () => JPG.buffer.slice(JPG.byteOffset, JPG.byteOffset + JPG.length) };
+    if (url.startsWith('https://meme-api.com/')) return { ok: true, json: async () => ({ memes: [{ url: 'https://i.redd.it/a.jpg', title: 'a' }, { url: 'https://i.redd.it/b.jpg', title: 'b' }] }) };
+    const buf = bytes(url.endsWith('a.jpg') ? 'A' : 'B');
+    return { ok: true, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length) };
   };
-  const m = await fetchOnlineMeme({ fetchFn, tries: 1 });
-  assert.equal(m.mime, 'image/jpeg');
-  assert.equal(m.title, 'gm');
-  assert.equal(await fetchOnlineMeme({ fetchFn: async () => ({ ok: false }), tries: 2 }), null);
+  const first = await fetchMemeBatch({ fetchFn, need: 5, dir });
+  assert.deepEqual(first.map((m) => m.title).sort(), ['a', 'b']);
+  assert.deepEqual(await fetchMemeBatch({ fetchFn, need: 5, dir }), []); // both already seen
+  assert.equal(await fetchMemeBatch({ fetchFn: async () => ({ ok: false }), need: 5, dir }).then((x) => x.length), 0);
 });
 
-test('imageSize reads png and jpeg dimensions', () => {
-  const png = Buffer.alloc(32); png.set([0x89, 0x50, 0x4e, 0x47]); png.writeUInt32BE(1200, 16); png.writeUInt32BE(800, 20);
-  assert.deepEqual(imageSize(png), { w: 1200, h: 800 });
-  const jpg = Buffer.alloc(40); jpg.set([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08]); jpg.writeUInt16BE(600, 7); jpg.writeUInt16BE(900, 9);
-  assert.deepEqual(imageSize(Buffer.concat([Buffer.from([0xff, 0xd8]), jpg.subarray(2)])), { h: 600, w: 900 });
-  assert.equal(imageSize(Buffer.from('nope')), null);
-});
-
-test('getArt never waits for the internet and also uses the saved memes in the cache folder', async () => {
+test('getArt never waits for the internet, and is null (plain card) rather than reusing', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'art-'));
   const never = () => new Promise(() => {}); // a connection that never answers
   const t0 = Date.now();
@@ -68,6 +79,6 @@ test('getArt never waits for the internet and also uses the saved memes in the c
   assert.ok(Date.now() - t0 < 500);
   await mkdir(join(dir, 'cache'));
   await writeFile(join(dir, 'cache', 'saved.png'), PNG);
-  const got = await getArt({ fetchFn: never, dir });
-  assert.equal(got.mime, 'image/png');
+  assert.equal((await getArt({ fetchFn: never, dir })).mime, 'image/png');
+  assert.equal(await getArt({ fetchFn: never, dir }), null); // used once, gone
 });

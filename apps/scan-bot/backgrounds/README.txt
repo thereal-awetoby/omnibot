@@ -1,4 +1,5 @@
 Drop your own meme / art images here (.jpg .png .webp).
-The bot picks one at random as the background of every PnL card, and /meme sends one too.
-Wide images work best; they are cropped to 16:9 automatically.
-If this folder has no images, the bot fetches random crypto memes online instead.
+Every picture is used ONCE: after it appears on a PnL card (or /meme) it is moved to the "used" folder and never shown again.
+The bot also downloads fresh crypto memes by itself (into the "cache" folder) and never downloads the same one twice.
+When no fresh picture is available the card is plain, a picture is never reused.
+Wide images work best.

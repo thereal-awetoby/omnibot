@@ -1,12 +1,15 @@
-import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readdir, readFile, writeFile, mkdir, rename, unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 
 const DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'backgrounds');
-const MAX_BYTES = 4_000_000;
+const MAX_BYTES = 6_000_000;
 // Crypto-flavoured meme communities first, general memes as backup.
 const SUBS = ['CryptoCurrencyMemes', 'cryptomemes', 'SolanaMemes', 'memes', 'dankmemes'];
+const STOCK = 16;         // fresh memes kept ready on disk
+const MIN_WIDTH = 600;    // smaller memes are skipped
+const LEDGER_MAX = 8000;
 
 // jpeg / png / webp by the first bytes of the file; anything else (gif, html) is refused.
 export function sniffMime(buf) {
@@ -33,36 +36,62 @@ export function imageSize(buf) {
   } catch { /* unknown */ }
   return null;
 }
-const MIN_WIDTH = 600; // smaller memes are skipped (the card shows the picture sharp, so it must not be tiny)
-const CACHE_MAX = 80;
 
-// A random image from the backgrounds folder (your own images) or its cache folder (memes saved earlier), or null.
-export async function pickLocalImage(dir = DIR) {
-  let files = [];
+const sha = (buf) => createHash('sha1').update(buf).digest('hex').slice(0, 16);
+
+// ---- the ledger: every picture ever shown (or downloaded), so none is ever used twice ----
+const ledgers = new Map(); // dir -> { keys:Set, loaded:Promise, timer }
+function ledgerFor(dir) {
+  let l = ledgers.get(dir);
+  if (!l) {
+    l = { keys: new Set(), timer: null };
+    l.loaded = readFile(join(dir, 'used.json'), 'utf8').then((t) => { for (const k of JSON.parse(t)) l.keys.add(k); }).catch(() => {});
+    ledgers.set(dir, l);
+  }
+  return l;
+}
+async function remember(dir, ...keys) {
+  const l = ledgerFor(dir);
+  await l.loaded;
+  for (const k of keys) if (k) l.keys.add(k);
+  if (l.keys.size > LEDGER_MAX) l.keys = new Set([...l.keys].slice(-LEDGER_MAX));
+  clearTimeout(l.timer);
+  l.timer = setTimeout(() => { mkdir(dir, { recursive: true }).then(() => writeFile(join(dir, 'used.json'), JSON.stringify([...l.keys]))).catch(() => {}); }, 500);
+  l.timer.unref?.();
+}
+const seen = async (dir, key) => { const l = ledgerFor(dir); await l.loaded; return l.keys.has(key); };
+
+// Fresh pictures waiting on disk: your own images in the folder, and memes downloaded earlier in its cache folder.
+async function freshFiles(dir) {
+  const out = [];
   for (const d of [dir, join(dir, 'cache')]) {
-    try { files.push(...(await readdir(d)).filter((f) => /\.(jpe?g|png|webp)$/i.test(f)).map((f) => join(d, f))); } catch { /* folder missing */ }
+    try { out.push(...(await readdir(d)).filter((f) => /\.(jpe?g|png|webp)$/i.test(f)).map((f) => join(d, f))); } catch { /* folder missing */ }
   }
-  while (files.length) {
-    const i = Math.floor(Math.random() * files.length);
-    try {
-      const buf = await readFile(files[i]);
-      const mime = sniffMime(buf);
-      if (mime && buf.length <= 12_000_000) return { buf, mime, title: null, source: 'local' };
-    } catch { /* try another */ }
-    files.splice(i, 1);
-  }
-  return null;
+  return out;
 }
 
-// Keeps a good online meme on disk, so there is variety even when the internet is slow (the folder is capped).
-async function saveToCache(art, dir = DIR) {
-  try {
-    const cdir = join(dir, 'cache');
-    await mkdir(cdir, { recursive: true });
-    if ((await readdir(cdir)).length >= CACHE_MAX) return;
-    const ext = art.mime === 'image/png' ? 'png' : art.mime === 'image/webp' ? 'webp' : 'jpg';
-    await writeFile(join(cdir, `${createHash('sha1').update(art.buf).digest('hex').slice(0, 16)}.${ext}`), art.buf);
-  } catch { /* the cache is only a bonus */ }
+// Takes one fresh picture at random and retires it (moved to the "used" folder), so it can never be picked again.
+// Returns { buf, mime, title, source } or null when nothing fresh is left.
+export async function pickLocalImage(dir = DIR) {
+  const files = await freshFiles(dir);
+  while (files.length) {
+    const i = Math.floor(Math.random() * files.length);
+    const file = files.splice(i, 1)[0];
+    try {
+      const buf = await readFile(file);
+      const mime = sniffMime(buf);
+      const retire = async () => {
+        try { await mkdir(join(dir, 'used'), { recursive: true }); await rename(file, join(dir, 'used', `${sha(buf)}-${basename(file)}`)); }
+        catch { await unlink(file).catch(() => {}); }
+      };
+      await retire(); // retire first: even if drawing fails, it is never shown again
+      if (!mime || buf.length > 12_000_000) continue;
+      if (await seen(dir, sha(buf))) continue; // the same picture under another name
+      await remember(dir, sha(buf));
+      return { buf, mime, title: null, source: 'local' };
+    } catch { /* try another */ }
+  }
+  return null;
 }
 
 // meme-api.com answer -> safe, direct image links only.
@@ -81,49 +110,59 @@ async function getBuffer(url, fetchFn, ms = 8000) {
   return buf;
 }
 
-// One fresh random meme from the internet (null if every try failed).
-export async function fetchOnlineMeme({ fetchFn = fetch, subs = SUBS, tries = 3 } = {}) {
-  for (let i = 0; i < tries; i++) {
-    const sub = subs[Math.floor(Math.random() * subs.length)];
-    try {
-      const res = await fetchFn(`https://meme-api.com/gimme/${sub}/5`, { signal: AbortSignal.timeout(8000) });
-      if (!res.ok) continue;
-      const posts = parseMemePosts(await res.json());
-      for (const p of posts.sort(() => Math.random() - 0.5)) {
+// Up to `need` NEW memes (never downloaded before) in one go: one list request, then the pictures 4 at a time.
+export async function fetchMemeBatch({ fetchFn = fetch, subs = SUBS, need = 8, dir = DIR } = {}) {
+  const sub = subs[Math.floor(Math.random() * subs.length)];
+  const got = [];
+  try {
+    const res = await fetchFn(`https://meme-api.com/gimme/${sub}/30`, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return got;
+    const posts = parseMemePosts(await res.json()).sort(() => Math.random() - 0.5);
+    const fresh = [];
+    for (const p of posts) if (!(await seen(dir, p.url))) fresh.push(p);
+    for (let i = 0; i < fresh.length && got.length < need; i += 4) {
+      await Promise.all(fresh.slice(i, i + 4).map(async (p) => {
         try {
           const buf = await getBuffer(p.url, fetchFn);
           const mime = sniffMime(buf);
           const size = imageSize(buf);
-          if (mime && !(size && size.w < MIN_WIDTH)) return { buf, mime, title: p.title, source: 'online', postLink: p.postLink };
-        } catch { /* next post */ }
-      }
-    } catch (e) { console.error('meme fetch error:', e.message); }
-  }
-  return null;
+          await remember(dir, p.url); // never asked for again, wanted or not
+          if (!mime || (size && size.w < MIN_WIDTH)) return;
+          if (await seen(dir, sha(buf))) return;
+          got.push({ buf, mime, title: p.title, source: 'online', postLink: p.postLink, url: p.url });
+        } catch { /* next */ }
+      }));
+    }
+  } catch (e) { console.error('meme fetch error:', e.message); }
+  return got.slice(0, need);
 }
 
-// A small ready-made pool, filled in the background. Nothing on the reply path ever waits for the internet.
-const pool = [];
+// Keeps a stock of fresh memes on disk, downloading in the background. Nothing on the reply path waits for it.
 let filling = false;
 export function refillArt({ fetchFn = fetch, dir = DIR } = {}) {
-  if (filling || pool.length >= 5) return;
+  if (filling) return null;
   filling = true;
-  (async () => {
+  return (async () => {
     try {
-      for (let i = 0; i < 8 && pool.length < 6; i++) {
-        const mm = await fetchOnlineMeme({ fetchFn, tries: 1 });
-        if (mm) { pool.push(mm); saveToCache(mm, dir); }
+      for (let round = 0; round < 6; round++) {
+        const have = (await freshFiles(dir)).length;
+        if (have >= STOCK) break;
+        const batch = await fetchMemeBatch({ fetchFn, need: STOCK - have, dir });
+        if (!batch.length && round >= 2) break;
+        await mkdir(join(dir, 'cache'), { recursive: true });
+        for (const m of batch) {
+          const ext = m.mime === 'image/png' ? 'png' : m.mime === 'image/webp' ? 'webp' : 'jpg';
+          await writeFile(join(dir, 'cache', `${sha(m.buf)}.${ext}`), m.buf).catch(() => {});
+        }
       }
-    } finally { filling = false; }
+    } catch (e) { console.error('meme refill error:', e.message); }
+    finally { filling = false; }
   })();
 }
 
-// Instant: one of your own / saved images or a ready online meme, picked at random. Null means "plain card".
+// Instant. A picture that was never used before, or null (the card is then plain: a picture is never reused).
 export async function getArt({ fetchFn = fetch, dir = DIR } = {}) {
+  const art = await pickLocalImage(dir);
   refillArt({ fetchFn, dir });
-  const useOnline = pool.length > 0 && Math.random() < 0.5;
-  if (useOnline) return pool.splice(Math.floor(Math.random() * pool.length), 1)[0];
-  const local = await pickLocalImage(dir);
-  if (local) return local;
-  return pool.length ? pool.splice(Math.floor(Math.random() * pool.length), 1)[0] : null;
+  return art;
 }
