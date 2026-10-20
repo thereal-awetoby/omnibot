@@ -3,7 +3,7 @@ import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
-  recordFirstCall, getFirstCall, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone,
+  recordFirstCall, getFirstCall, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, keepDbWarm,
   MAX_WATCHES,
 } from '@omnibot/shared';
 import {
@@ -11,14 +11,14 @@ import {
   buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText,
   multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
 } from './scan.js';
-import { startIntel, gatherIntel, within } from './intel.js';
+import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { renderPng } from './bubblemap.js';
-import { getArt } from './memeart.js';
-import { buildPnlSvg, buildPnlCaption, newMilestone } from './pnlcard.js';
+import { getArt, refillArt } from './memeart.js';
+import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
-import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl } from './sources.js';
+import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince } from './sources.js';
 import { formatDuration } from './scan.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
 
@@ -73,7 +73,7 @@ const showHome = (ctx) => ctx.reply(
 // One token's market data: DexScreener first, pump.fun as a fallback for very new tokens.
 async function getMarket(mint) {
   let m = null;
-  try { m = (await fetchPairsByTokens([mint])).get(mint) ?? null; } catch (e) { console.error('dexscreener error:', e.message); }
+  try { m = (await hedge(() => fetchPairsByTokens([mint]), 1_800)).get(mint) ?? null; } catch (e) { console.error('dexscreener error:', e.message); }
   if (m) return m;
   try {
     const f = await fetchTokenMarket(mint);
@@ -498,14 +498,22 @@ bot.command('calls', async (ctx) => {
   return ctx.reply(buildUserCallsText(calls, prices, callerName(ctx.from)), HTML);
 });
 // A call as a share card: /pnl (your latest call here) or /pnl <address> (whoever called it first).
-async function pnlPng(call, prices, groupName) {
+async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   const p = prices.get(call.mint);
-  const x = multiple(call.price_usd, p?.priceUsd);
+  const now = p?.priceUsd ?? null;
+  const calledAt = new Date(call.created_at).getTime();
+  // How high did it go after the call? The price seen by the bot, plus the chart candles since the call (when the call is not brand new).
+  let history = null;
+  if (!skipHistory && p?.pairAddress && Date.now() - calledAt > 180_000) history = await within(fetchPeakSince({ pairAddress: p.pairAddress, mint: call.mint, since: calledAt }), 3_500);
+  const stored = Number(call.peak_price_usd) || null;
+  const x = peakMultiple(call.price_usd, stored, now, history);
   if (x === null) return null;
-  const nowMcap = p?.marketCapUsd ?? (call.mcap_usd ? call.mcap_usd * x : null);
-  const ageText = formatDuration(Date.now() - new Date(call.created_at).getTime());
-  const art = await getArt().catch(() => null); // a random meme behind the card; plain card if none
-  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, nowMcap, x, ageText, groupName, art }), 1920);
+  const peakPrice = call.price_usd * x;
+  if (peakPrice > (stored ?? 0) * 1.0001 && x > 1) setCallPeak(call.chat_id, call.mint, peakPrice).catch(() => {});
+  const peakMcap = call.mcap_usd ? call.mcap_usd * x : (p?.marketCapUsd && now ? p.marketCapUsd * (peakPrice / now) : null);
+  const ageText = formatDuration(Date.now() - calledAt);
+  const art = await getArt().catch(() => null); // instant: a saved or ready meme, never waits for the internet
+  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, peakMcap, x, ageText, groupName, art }), 1920);
   return { png, x };
 }
 bot.command('pnl', async (ctx) => {
@@ -514,7 +522,7 @@ bot.command('pnl', async (ctx) => {
   const call = mint ? await getFirstCall(ctx.chat.id, mint) : (await listUserCalls(ctx.chat.id, ctx.from.id, { limit: 1 }))[0];
   if (!call) return ctx.reply(mint ? 'I have no call for that token in this group. I only count tokens posted here after I joined, so post the address once and I will track it from then.' : 'You have no calls in this group yet. Post a token address that nobody has called.');
   const prices = await pricesFor([call.mint]);
-  const r = await pnlPng(call, prices, ctx.chat.title);
+  const r = await pnlPng({ ...call, chat_id: call.chat_id ?? ctx.chat.id }, prices, ctx.chat.title);
   if (!r) return ctx.reply('No price found for that token right now.');
   return ctx.replyWithPhoto(new InputFile(r.png, 'pnl.png'), { caption: buildPnlCaption({ symbol: call.symbol, callerName: call.caller_name, x: r.x }), parse_mode: 'HTML' });
 });
@@ -599,13 +607,18 @@ async function checkCalls() {
     if (!rows.length) return;
     const prices = await fetchPairsByTokens([...new Set(rows.map((r) => r.mint))]);
     for (const r of rows) {
-      const x = multiple(r.price_usd, prices.get(r.mint)?.priceUsd);
+      const price = prices.get(r.mint)?.priceUsd;
+      // announcements follow the HIGHEST price seen, so a quick pump is not missed between two checks
+      const peakPrice = Math.max(Number(r.peak_price_usd) || 0, price || 0);
+      if (price > (Number(r.peak_price_usd) || 0)) setCallPeak(r.chat_id, r.mint, price).catch(() => {});
+      const x = multiple(r.price_usd, peakPrice);
       const m = newMilestone(r.last_x, x);
       if (!m) continue;
+      r.peak_price_usd = peakPrice;
       await setCallMilestone(r.chat_id, r.mint, m); // first, so a failed send never repeats
       try {
         const title = (await bot.api.getChat(r.chat_id).catch(() => null))?.title;
-        const card = await pnlPng(r, prices, title);
+        const card = await pnlPng(r, prices, title, { skipHistory: true });
         if (!card) continue;
         await bot.api.sendPhoto(r.chat_id, new InputFile(card.png, 'pnl.png'), { caption: buildPnlCaption({ symbol: r.symbol, callerName: r.caller_name, x: card.x, milestone: true }), parse_mode: 'HTML' });
       } catch (e) { console.error('multiplier post error:', e.message); }
@@ -650,6 +663,8 @@ bot.start({
       { command: 'meme', description: 'A random crypto meme' },
       { command: 'help', description: 'All commands' },
     ]).catch((e) => console.error('setMyCommands error:', e.message));
+    keepDbWarm();
+    refillArt();
     setInterval(checkAlerts, 60_000);
     setInterval(checkCalls, 90_000);
   },

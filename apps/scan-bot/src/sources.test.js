@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, fetchLoreStory, pickGeminiModels, getLastLoreError, parseTweetOembed, fetchTweetText, fetchImageInline, parseNewsRss, fetchNews, parseSearch, searchTokens, parseDexPaid, fetchDexPaid, fetchPriceSeries, buildChartUrl, parseGeckoHolders, fetchHolderCount, resetRugBreaker } from './sources.js';
+import { parseRugCheck, fetchRugCheck, parseOhlcv, fetchAth, describeAth, parsePumpCreated, fetchPumpCreated, fetchLoreAI, fetchLoreStory, pickGeminiModels, getLastLoreError, parseTweetOembed, fetchTweetText, fetchImageInline, parseNewsRss, fetchNews, parseSearch, searchTokens, parseDexPaid, fetchDexPaid, fetchPriceSeries, buildChartUrl, parseGeckoHolders, fetchHolderCount, resetRugBreaker, peakSince, fetchPeakSince } from './sources.js';
 
 const json = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
@@ -453,4 +453,24 @@ test('holder count from GeckoTerminal: parsed, cached, and a refusal gives null'
   assert.equal(await fetchHolderCount(mint, async () => { calls += 1; return ok(); }, 9e15 + 1000), 95); // cached
   assert.equal(calls, 0);
   assert.equal(await fetchHolderCount('Other1111111111111111111111111111111111111', async () => ({ ok: false, status: 404 }), 9e15), null);
+});
+
+test('peakSince: the highest price after the call, ignoring earlier candles', () => {
+  const candles = [[1000, 1, 9, 1, 1, 0], [1060, 1, 2, 1, 1, 0], [1120, 1, 5, 1, 1, 0], [1180, 1, 3, 1, 1, 0]]; // minute candles; the 9 is before the call
+  assert.equal(peakSince(candles, 1_100_500, 60_000), 5);
+  assert.equal(peakSince(candles, 9_000_000, 60_000), null);
+  assert.equal(peakSince(null, 0, 60_000), null);
+});
+
+test('fetchPeakSince reads candles, caches, and gives null on errors', async () => {
+  let n = 0;
+  const now = 9.0005e15; // later than any rate-limit pause set by earlier tests
+  const since = now - 100_000;
+  const t0 = Math.floor(since / 1000);
+  const impl = async () => { n += 1; return { ok: true, status: 200, json: async () => ({ data: { attributes: { ohlcv_list: [[t0, 1, 4, 1, 1, 0], [t0 + 60, 1, 7, 1, 1, 0]] } } }) }; };
+  assert.equal(await fetchPeakSince({ pairAddress: 'PAIR_PEAK_1', mint: 'M', since }, impl, now), 7);
+  assert.equal(await fetchPeakSince({ pairAddress: 'PAIR_PEAK_1', mint: 'M', since }, impl, now), 7);
+  assert.equal(n, 1);
+  assert.equal(await fetchPeakSince({ pairAddress: 'PAIR_PEAK_2', mint: 'M', since }, async () => ({ ok: false, status: 500 }), now), null);
+  assert.equal(await fetchPeakSince({ pairAddress: null, mint: 'M', since }, impl, now), null);
 });

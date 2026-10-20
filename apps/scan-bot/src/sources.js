@@ -531,6 +531,18 @@ export function parseOhlcv(candles) {
   return best;
 }
 
+// The highest price reached since `sinceMs` (the candle that contains that moment counts). Candles: [[unixSeconds, o, h, l, c, v], ...].
+export function peakSince(candles, sinceMs, bucketMs) {
+  let best = null;
+  for (const c of Array.isArray(candles) ? candles : []) {
+    const high = num(c?.[2]);
+    const ts = num(c?.[0]);
+    if (high === null || ts === null || high <= 0 || ts * 1000 + bucketMs < sinceMs) continue;
+    if (best === null || high > best) best = high;
+  }
+  return best;
+}
+
 // After a 429 we leave GeckoTerminal alone for a minute instead of hammering it.
 let geckoPausedUntil = 0;
 const athCache = new Map(); // pool -> { at, value }
@@ -566,4 +578,28 @@ export function describeAth(ath, market) {
     fromAthPct: (market.priceUsd / ath.athPrice - 1) * 100,
     athAt: ath.athAt,
   };
+}
+
+// How high a token's price went after a moment in time (a call): minute candles for the last ~16 hours,
+// hourly ones after that. Returns a price in USD or null.
+const peakCache = new Map();
+export async function fetchPeakSince({ pairAddress, mint, since }, fetchImpl = fetch, now = Date.now()) {
+  if (!pairAddress || !(since > 0) || now < geckoPausedUntil) return null;
+  const key = `${pairAddress}:${since}`;
+  const hit = peakCache.get(key);
+  if (hit && now - hit.at < 60_000) return hit.value;
+  const age = now - since;
+  const [frame, bucket] = age < 15 * 3_600_000 ? ['minute', 60_000] : age < 40 * 86_400_000 ? ['hour', 3_600_000] : ['day', 86_400_000];
+  try {
+    const res = await fetchImpl(`https://api.geckoterminal.com/api/v2/networks/solana/pools/${pairAddress}/ohlcv/${frame}?aggregate=1&limit=1000&currency=usd&token=${mint}`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(6_000) });
+    if (res.status === 429) { geckoPausedUntil = now + 60_000; throw new Error('GeckoTerminal rate limit, pausing 60s'); }
+    if (!res.ok) throw new Error(`GeckoTerminal returned HTTP ${res.status}`);
+    const value = peakSince((await res.json())?.data?.attributes?.ohlcv_list, since, bucket);
+    if (peakCache.size > 300) peakCache.clear();
+    if (value) peakCache.set(key, { at: now, value });
+    return value;
+  } catch (e) {
+    console.error('peak error:', e.message);
+    return null;
+  }
 }

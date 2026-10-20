@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { imageSize, sniffMime, parseMemePosts, pickLocalImage, fetchOnlineMeme } from './memeart.js';
+import { imageSize, sniffMime, parseMemePosts, pickLocalImage, fetchOnlineMeme, getArt } from './memeart.js';
 
 const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(40)]);
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(40)]);
@@ -58,4 +58,16 @@ test('imageSize reads png and jpeg dimensions', () => {
   const jpg = Buffer.alloc(40); jpg.set([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08]); jpg.writeUInt16BE(600, 7); jpg.writeUInt16BE(900, 9);
   assert.deepEqual(imageSize(Buffer.concat([Buffer.from([0xff, 0xd8]), jpg.subarray(2)])), { h: 600, w: 900 });
   assert.equal(imageSize(Buffer.from('nope')), null);
+});
+
+test('getArt never waits for the internet and also uses the saved memes in the cache folder', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'art-'));
+  const never = () => new Promise(() => {}); // a connection that never answers
+  const t0 = Date.now();
+  assert.equal(await getArt({ fetchFn: never, dir }), null);
+  assert.ok(Date.now() - t0 < 500);
+  await mkdir(join(dir, 'cache'));
+  await writeFile(join(dir, 'cache', 'saved.png'), PNG);
+  const got = await getArt({ fetchFn: never, dir });
+  assert.equal(got.mime, 'image/png');
 });

@@ -8,10 +8,17 @@ export function getPool() {
     if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is not set');
     // A database that cannot be reached must fail fast instead of making every reply wait, and an idle
     // connection that drops (Neon sleeps, Wi-Fi blips) must never crash the bot.
-    pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 8_000, idleTimeoutMillis: 60_000, keepAlive: true });
+    pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 8_000, idleTimeoutMillis: 0, keepAlive: true });
     pool.on('error', (e) => console.error('db pool error:', e.message));
   }
   return pool;
+}
+
+// Keeps one connection open and the database awake: opening a new one from far away costs seconds on every reply.
+export function keepDbWarm(everyMs = 25_000) {
+  const ping = () => query('SELECT 1').catch((e) => console.error('db ping error:', e.message));
+  ping();
+  return setInterval(ping, everyMs);
 }
 
 export const query = (text, params) => getPool().query(text, params);
