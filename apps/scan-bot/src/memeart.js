@@ -5,8 +5,8 @@ import { join, dirname, basename } from 'node:path';
 
 const DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'backgrounds');
 const MAX_BYTES = 6_000_000;
-// Crypto-flavoured meme communities first, general memes as backup.
-const SUBS = ['CryptoCurrencyMemes', 'cryptomemes', 'SolanaMemes', 'memes', 'dankmemes'];
+// Crypto meme communities only: no general jokes.
+const SUBS = ['CryptoCurrencyMemes', 'cryptomemes', 'SolanaMemes', 'CryptoMemes', 'memecoins'];
 const STOCK = 16;         // fresh memes kept ready on disk
 const MIN_WIDTH = 600;    // smaller memes are skipped
 const LEDGER_MAX = 8000;
@@ -137,6 +137,17 @@ export async function fetchMemeBatch({ fetchFn = fetch, subs = SUBS, need = 8, d
   return got.slice(0, need);
 }
 
+// One-time cleanup: memes saved by the older version included general jokes, so they are dropped once.
+export async function clearOldCache(dir) {
+  const c = join(dir, 'cache');
+  try { await readFile(join(c, '.crypto-only')); return; } catch { /* not yet */ }
+  try {
+    await mkdir(c, { recursive: true });
+    for (const f of await readdir(c)) await unlink(join(c, f)).catch(() => {});
+    await writeFile(join(c, '.crypto-only'), '1');
+  } catch { /* best effort */ }
+}
+
 // Keeps a stock of fresh memes on disk, downloading in the background. Nothing on the reply path waits for it.
 let filling = false;
 export function refillArt({ fetchFn = fetch, dir = DIR } = {}) {
@@ -144,11 +155,11 @@ export function refillArt({ fetchFn = fetch, dir = DIR } = {}) {
   filling = true;
   return (async () => {
     try {
-      for (let round = 0; round < 6; round++) {
+      for (let round = 0; round < 8; round++) {
         const have = (await freshFiles(dir)).length;
         if (have >= STOCK) break;
         const batch = await fetchMemeBatch({ fetchFn, need: STOCK - have, dir });
-        if (!batch.length && round >= 2) break;
+        if (!batch.length && round >= 5) break;
         await mkdir(join(dir, 'cache'), { recursive: true });
         for (const m of batch) {
           const ext = m.mime === 'image/png' ? 'png' : m.mime === 'image/webp' ? 'webp' : 'jpg';

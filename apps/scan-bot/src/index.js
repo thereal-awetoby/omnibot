@@ -15,7 +15,7 @@ import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { renderPng } from './bubblemap.js';
-import { getArt, refillArt } from './memeart.js';
+import { getArt, refillArt, clearOldCache } from './memeart.js';
 import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince } from './sources.js';
@@ -664,7 +664,7 @@ bot.start({
       { command: 'help', description: 'All commands' },
     ]).catch((e) => console.error('setMyCommands error:', e.message));
     keepDbWarm();
-    refillArt();
+    clearOldCache().finally(() => refillArt());
     setInterval(checkAlerts, 60_000);
     setInterval(checkCalls, 90_000);
   },
