@@ -503,6 +503,7 @@ async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   const now = p?.priceUsd ?? null;
   const calledAt = new Date(call.created_at).getTime();
   // How high did it go after the call? The price seen by the bot, plus the chart candles since the call (when the call is not brand new).
+  const t0 = Date.now();
   let history = null;
   if (!skipHistory && p?.pairAddress && Date.now() - calledAt > 180_000) history = await within(fetchPeakSince({ pairAddress: p.pairAddress, mint: call.mint, since: calledAt }), 3_500);
   const stored = Number(call.peak_price_usd) || null;
@@ -512,19 +513,30 @@ async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   if (peakPrice > (stored ?? 0) * 1.0001 && x > 1) setCallPeak(call.chat_id, call.mint, peakPrice).catch(() => {});
   const peakMcap = call.mcap_usd ? call.mcap_usd * x : (p?.marketCapUsd && now ? p.marketCapUsd * (peakPrice / now) : null);
   const ageText = formatDuration(Date.now() - calledAt);
+  const tHist = Date.now() - t0;
   const art = await getArt().catch(() => null); // instant: a saved or ready meme, never waits for the internet
-  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, peakMcap, x, ageText, groupName, art }), 1920);
+  const t1 = Date.now();
+  // Telegram shrinks photos to 1280 px anyway, so a bigger card only makes the upload slower.
+  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, peakMcap, x, ageText, groupName, art }), 1280);
+  console.log(`pnl card: history ${tHist}ms, draw ${Date.now() - t1}ms, ${Math.round(png.length / 1024)} KB`);
   return { png, x };
 }
 bot.command('pnl', async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('PnL cards work in groups. Post a token address in your group to make a call, then send /pnl there.');
   const mint = parseMintInput(ctx.match);
+  const tA = Date.now();
   const call = mint ? await getFirstCall(ctx.chat.id, mint) : (await listUserCalls(ctx.chat.id, ctx.from.id, { limit: 1 }))[0];
+  const tDb = Date.now() - tA;
   if (!call) return ctx.reply(mint ? 'I have no call for that token in this group. I only count tokens posted here after I joined, so post the address once and I will track it from then.' : 'You have no calls in this group yet. Post a token address that nobody has called.');
+  const tB = Date.now();
   const prices = await pricesFor([call.mint]);
+  const tPrice = Date.now() - tB;
   const r = await pnlPng({ ...call, chat_id: call.chat_id ?? ctx.chat.id }, prices, ctx.chat.title);
   if (!r) return ctx.reply('No price found for that token right now.');
-  return ctx.replyWithPhoto(new InputFile(r.png, 'pnl.png'), { caption: buildPnlCaption({ symbol: call.symbol, callerName: call.caller_name, x: r.x }), parse_mode: 'HTML' });
+  const tC = Date.now();
+  const sent = await ctx.replyWithPhoto(new InputFile(r.png, 'pnl.png'), { caption: buildPnlCaption({ symbol: call.symbol, callerName: call.caller_name, x: r.x }), parse_mode: 'HTML' });
+  console.log(`/pnl: database ${tDb}ms, price ${tPrice}ms, upload ${Date.now() - tC}ms`);
+  return sent;
 });
 bot.command('meme', async (ctx) => {
   const art = await getArt().catch(() => null);
