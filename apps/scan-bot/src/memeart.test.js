@@ -91,5 +91,5 @@ test('clearOldCache works without arguments and clears saved memes once', async 
   await clearOldCache(dir);
   await writeFile(join(dir, 'cache', 'new.png'), PNG);
   await clearOldCache(dir); // second time: leaves new files alone
-  assert.deepEqual((await readdir(join(dir, 'cache'))).sort(), ['.web3-only', 'new.png']);
+  assert.deepEqual((await readdir(join(dir, 'cache'))).sort(), ['.original-sources', 'new.png']);
 });

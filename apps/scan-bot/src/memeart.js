@@ -5,8 +5,8 @@ import { join, dirname, basename } from 'node:path';
 
 const DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'backgrounds');
 const MAX_BYTES = 6_000_000;
-// Web3 pictures only (NFT and crypto art), no jokes.
-const SUBS = ['NFT', 'CryptoArt', 'NFTsMarketplace', 'nftart', 'solana', 'web3', 'CryptoWallpapers'];
+// The same picture sources as the first card you loved.
+const SUBS = ['CryptoCurrencyMemes', 'cryptomemes', 'SolanaMemes', 'memes', 'dankmemes'];
 const STOCK = 16;         // fresh memes kept ready on disk
 const MIN_WIDTH = 600;    // smaller memes are skipped
 const LEDGER_MAX = 8000;
@@ -140,11 +140,11 @@ export async function fetchMemeBatch({ fetchFn = fetch, subs = SUBS, need = 8, d
 // One-time cleanup: memes saved by the older version included general jokes, so they are dropped once.
 export async function clearOldCache(dir = DIR) {
   const c = join(dir, 'cache');
-  try { await readFile(join(c, '.web3-only')); return; } catch { /* not yet */ }
+  try { await readFile(join(c, '.original-sources')); return; } catch { /* not yet */ }
   try {
     await mkdir(c, { recursive: true });
     for (const f of await readdir(c)) await unlink(join(c, f)).catch(() => {});
-    await writeFile(join(c, '.web3-only'), '1');
+    await writeFile(join(c, '.original-sources'), '1');
   } catch { /* best effort */ }
 }
 
