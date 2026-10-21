@@ -1,6 +1,7 @@
 // Reads token safety facts straight from Solana (free public RPC works, a paid one is faster).
 import { Connection, PublicKey } from '@solana/web3.js';
 import { computeHolderStats, computeFresh, parseCurveReserves, curveStats } from './security.js';
+import { parseMetaLinks } from './curvemarket.js';
 import { createdMintsFromTx, createdMintsFromEnhanced, fundingFromTx, parseAssetNames, parseAssetImage, imageFromMetadata, deployerFromTx } from './detail.js';
 import { createRpcPool, parseRpcUrls } from './rpcpool.js';
 import { parseDasAccounts, funderFromTx } from './bubblemap.js';
@@ -581,4 +582,35 @@ export async function getFunders(owners, { deadlineMs = 11_000 } = {}) {
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
   return out;
+}
+
+// The raw bonding-curve reserves of a pump.fun token (null if it has no curve, undefined if the RPC failed).
+export const getCurveRaw = readCurve;
+
+// The token's own metadata file (Helius getAsset, then its json): name, symbol and the links pump.fun stores there.
+const metaCache = new Map();
+export async function getTokenMeta(mint) {
+  const hit = metaCache.get(mint);
+  if (hit && Date.now() - hit.at < (hit.value ? 3_600_000 : 120_000)) return hit.value;
+  let value = null;
+  try {
+    const res = await rpcPool.fetchWhere((u) => /helius/i.test(u), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'omni', method: 'getAsset', params: { id: mint } }),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const c = json?.result?.content;
+      const uri = c?.json_uri;
+      let links = { socials: [], websites: [] };
+      if (typeof uri === 'string' && /^https:\/\//i.test(uri)) {
+        const m = await fetch(uri, { signal: AbortSignal.timeout(3_000) });
+        if (m.ok) links = parseMetaLinks(await m.json());
+      }
+      value = { name: c?.metadata?.name ?? null, symbol: c?.metadata?.symbol ?? null, ...links };
+    }
+  } catch (e) { console.error('token meta error:', e.message); }
+  if (metaCache.size > 500) metaCache.clear();
+  metaCache.set(mint, { at: Date.now(), value });
+  return value;
 }

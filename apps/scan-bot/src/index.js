@@ -12,10 +12,11 @@ import {
   multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, parsePeriod, buildGroupBoard, buildGroupBoardText, buildUserCallsText, buildSocialLine, formatPriceCard, formatCount, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel, within, hedge } from './intel.js';
-import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
+import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCurveRaw, getTokenMeta, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { renderPng, renderRaw } from './bubblemap.js';
 import { getArt, getMeme, refillArt, clearOldCache, OWN_DIR, sniffMime } from './memeart.js';
+import { priceFromCurve, fetchSolUsd } from './curvemarket.js';
 import { buildCandleSvg, defaultTf, parseTf, TFS } from './chartimg.js';
 import { shrinkArt, cardToJpeg, rawToJpeg, hasSharp } from './imgfast.js';
 import { buildMyCallsText, buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX } from './ux.js';
@@ -80,12 +81,26 @@ const showHome = (ctx) => ctx.reply(
 async function getMarket(mint) {
   let m = null;
   try { m = (await hedge(() => fetchPairsByTokens([mint]), 1_800)).get(mint) ?? null; } catch (e) { console.error('dexscreener error:', e.message); }
-  if (m) return m;
-  try {
-    const f = await fetchTokenMarket(mint);
-    if (f) return { mint, ...f, volume24h: null, change1h: null, change24h: null };
-  } catch (e) { console.error('fallback market error:', e.message); }
-  return null;
+  if (!m) {
+    try {
+      const f = await fetchTokenMarket(mint);
+      if (f) m = { mint, ...f, volume24h: null, change1h: null, change24h: null };
+    } catch (e) { console.error('fallback market error:', e.message); }
+  }
+  // A new pump.fun token that no website API knows yet: price and market cap come from the bonding curve itself.
+  if (!m?.priceUsd) {
+    try {
+      const [raw, solUsd] = await Promise.all([within(getCurveRaw(mint), 3_000), fetchSolUsd(fetchPairsByTokens)]);
+      const c = priceFromCurve(raw, solUsd);
+      if (c) m = { volume24h: null, change1h: null, change24h: null, ...(m ?? {}), mint, priceUsd: c.priceUsd, marketCapUsd: m?.marketCapUsd ?? c.marketCapUsd, dex: m?.dex ?? c.dex };
+    } catch (e) { console.error('curve market error:', e.message); }
+  }
+  // Links (X, Telegram, website) and names from the token's own metadata when nothing else listed them.
+  if (m && !(m.socials?.length) && !(m.websites?.length)) {
+    const meta = await within(getTokenMeta(mint), 3_500);
+    if (meta) m = { ...m, name: m.name ?? meta.name, symbol: m.symbol ?? meta.symbol, socials: meta.socials, websites: meta.websites };
+  }
+  return m;
 }
 
 // Bubblemap: with MINIAPP_URL set, private chats open our interactive map inside Telegram (hover, tap, copy).
