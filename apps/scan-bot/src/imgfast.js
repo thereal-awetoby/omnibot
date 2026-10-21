@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 // Smaller, faster pictures. Uses the "sharp" library when it is installed (npm install), otherwise leaves pictures as they are.
 let sharpP = null;
 async function sharp() {
@@ -6,11 +7,16 @@ async function sharp() {
 }
 
 // A photo shrunk to a 16:9 card background (JPEG), or the same picture when sharp is missing.
+const shrunk = new Map(); // picture fingerprint -> shrunk picture, so a picture seen before is instant
 export async function shrinkArt(art, width = 1280, height = 720) {
   const s = await sharp();
   if (!s || !art) return art;
+  const key = createHash('sha1').update(art.buf).digest('hex');
+  if (shrunk.has(key)) return { ...art, ...shrunk.get(key) };
   try {
     const buf = await s(art.buf, { failOn: 'none' }).rotate().resize(width, height, { fit: 'cover', position: 'attention' }).jpeg({ quality: 86, mozjpeg: true }).toBuffer();
+    if (shrunk.size >= 40) shrunk.delete(shrunk.keys().next().value);
+    shrunk.set(key, { buf, mime: 'image/jpeg' });
     return { ...art, buf, mime: 'image/jpeg' };
   } catch { return art; }
 }

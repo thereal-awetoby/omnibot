@@ -533,8 +533,12 @@ async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   const calledAt = new Date(call.created_at).getTime();
   // How high did it go after the call? The price seen by the bot, plus the chart candles since the call (when the call is not brand new).
   const t0 = Date.now();
-  let history = null;
-  if (!skipHistory && p?.pairAddress && Date.now() - calledAt > 180_000) history = await within(fetchPeakSince({ pairAddress: p.pairAddress, mint: call.mint, since: calledAt }), 3_500);
+  // the chart history and the picture are prepared at the same time
+  const wantHistory = !skipHistory && p?.pairAddress && Date.now() - calledAt > 180_000;
+  const [history, art] = await Promise.all([
+    wantHistory ? within(fetchPeakSince({ pairAddress: p.pairAddress, mint: call.mint, since: calledAt }), 3_500) : null,
+    getArt().then(shrinkArt).catch(() => null), // instant: your folder or a saved meme, never waits for the internet
+  ]);
   const stored = Number(call.peak_price_usd) || null;
   const x = peakMultiple(call.price_usd, stored, now, history);
   if (x === null) return null;
@@ -543,7 +547,6 @@ async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   const peakMcap = call.mcap_usd ? call.mcap_usd * x : (p?.marketCapUsd && now ? p.marketCapUsd * (peakPrice / now) : null);
   const ageText = formatDuration(Date.now() - calledAt);
   const tHist = Date.now() - t0;
-  const art = await shrinkArt(await getArt().catch(() => null)); // instant: your folder or a saved meme, never waits for the internet
   const t1 = Date.now();
   // Telegram shrinks photos to 1280 px anyway, so a bigger card only makes the upload slower.
   const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, peakMcap, x, ageText, groupName, art }), 1280, { fast: true });
@@ -552,6 +555,7 @@ async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   return { png: out.buf, name: out.name, x };
 }
 async function replyPnl(ctx, call) {
+  ctx.replyWithChatAction('upload_photo').catch(() => {}); // shows "sending a photo" at once
   const tB = Date.now();
   const prices = await pricesFor([call.mint]);
   const tPrice = Date.now() - tB;

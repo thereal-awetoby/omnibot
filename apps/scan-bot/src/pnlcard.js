@@ -60,8 +60,7 @@ export function buildPnlSvg({ symbol, callerName, entryMcap, peakMcap, x, ageTex
     '<rect x="50" y="450" width="900" height="2" fill="#ffffff" fill-opacity="0.25"/>',
     `<text x="50" y="505" ${f} font-size="24" fill="#e5e7eb"${thin}>Called at</text><text x="200" y="505" ${f} font-size="30" font-weight="700" fill="#e5e7eb">${formatUsd(entryMcap)}</text>`,
     `<text x="400" y="505" ${f} font-size="24" fill="#e5e7eb"${thin}>Peak</text><text x="470" y="505" ${f} font-size="30" font-weight="700" fill="${col}">${formatUsd(peakMcap)}</text>`,
-    `<g transform="translate(740 480) scale(0.62)">${SOL_MARK}</g>`,
-    `<text x="950" y="515" text-anchor="end" ${f} font-size="30" font-weight="700" fill="#ffffff"${thin}>Solana</text>`,
+    `<g transform="translate(892 469) scale(0.9)">${SOL_MARK}</g>`,
     '</g></svg>',
   ].join('');
 }

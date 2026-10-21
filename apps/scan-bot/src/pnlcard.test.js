@@ -35,14 +35,15 @@ test('PnL card shows the peak multiple, names and market caps (no "now" and no l
 test('PnL card has square corners and a Solana mark, with or without a picture', () => {
   const plainSvg = buildPnlSvg({ symbol: 'ABC', callerName: 'x', entryMcap: 1000, peakMcap: 3000, x: 3 });
   assert.doesNotMatch(plainSvg, /rx=/);
-  assert.match(plainSvg, />Solana</);
+  assert.doesNotMatch(plainSvg, />Solana</); // the mark alone, in the bottom right corner
+  assert.match(plainSvg, /translate\(892 469\)/);
   assert.match(plainSvg, /#9945FF/);
   const art = { mime: 'image/jpeg', buf: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]) };
   const withArt = buildPnlSvg({ symbol: 'ABC', callerName: 'x', entryMcap: 1000, peakMcap: 3000, x: 3, art });
   assert.match(withArt, /data:image\/jpeg;base64,/);
   assert.match(withArt, /preserveAspectRatio="xMidYMid slice"/); // the picture fills the whole card
   assert.doesNotMatch(withArt, /rx=/);
-  assert.match(withArt, />Solana</);
+  assert.doesNotMatch(withArt, />Solana</);
 });
 
 test('emoji in the group name and caller name are dropped from the card', () => {
