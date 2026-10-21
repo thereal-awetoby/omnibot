@@ -603,3 +603,25 @@ export async function fetchPeakSince({ pairAddress, mint, since }, fetchImpl = f
     return null;
   }
 }
+
+// ---------- plain AI text (translate, summarize, explain): Gemini without search ----------
+export async function generateText({ system, prompt, apiKey, models = null, fetchImpl = fetch, now = Date.now() }) {
+  if (!apiKey) return null;
+  const list = (await resolveGeminiModels(apiKey, models, fetchImpl, now)).slice(0, 2);
+  let lastErr = null;
+  for (const model of list) {
+    try {
+      const res = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+        body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 2048, temperature: 0.3 } }),
+        signal: AbortSignal.timeout(25_000),
+      });
+      if (!res.ok) { const e = await geminiError(res); if (res.status === 404) { lastErr = e; continue; } throw e; }
+      const body = await res.json();
+      const text = (body?.candidates?.[0]?.content?.parts ?? []).filter((p) => p.thought !== true).map((p) => p.text ?? '').join('').trim();
+      if (text) return text;
+    } catch (e) { lastErr = e; if (e.status !== 404) break; }
+  }
+  if (lastErr) console.error('ai text error:', lastErr.message);
+  return null;
+}

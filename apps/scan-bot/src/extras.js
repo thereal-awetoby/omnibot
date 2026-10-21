@@ -113,3 +113,127 @@ export function parseEpoch(t) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 export function csvCell(v) { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }
+
+// ---------- price targets: "2x 3x 5x", "+50%", "-30%", "0.5x" ----------
+// Returns multiples of the price now (1 < up, below 1 = down), de-duplicated and sorted; null when something is not understood.
+export function parseTargets(text) {
+  const parts = String(text ?? '').trim().toLowerCase().split(/[\s,]+/).filter(Boolean);
+  if (!parts.length) return [];
+  const out = new Set();
+  for (const p of parts) {
+    let m = /^(\d+(?:\.\d+)?)x$/.exec(p);
+    let mult = null;
+    if (m) mult = Number(m[1]);
+    else if ((m = /^([+-]?)(\d+(?:\.\d+)?)%$/.exec(p))) mult = m[1] === '-' ? 1 - Number(m[2]) / 100 : 1 + Number(m[2]) / 100;
+    if (!(mult > 0) || mult === 1 || mult > 10_000) return null;
+    out.add(Math.round(mult * 1e6) / 1e6);
+  }
+  return [...out].sort((a, b) => a - b).slice(0, 12);
+}
+export const targetLabel = (mult) => (mult >= 1 ? (Number.isInteger(mult) ? `${mult}x` : `${+mult.toFixed(2)}x`) : `-${Math.round((1 - mult) * 100)}%`);
+export const targetHit = (basePrice, price, mult) => basePrice > 0 && price > 0 && (mult >= 1 ? price >= basePrice * mult : price <= basePrice * mult);
+
+// ---------- reminders: "10m", "2h30m", "in 2 hours", "1d" ----------
+const DUR = { s: 1e3, sec: 1e3, secs: 1e3, second: 1e3, seconds: 1e3, m: 6e4, min: 6e4, mins: 6e4, minute: 6e4, minutes: 6e4, h: 36e5, hr: 36e5, hrs: 36e5, hour: 36e5, hours: 36e5, d: 864e5, day: 864e5, days: 864e5, w: 6048e5, week: 6048e5, weeks: 6048e5 };
+// -> { ms, rest } or null. The time comes first: "2h30m buy the dip", "in 10 minutes call mom".
+export function parseDelay(text) {
+  let t = String(text ?? '').trim().toLowerCase().replace(/^in\s+/, '');
+  let ms = 0, found = false;
+  const re = /^(\d+(?:\.\d+)?)\s*([a-z]+)\s*/;
+  for (;;) {
+    const m = re.exec(t);
+    if (!m || !(m[2] in DUR)) break;
+    ms += Number(m[1]) * DUR[m[2]]; found = true; t = t.slice(m[0].length).replace(/^and\s+/, '');
+  }
+  if (!found || ms < 1e4 || ms > 365 * 864e5) return null;
+  return { ms: Math.round(ms), rest: String(text).trim().slice(String(text).trim().length - t.length).trim() };
+}
+
+// ---------- technical read ----------
+export function ema(vals, n) {
+  if (vals.length < n) return null;
+  const k = 2 / (n + 1);
+  let e = vals.slice(0, n).reduce((a, b) => a + b, 0) / n;
+  for (let i = n; i < vals.length; i++) e = vals[i] * k + e * (1 - k);
+  return e;
+}
+export function rsi(closes, n = 14) {
+  if (closes.length < n + 1) return null;
+  let g = 0, l = 0;
+  for (let i = 1; i <= n; i++) { const d = closes[i] - closes[i - 1]; if (d >= 0) g += d; else l -= d; }
+  g /= n; l /= n;
+  for (let i = n + 1; i < closes.length; i++) { const d = closes[i] - closes[i - 1]; g = (g * (n - 1) + Math.max(d, 0)) / n; l = (l * (n - 1) + Math.max(-d, 0)) / n; }
+  return l === 0 ? 100 : 100 - 100 / (1 + g / l);
+}
+// MACD histogram (12, 26, 9)
+export function macdHist(closes) {
+  if (closes.length < 35) return null;
+  const k12 = 2 / 13, k26 = 2 / 27;
+  let e12 = closes.slice(0, 12).reduce((a, b) => a + b, 0) / 12, e26 = closes.slice(0, 26).reduce((a, b) => a + b, 0) / 26;
+  const macd = [];
+  for (let i = 0; i < closes.length; i++) {
+    if (i >= 12) e12 = closes[i] * k12 + e12 * (1 - k12);
+    if (i >= 26) { e26 = closes[i] * k26 + e26 * (1 - k26); macd.push(e12 - e26); }
+  }
+  const sig = ema(macd, 9);
+  return sig === null ? null : macd.at(-1) - sig;
+}
+// closes oldest -> newest. Needs 35+ candles for a full read.
+export function analyzeCloses(closes) {
+  const c = closes.filter((v) => Number.isFinite(v) && v > 0);
+  if (c.length < 20) return null;
+  const r = rsi(c), fast = ema(c, 9), slow = ema(c, Math.min(21, c.length)), h = macdHist(c);
+  let score = 0;
+  if (fast !== null && slow !== null) score += fast > slow ? 1 : -1;
+  if (h !== null) score += h > 0 ? 1 : -1;
+  if (r !== null) score += r >= 55 ? 0.5 : r <= 45 ? -0.5 : 0;
+  const label = score >= 1.5 ? 'Bullish' : score <= -1.5 ? 'Bearish' : 'Neutral';
+  return { rsi: r, trendUp: fast !== null && slow !== null ? fast > slow : null, macdUp: h !== null ? h > 0 : null, score, label };
+}
+const arrow = (up) => (up === null ? '–' : up ? '▲' : '▼');
+export function buildTaText(symbol, rows) {
+  const ok = rows.filter((r) => r.a);
+  const head = `📊 <b>${symbol ? `$${esc(symbol)}` : 'Token'}</b> · technical read`;
+  if (!ok.length) return `${head}\n\nNot enough chart history yet. Try again once the token has more candles.`;
+  const lines = ok.map((r) => `${r.tf.padEnd(4)} ${String(r.a.rsi === null ? '–' : Math.round(r.a.rsi)).padStart(3)}   ${arrow(r.a.trendUp)}     ${arrow(r.a.macdUp)}    ${r.a.label}`);
+  const avg = ok.reduce((s, r) => s + r.a.score, 0) / ok.length;
+  const overall = avg >= 1 ? '🟢 Bullish' : avg <= -1 ? '🔴 Bearish' : '🟡 Neutral';
+  const up = ok.filter((r) => r.a.score >= 1.5).length, down = ok.filter((r) => r.a.score <= -1.5).length;
+  const rs = ok.find((r) => r.a.rsi !== null && (r.a.rsi >= 70 || r.a.rsi <= 30));
+  return [head, '', `<pre>TF   RSI  Trend MACD  Read\n${lines.join('\n')}</pre>`,
+    `Overall: <b>${overall}</b>  (${up} bullish · ${down} bearish of ${ok.length})`,
+    ...(rs ? [`<i>${rs.tf} RSI is ${rs.a.rsi >= 70 ? 'overbought' : 'oversold'}</i>`] : []),
+    '<i>RSI 14 · Trend = EMA 9 vs 21 · MACD 12/26/9</i>'].join('\n');
+}
+export const TA_FRAMES = [['5m', 'minute', 5], ['15m', 'minute', 15], ['1h', 'hour', 1], ['4h', 'hour', 4], ['1d', 'day', 1]];
+// Closing prices of the last ~150 candles, oldest first (GeckoTerminal), or null.
+export async function fetchCloses({ pairAddress, mint, frame, aggregate, fetchFn = fetch }) {
+  try {
+    const res = await fetchFn(`https://api.geckoterminal.com/api/v2/networks/solana/pools/${pairAddress}/ohlcv/${frame}?aggregate=${aggregate}&limit=150&currency=usd&token=${mint}`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(7_000) });
+    if (!res.ok) return null;
+    const list = (await res.json())?.data?.attributes?.ohlcv_list;
+    return Array.isArray(list) ? list.map((c) => Number(c[4])).reverse() : null;
+  } catch { return null; }
+}
+
+// ---------- AI text tools ----------
+export function isPublicUrl(u) {
+  try {
+    const x = new URL(u);
+    if (!/^https?:$/.test(x.protocol)) return false;
+    const h = x.hostname.toLowerCase();
+    if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal') || !h.includes('.') && !h.includes(':')) return false;
+    if (/^(\d+)\.(\d+)\.\d+\.\d+$/.test(h)) { const [a, b] = h.split('.').map(Number); if (a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return false; }
+    if (h.includes(':')) return false;
+    return true;
+  } catch { return false; }
+}
+export const stripHtml = (html) => String(html).replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+const LANGS = { en: 'English', fr: 'French', es: 'Spanish', de: 'German', pt: 'Portuguese', it: 'Italian', ru: 'Russian', tr: 'Turkish', ar: 'Arabic', hi: 'Hindi', zh: 'Chinese', ja: 'Japanese', ko: 'Korean', yo: 'Yoruba', ig: 'Igbo', ha: 'Hausa', sw: 'Swahili', id: 'Indonesian', vi: 'Vietnamese', nl: 'Dutch', pl: 'Polish', uk: 'Ukrainian' };
+// "hello world -fr" -> { text: 'hello world', lang: 'French' }
+export function parseTranslate(arg) {
+  const m = /\s-([a-z]{2})\s*$/i.exec(String(arg ?? ''));
+  const lang = m ? LANGS[m[1].toLowerCase()] : null;
+  if (m && !lang) return { text: String(arg).trim(), lang: 'English', bad: m[1] };
+  return { text: (m ? String(arg).slice(0, m.index) : String(arg ?? '')).trim(), lang: lang ?? 'English' };
+}

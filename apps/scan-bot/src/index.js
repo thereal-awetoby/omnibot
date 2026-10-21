@@ -3,7 +3,7 @@ import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
-  recordFirstCall, getFirstCall, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, keepDbWarm,
+  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, keepDbWarm,
   MAX_WATCHES,
 } from '@omnibot/shared';
 import {
@@ -18,9 +18,9 @@ import { renderPng } from './bubblemap.js';
 import { getArt, refillArt, clearOldCache } from './memeart.js';
 import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
-import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince } from './sources.js';
+import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince, generateText } from './sources.js';
 import { formatDuration } from './scan.js';
-import { normPeriod, fetchTopCoins, buildHeatmapSvg, buildMoversText, fetchPolymarket, buildPolymarketText, parseAmount, parseEpoch, csvCell } from './extras.js';
+import { parseTargets, targetLabel, targetHit, parseDelay, analyzeCloses, buildTaText, TA_FRAMES, fetchCloses, isPublicUrl, stripHtml, parseTranslate, normPeriod, fetchTopCoins, buildHeatmapSvg, buildMoversText, fetchPolymarket, buildPolymarketText, parseAmount, parseEpoch, csvCell } from './extras.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
 
 // Windows often tries IPv6 first and waits for it to fail; going straight to IPv4 makes every web request faster
@@ -374,7 +374,7 @@ async function doUnwatch(ctx, mint, { edit = false } = {}) {
 
 bot.command('start', showHome);
 bot.command('help', (ctx) => ctx.reply(
-  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard 1h | 20 minutes | 1 week | 1 month | all  /calls  /pnl  (groups)\n/meme  random crypto meme\n/fc  /last  /elb  (groups: first caller, last calls, export)\n/hm [count] [period]  heatmap\n/best  /worst [period]\n/poly <term>  Polymarket\n/v <amount|%> <token>\n/userid  /chatid  /flip  /epoch\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
+  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard 1h | 20 minutes | 1 week | 1 month | all  /calls  /pnl  (groups)\n/meme  random crypto meme\n/fc  /last  /elb  (groups: first caller, last calls, export)\n/hm [count] [period]  heatmap\n/best  /worst [period]\n/poly <term>  Polymarket\n/v <amount|%> <token>\n/userid  /chatid  /flip  /epoch\n/target <address> 3x 4x  alert me at a multiple (/targets, /untarget)\n/remindme 30m <text>  /listreminders  /nevermind <id>\n/ta <address>  technical read\n/tr <text> [-fr]  /tldr <text or link>  /eli5 <text>\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
 ));
 bot.command('token', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
@@ -653,6 +653,154 @@ bot.command('epoch', (ctx) => {
   if (!d) return ctx.reply('Usage: /epoch <unix timestamp>');
   return ctx.reply(`<code>${d.toISOString().replace('T', ' ').slice(0, 19)} UTC</code>\n${formatDuration(Math.abs(Date.now() - d.getTime())) ?? ''} ${d.getTime() <= Date.now() ? 'ago' : 'from now'}`, HTML);
 });
+
+// ---- Price targets (3x, 4x, -50%...) ----
+bot.command(['target', 'alertx'], async (ctx) => {
+  const args = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean);
+  const first = args[0] ? parseMintInput(args[0]) : null;
+  const mint = first ?? extractMint(ctx.message?.reply_to_message?.text ?? ctx.message?.reply_to_message?.caption ?? '');
+  const rest = first ? args.slice(1) : args;
+  if (!mint) return ctx.reply('Usage: /target <address> 3x 4x 10x\nAlso works with percents: /target <address> +50% -30%\nNo multiples = 2x 3x 5x. You can also reply to a message that has the address.');
+  const mults = rest.length ? parseTargets(rest.join(' ')) : [2, 3, 5];
+  if (!mults) return ctx.reply('I did not understand those targets. Examples: 3x  4.5x  +50%  -30%');
+  const m = await withTyping(ctx, () => getMarket(mint));
+  if (!m?.priceUsd) return ctx.reply('No price found for that token yet.');
+  const added = await addTargets({ telegramId: ctx.from.id, mint, symbol: m.symbol, basePrice: m.priceUsd, mults });
+  const name = m.symbol ? `$${esc(m.symbol)}` : short(mint);
+  return ctx.reply(`🎯 <b>${name}</b>: I will message you when it reaches ${mults.map(targetLabel).join(', ')} from ${formatPriceCard(m.priceUsd)}${m.marketCapUsd ? ` (${formatUsd(m.marketCapUsd)})` : ''}.\n<i>${added ? '' : 'Already set, the base price is reset to now. '}/targets to see them, /untarget to remove.</i>`, HTML);
+});
+bot.command('targets', async (ctx) => {
+  const rows = await listTargets(ctx.from.id);
+  if (!rows.length) return ctx.reply('You have no price targets. Try: /target <address> 3x 5x');
+  const by = new Map();
+  for (const r of rows) { const e = by.get(r.mint) ?? { r, list: [] }; e.list.push(r.mult); by.set(r.mint, e); }
+  const lines = [...by.values()].map(({ r, list }) => `${r.symbol ? `$${esc(r.symbol)}` : `<code>${short(r.mint)}</code>`}  from ${formatPriceCard(r.base_price_usd)}  →  ${list.map(targetLabel).join(', ')}`);
+  return ctx.reply(`🎯 <b>Your price targets</b>\n<blockquote>${lines.join('\n')}</blockquote>\n<i>/untarget <address> or /untarget all</i>`, HTML);
+});
+bot.command('untarget', async (ctx) => {
+  const a = (ctx.match ?? '').trim();
+  if (a.toLowerCase() === 'all') return ctx.reply(`Removed ${await removeTargets(ctx.from.id)} target(s).`);
+  const mint = parseMintInput(a) ?? extractMint(ctx.message?.reply_to_message?.text ?? '');
+  if (!mint) return ctx.reply('Usage: /untarget <address>  or  /untarget all');
+  return ctx.reply(`Removed ${await removeTargets(ctx.from.id, mint)} target(s).`);
+});
+let checkingTargets = false;
+async function checkTargets() {
+  if (checkingTargets) return;
+  checkingTargets = true;
+  try {
+    const rows = await listActiveTargets();
+    if (!rows.length) return;
+    const prices = await fetchPairsByTokens([...new Set(rows.map((r) => r.mint))]);
+    for (const r of rows) {
+      const p = prices.get(r.mint);
+      if (!p?.priceUsd || !targetHit(r.base_price_usd, p.priceUsd, r.mult)) continue;
+      const x = p.priceUsd / r.base_price_usd;
+      try {
+        await bot.api.sendMessage(r.telegram_id, `🎯 <b>${r.symbol ? `$${esc(r.symbol)}` : short(r.mint)}</b> reached <b>${targetLabel(r.mult)}</b>\nNow ${formatPriceCard(p.priceUsd)}${p.marketCapUsd ? ` · ${formatUsd(p.marketCapUsd)}` : ''}  (${x >= 1 ? x.toFixed(2) + 'x' : shortPct((x - 1) * 100)} since you set it)`, {
+          ...HTML, reply_markup: new InlineKeyboard().text('Open card', `t:${r.mint}`).url('⚡ Buy on Omni Trade', tradeLink(r.mint)),
+        });
+        await markTargetFired(r.id);
+      } catch (e) {
+        if (e.error_code === 403) { await removeTargets(r.telegram_id); } else console.error('target send error:', e.message);
+      }
+      await new Promise((res) => setTimeout(res, 50));
+    }
+  } catch (e) { console.error('target check error:', e.message); } finally { checkingTargets = false; }
+}
+
+// ---- Reminders ----
+const fmtWhen = (d) => `${new Date(d).toISOString().replace('T', ' ').slice(0, 16)} UTC`;
+async function makeReminder(ctx, { here }) {
+  const arg = (ctx.match ?? '').trim();
+  const d = parseDelay(arg);
+  if (!d) return ctx.reply(`Usage: ${here ? '/remind' : '/remindme'} <time> <what>\nExamples: /remindme 30m check the chart  ·  /remindme 2h30m sell half  ·  /remind 1d post the update`);
+  const reply = ctx.message?.reply_to_message;
+  const body = (d.rest || reply?.text || reply?.caption || 'Reminder').slice(0, 300);
+  const id = await addReminder({ telegramId: ctx.from.id, chatId: here ? ctx.chat.id : ctx.from.id, fireAt: new Date(Date.now() + d.ms), body, who: callerName(ctx.from) });
+  if (id === null) return ctx.reply('You have too many active reminders (25). Remove one with /nevermind <id>.');
+  return ctx.reply(`⏰ Ok, ${here ? 'I will remind this chat' : 'I will remind you'} in ${formatDuration(d.ms)} (${fmtWhen(Date.now() + d.ms)}).\n<i>ID ${id} · /nevermind ${id} to cancel</i>`, HTML);
+}
+bot.command('remindme', (ctx) => makeReminder(ctx, { here: false }));
+bot.command('remind', (ctx) => makeReminder(ctx, { here: true }));
+bot.command('listreminders', async (ctx) => {
+  const rows = await listReminders(ctx.from.id);
+  if (!rows.length) return ctx.reply('You have no reminders. Try: /remindme 1h check the chart');
+  return ctx.reply(`⏰ <b>Your reminders</b>\n<blockquote>${rows.map((r) => `${r.id} · ${fmtWhen(r.fire_at)} · ${esc(r.body.slice(0, 60))}`).join('\n')}</blockquote>`, HTML);
+});
+bot.command('nevermind', async (ctx) => {
+  const id = Number((ctx.match ?? '').trim());
+  if (!Number.isInteger(id) || id <= 0) return ctx.reply('Usage: /nevermind <reminder id>  (see /listreminders)');
+  return ctx.reply((await removeReminder(id, ctx.from.id)) ? 'Reminder removed.' : 'I could not find that reminder.');
+});
+let checkingReminders = false;
+async function checkReminders() {
+  if (checkingReminders) return;
+  checkingReminders = true;
+  try {
+    for (const r of await dueReminders()) {
+      try {
+        const group = Number(r.chat_id) !== Number(r.telegram_id);
+        await bot.api.sendMessage(r.chat_id, `⏰ ${group ? `<a href="tg://user?id=${r.telegram_id}">${esc(r.who ?? 'Reminder')}</a>: ` : ''}${esc(r.body)}`, HTML);
+      } catch (e) { console.error('reminder send error:', e.message); }
+      await markReminderDone(r.id).catch(() => {});
+    }
+  } catch (e) { console.error('reminder check error:', e.message); } finally { checkingReminders = false; }
+}
+
+// ---- /ta technical read ----
+bot.command('ta', withMint('/ta', async (ctx, mint) => {
+  const m = await withTyping(ctx, () => getMarket(mint));
+  if (!m?.pairAddress) return ctx.reply('I could not find a trading pair for that token.');
+  const rows = await withTyping(ctx, () => Promise.all(TA_FRAMES.map(async ([tf, frame, aggregate]) => ({ tf, a: analyzeCloses((await fetchCloses({ pairAddress: m.pairAddress, mint, frame, aggregate })) ?? []) }))));
+  return ctx.reply(buildTaText(m.symbol, rows), { ...HTML, reply_markup: chartButtons(mint) });
+}));
+
+// ---- AI helpers: /tr /tldr /eli5 (Gemini). A few per hour for each person, to protect the free quota. ----
+const aiUse = new Map();
+function aiAllowed(id) {
+  const now = Date.now();
+  const list = (aiUse.get(id) ?? []).filter((t) => now - t < 3_600_000);
+  if (list.length >= 12) return false;
+  list.push(now); aiUse.set(id, list);
+  return true;
+}
+const AI_SYS = 'You are a concise assistant inside a Telegram crypto bot. Plain text only, no markdown symbols, no lists unless asked. Keep it short.';
+async function runAi(ctx, { system, prompt }) {
+  if (!process.env.GEMINI_API_KEY) return ctx.reply('The AI tools need a Gemini key in the bot settings.');
+  if (!aiAllowed(ctx.from.id)) return ctx.reply('You used the AI tools a lot this hour. Try again a bit later.');
+  const out = await withTyping(ctx, () => generateText({ system, prompt, apiKey: process.env.GEMINI_API_KEY, models: process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : null }));
+  if (!out) return ctx.reply('The AI did not answer. Try again in a moment.');
+  return ctx.reply(esc(out.replace(/[*_`#]/g, '')).slice(0, 3800), HTML);
+}
+const quoted = (ctx) => ctx.message?.reply_to_message?.text ?? ctx.message?.reply_to_message?.caption ?? '';
+bot.command('tr', async (ctx) => {
+  const { text: argText, lang, bad } = parseTranslate(ctx.match);
+  if (bad) return ctx.reply(`I do not know the language code "${esc(bad)}". Examples: -fr -es -de -pt -yo -ha -ig`, HTML);
+  const text = argText || quoted(ctx);
+  if (!text) return ctx.reply('Usage: /tr <text> [-fr]  or reply to a message with /tr');
+  return runAi(ctx, { system: AI_SYS, prompt: `Translate to ${lang}. Reply with the translation only.\n\n${text.slice(0, 3000)}` });
+});
+bot.command('eli5', async (ctx) => {
+  const text = (ctx.match ?? '').trim() || quoted(ctx);
+  if (!text) return ctx.reply('Usage: /eli5 <topic or text>  or reply to a message with /eli5');
+  return runAi(ctx, { system: AI_SYS, prompt: `Explain like I am 5, in 3 or 4 short sentences:\n\n${text.slice(0, 3000)}` });
+});
+bot.command(['tldr', 'sum'], async (ctx) => {
+  let text = (ctx.match ?? '').trim() || quoted(ctx);
+  const url = /https?:\/\/\S+/.exec(text)?.[0];
+  if (!text) return ctx.reply('Usage: /tldr <text or link>  or reply to a message with /tldr');
+  if (url) {
+    if (!isPublicUrl(url)) return ctx.reply('I can only read public web pages.');
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(8_000), headers: { 'user-agent': 'Mozilla/5.0 OmniScan' } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      text = stripHtml((await res.text()).slice(0, 400_000)).slice(0, 12_000);
+      if (text.length < 200) return ctx.reply('I could not read text from that page.');
+    } catch (e) { return ctx.reply('I could not open that link.'); }
+  }
+  return runAi(ctx, { system: AI_SYS, prompt: `Summarize in 3 to 5 short bullet-style sentences (use plain lines starting with a dash):\n\n${text.slice(0, 12_000)}` });
+});
 bot.command('trade', (ctx) => ctx.reply(`https://t.me/${TRADE_USERNAME}`));
 bot.command('launch', (ctx) => ctx.reply(`https://t.me/${LAUNCH_USERNAME}`));
 bot.command('scan', showTrending);
@@ -787,6 +935,9 @@ bot.start({
       { command: 'worst', description: 'Top losers' },
       { command: 'fc', description: 'Who called a token first (groups)' },
       { command: 'last', description: 'Last calls in the group' },
+      { command: 'ta', description: 'Technical read of a token' },
+      { command: 'target', description: 'Alert me at 3x, 4x, -50%...' },
+      { command: 'remindme', description: 'Set a reminder' },
       { command: 'poly', description: 'Search Polymarket' },
       { command: 'v', description: 'Convert a token amount to USD' },
       { command: 'help', description: 'All commands' },
@@ -795,5 +946,7 @@ bot.start({
     clearOldCache().finally(() => refillArt());
     setInterval(checkAlerts, 60_000);
     setInterval(checkCalls, 90_000);
+    setInterval(checkTargets, 45_000);
+    setInterval(checkReminders, 20_000);
   },
 });
