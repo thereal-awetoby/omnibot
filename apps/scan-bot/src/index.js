@@ -9,7 +9,7 @@ import {
 import {
   parseMintInput, extractMint, looksLikeMint, parseAlertPct, shouldAlert,
   buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText,
-  multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, parsePeriod, buildGroupBoard, buildGroupBoardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
+  multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, parsePeriod, buildGroupBoard, buildGroupBoardText, buildUserCallsText, buildSocialLine, formatPriceCard, formatCount, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
@@ -20,6 +20,7 @@ import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlc
 import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince } from './sources.js';
 import { formatDuration } from './scan.js';
+import { normPeriod, fetchTopCoins, buildHeatmapSvg, buildMoversText, fetchPolymarket, buildPolymarketText, parseAmount, parseEpoch, csvCell } from './extras.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
 
 // Windows often tries IPv6 first and waits for it to fail; going straight to IPv4 makes every web request faster
@@ -373,7 +374,7 @@ async function doUnwatch(ctx, mint, { edit = false } = {}) {
 
 bot.command('start', showHome);
 bot.command('help', (ctx) => ctx.reply(
-  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard 1h | 20 minutes | 1 week | 1 month | all  /calls  /pnl  (groups)\n/meme  random crypto meme\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
+  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard 1h | 20 minutes | 1 week | 1 month | all  /calls  /pnl  (groups)\n/meme  random crypto meme\n/fc  /last  /elb  (groups: first caller, last calls, export)\n/hm [count] [period]  heatmap\n/best  /worst [period]\n/poly <term>  Polymarket\n/v <amount|%> <token>\n/userid  /chatid  /flip  /epoch\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
 ));
 bot.command('token', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
@@ -500,7 +501,7 @@ async function groupBoardText(chat, period) {
   return buildGroupBoardText(board, { label: period.label, groupName: plainName(chat.title) });
 }
 const plainName = (s) => String(s ?? '').replace(/[\p{Extended_Pictographic}\u200d\ufe0f]/gu, '').replace(/\s+/g, ' ').trim() || null;
-bot.command('leaderboard', async (ctx) => {
+bot.command(['leaderboard', 'lb'], async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('Leaderboards work in groups. Add me to your group and post token addresses there.');
   const period = parsePeriod(ctx.match);
   if (!period) return ctx.reply('Try: /leaderboard 1h, /leaderboard 20 minutes, /leaderboard 1 week, /leaderboard 2 weeks, /leaderboard 1 month or /leaderboard all');
@@ -517,7 +518,7 @@ bot.callbackQuery(/^lb:(\d+|all)$/, async (ctx) => {
   const text = await groupBoardText(ctx.chat, period);
   return ctx.editMessageText(text, { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: lbKeyboard(secs) }).catch(() => {});
 });
-bot.command('calls', async (ctx) => {
+bot.command(['calls', 'groupme'], async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('Call tracking works in groups. Post a token address in your group to make a call.');
   const calls = await listUserCalls(ctx.chat.id, ctx.from.id, { limit: 10 });
   const prices = await pricesFor(calls.map((c) => c.mint));
@@ -569,6 +570,88 @@ bot.command('meme', async (ctx) => {
   if (!art) return ctx.reply('No meme right now, try again in a moment.');
   const extra = art.title ? { caption: esc(art.title), parse_mode: 'HTML' } : {};
   return ctx.replyWithPhoto(new InputFile(art.buf, art.mime === 'image/png' ? 'meme.png' : 'meme.jpg'), extra);
+});
+
+// ---- Extra commands: group tools, market, converters, small utilities ----
+const firstMint = (ctx) => parseMintInput((ctx.match ?? '').trim()) ?? extractMint(ctx.message?.reply_to_message?.text ?? ctx.message?.reply_to_message?.caption ?? '');
+const callLabel = (c) => (c.symbol ? `$${esc(c.symbol)}` : `<code>${short(c.mint)}</code>`);
+bot.command('fc', async (ctx) => {
+  if (!isGroup(ctx)) return ctx.reply('This works in groups: it shows who called a token first.');
+  const mint = firstMint(ctx);
+  if (!mint) return ctx.reply('Usage: /fc <token address>, or reply to a message that has one.');
+  const c = await getFirstCall(ctx.chat.id, mint);
+  if (!c) return ctx.reply('Nobody has called that token in this group yet (I only count tokens posted here after I joined).');
+  const age = formatDuration(Date.now() - new Date(c.created_at).getTime()) ?? '';
+  return ctx.reply(`🥇 <b>First call</b>  ${callLabel(c)}\nBy <b>${c.caller_name ? esc(c.caller_name) : 'someone'}</b>  ·  ${age} ago\nCalled at ${formatUsd(c.mcap_usd)}`, HTML);
+});
+bot.command('last', async (ctx) => {
+  if (!isGroup(ctx)) return ctx.reply('This works in groups.');
+  const calls = await listChatCalls(ctx.chat.id, { seconds: 20 * 365 * 86400, limit: 10 });
+  if (!calls.length) return ctx.reply('No calls in this group yet.');
+  const lines = calls.map((c, i) => `${String(i + 1).padStart(2)}. ${callLabel(c)}  ${formatUsd(c.mcap_usd)}  ·  ${c.caller_name ? esc(c.caller_name) : 'someone'}  ·  ${formatDuration(Date.now() - new Date(c.created_at).getTime()) ?? ''} ago`);
+  return ctx.reply(`🕘 <b>Last calls</b>\n<blockquote>${lines.join('\n')}</blockquote>`, HTML);
+});
+bot.command('elb', async (ctx) => {
+  if (!isGroup(ctx)) return ctx.reply('This works in groups.');
+  const period = parsePeriod(ctx.match) ?? { seconds: 30 * 86400, label: '1 month' };
+  const calls = await listChatCalls(ctx.chat.id, { seconds: period.seconds, limit: 1000 });
+  if (!calls.length) return ctx.reply('No calls in that time.');
+  const prices = await pricesFor(calls.map((c) => c.mint));
+  const board = buildGroupBoard(calls, prices);
+  const rows = [['token', 'mint', 'caller', 'called_at', 'mcap_at_call', 'peak_mcap', 'multiple'], ...board.top.map((r) => [r.symbol ?? '', r.mint, r.caller_name ?? '', new Date(r.created_at).toISOString(), Math.round(r.mcap_usd ?? 0), Math.round(r.peakMcap ?? 0), r.x.toFixed(2)])];
+  const csv = '\ufeff' + rows.map((r) => r.map(csvCell).join(',')).join('\n');
+  return ctx.replyWithDocument(new InputFile(Buffer.from(csv, 'utf8'), 'leaderboard.csv'), { caption: `Leaderboard export · ${period.label}` });
+});
+bot.command('hm', async (ctx) => {
+  const args = (ctx.match ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+  const period = normPeriod(args.find((a) => /^(1h|24h|1d|7d|1w|14d|30d|1m|1y)$/.test(a)));
+  const count = Math.max(5, Math.min(150, Number(args.find((a) => /^\d+$/.test(a))) || 50));
+  let coins;
+  try { coins = await withTyping(ctx, () => fetchTopCoins()); } catch (e) { console.error('heatmap error:', e.message); return ctx.reply('The heatmap data is not reachable right now. Try again in a minute.'); }
+  if (!coins.length) return ctx.reply('No market data right now.');
+  const png = await renderPng(buildHeatmapSvg(coins.slice(0, count), period, `Crypto heatmap · top ${Math.min(count, coins.length)}`), 1280, { fast: true });
+  return ctx.replyWithPhoto(new InputFile(png, 'heatmap.png'), { caption: `🗺 Top ${Math.min(count, coins.length)} coins by market cap · ${period} change\n<i>/hm 100 7d for more coins or another period</i>`, parse_mode: 'HTML' });
+});
+const movers = (dir) => async (ctx) => {
+  const args = (ctx.match ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+  const period = normPeriod(args.find((a) => /^(1h|24h|1d|7d|1w|14d|30d|1m|1y)$/.test(a)));
+  let coins;
+  try { coins = await withTyping(ctx, () => fetchTopCoins()); } catch (e) { console.error('movers error:', e.message); return ctx.reply('Market data is not reachable right now. Try again in a minute.'); }
+  return ctx.reply(buildMoversText(coins, period, dir), HTML);
+};
+bot.command('best', movers('best'));
+bot.command('worst', movers('worst'));
+bot.command('poly', async (ctx) => {
+  const term = (ctx.match ?? '').trim();
+  let list;
+  try { list = await withTyping(ctx, () => fetchPolymarket(term)); } catch (e) { console.error('polymarket error:', e.message); return ctx.reply('Polymarket is not reachable right now. Try again in a minute.'); }
+  return ctx.reply(buildPolymarketText(list, term), HTML);
+});
+bot.command('v', async (ctx) => {
+  const [a, ...rest] = (ctx.match ?? '').trim().split(/\s+/);
+  const amt = parseAmount(a);
+  const q = rest.join(' ').trim();
+  if (!amt || !q) return ctx.reply('Usage: /v <amount or %> <token>\nExamples: /v 1m bonk  ·  /v 2% <address>');
+  let mint = parseMintInput(q);
+  if (!mint) {
+    try { mint = (await withTyping(ctx, () => searchTokens(q)))[0]?.mint ?? null; } catch { mint = null; }
+    if (!mint) return ctx.reply('I could not find that token.');
+  }
+  const m = await getMarket(mint);
+  if (!m?.priceUsd) return ctx.reply('No price found for that token yet.');
+  const name = m.symbol ? `$${esc(m.symbol)}` : short(mint);
+  if (amt.kind === 'amount') return ctx.reply(`${formatCount(amt.n)} ${name} = <b>${formatUsd(amt.n * m.priceUsd)}</b>\n<i>Price ${formatPriceCard(m.priceUsd)}</i>`, HTML);
+  if (!m.marketCapUsd) return ctx.reply('No market cap for that token, so I cannot work out a share of the supply.');
+  const tokens = (m.marketCapUsd / m.priceUsd) * (amt.n / 100);
+  return ctx.reply(`${amt.n}% of ${name} supply = <b>${formatUsd(m.marketCapUsd * amt.n / 100)}</b>\n<i>${formatCount(tokens)} tokens · market cap ${formatUsd(m.marketCapUsd)}</i>`, HTML);
+});
+bot.command('userid', (ctx) => ctx.reply(`Your ID: <code>${ctx.from.id}</code>`, HTML));
+bot.command('chatid', (ctx) => ctx.reply(`Chat ID: <code>${ctx.chat.id}</code>`, HTML));
+bot.command('flip', (ctx) => ctx.reply(Math.random() < 0.5 ? '🪙 Heads' : '🪙 Tails'));
+bot.command('epoch', (ctx) => {
+  const d = parseEpoch(ctx.match);
+  if (!d) return ctx.reply('Usage: /epoch <unix timestamp>');
+  return ctx.reply(`<code>${d.toISOString().replace('T', ' ').slice(0, 19)} UTC</code>\n${formatDuration(Math.abs(Date.now() - d.getTime())) ?? ''} ${d.getTime() <= Date.now() ? 'ago' : 'from now'}`, HTML);
 });
 bot.command('trade', (ctx) => ctx.reply(`https://t.me/${TRADE_USERNAME}`));
 bot.command('launch', (ctx) => ctx.reply(`https://t.me/${LAUNCH_USERNAME}`));
@@ -699,6 +782,13 @@ bot.start({
       { command: 'calls', description: 'Your calls in this group' },
       { command: 'pnl', description: 'PnL card of a call (groups)' },
       { command: 'meme', description: 'A random crypto meme' },
+      { command: 'hm', description: 'Crypto heatmap' },
+      { command: 'best', description: 'Top gainers' },
+      { command: 'worst', description: 'Top losers' },
+      { command: 'fc', description: 'Who called a token first (groups)' },
+      { command: 'last', description: 'Last calls in the group' },
+      { command: 'poly', description: 'Search Polymarket' },
+      { command: 'v', description: 'Convert a token amount to USD' },
       { command: 'help', description: 'All commands' },
     ]).catch((e) => console.error('setMyCommands error:', e.message));
     keepDbWarm();
