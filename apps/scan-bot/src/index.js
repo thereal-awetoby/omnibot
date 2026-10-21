@@ -527,6 +527,8 @@ bot.command(['calls', 'groupme'], async (ctx) => {
   return ctx.reply(buildUserCallsText(calls, prices, callerName(ctx.from)), HTML);
 });
 // A call as a share card: /pnl (your latest call here) or /pnl <address> (whoever called it first).
+// CARD_FORMAT=jpg in .env makes cards smaller and faster to send (slightly softer). The default is the original: the picture untouched, the card saved as a lossless PNG.
+const CARD_JPG = String(process.env.CARD_FORMAT || '').toLowerCase().startsWith('jp');
 const CARD_W = Math.min(1920, Math.max(640, Number(process.env.CARD_WIDTH) || 1280)); // lower it (for example 1000) in .env if drawing is slow on your computer
 async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   const p = prices.get(call.mint);
@@ -538,7 +540,7 @@ async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   const wantHistory = !skipHistory && p?.pairAddress && Date.now() - calledAt > 180_000;
   const [history, art] = await Promise.all([
     wantHistory ? within(fetchPeakSince({ pairAddress: p.pairAddress, mint: call.mint, since: calledAt }), 3_500) : null,
-    getArt().then(shrinkArt).catch(() => null), // instant: your folder or a saved meme, never waits for the internet
+    getArt().then((a) => (CARD_JPG ? shrinkArt(a) : a)).catch(() => null), // instant: your folder or a saved meme, never waits for the internet
   ]);
   const stored = Number(call.peak_price_usd) || null;
   const x = peakMultiple(call.price_usd, stored, now, history);
@@ -552,7 +554,7 @@ async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   // Telegram shrinks photos to 1280 px anyway, so a bigger card only makes the upload slower.
   const svg = buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, peakMcap, x, ageText, groupName, art });
   let out = null, tm = '';
-  if (await hasSharp()) {
+  if (CARD_JPG && await hasSharp()) {
     try {
       const raw = await renderRaw(svg, CARD_W);
       const t2 = Date.now();
@@ -560,7 +562,11 @@ async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
       if (jpg) { out = { buf: jpg, name: 'pnl.jpg' }; tm = `setup ${raw.ms.setup}ms, draw ${raw.ms.draw}ms, encode ${Date.now() - t2}ms`; }
     } catch (e) { console.error('card draw error:', e.message); }
   }
-  if (!out) { out = await cardToJpeg(await renderPng(svg, CARD_W, { fast: true })); tm = `draw ${Date.now() - t1}ms`; }
+  if (!out) {
+    const png = await renderPng(svg, CARD_W, { fast: true });
+    out = CARD_JPG ? await cardToJpeg(png) : { buf: png, name: 'pnl.png' };
+    tm = `draw ${Date.now() - t1}ms`;
+  }
   console.log(`pnl card: prepare ${tHist}ms, ${tm}, ${Math.round(out.buf.length / 1024)} KB ${out.name.split('.')[1]}`);
   return { png: out.buf, name: out.name, x };
 }
@@ -1051,7 +1057,7 @@ bot.start({
       { command: 'help', description: 'All commands' },
     ]).catch((e) => console.error('setMyCommands error:', e.message));
     keepDbWarm();
-    hasSharp().then((ok) => console.log(ok ? 'Pictures: sharp is on (small, fast cards)' : 'Pictures: run npm install to switch on small, fast cards'));
+    hasSharp().then((ok) => console.log(CARD_JPG ? (ok ? 'Pictures: JPG mode (small, fast cards)' : 'Pictures: CARD_FORMAT=jpg needs npm install') : 'Pictures: original quality (PNG, picture untouched)'));
     clearOldCache().finally(() => refillArt());
     setInterval(checkAlerts, 60_000);
     setInterval(checkCalls, 90_000);
