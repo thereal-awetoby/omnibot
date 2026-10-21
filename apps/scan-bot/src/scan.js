@@ -296,26 +296,27 @@ export function buildGroupBoardText(board, { label = '24h', groupName = null, no
   if (!board.stats) return `${head}\n\nNo calls in this time. Post a token address and the first person to do it gets the call.`;
   const s = board.stats;
   const medals = ['🥇', '🥈', '🥉'];
-  const lines = [
-    head, '',
-    `📣 Calls: <b>${s.calls}</b>  ·  Callers: <b>${s.callers}</b>`,
-    `📈 Average: <b>${fmtX(s.avg)}</b>  ·  Median: <b>${fmtX(s.median)}</b>  ·  Best: <b>${fmtX(s.best)}</b>`,
-    `🎯 Hit rate  2x: <b>${pct(s.hit2)}</b>  ·  5x: <b>${pct(s.hit5)}</b>`,
-    '', '<b>Top callers</b>',
-  ];
-  board.callers.slice(0, 5).forEach((e, i) => {
-    lines.push(`${medals[i] ?? `${i + 1}.`} <b>${e.name ? esc(e.name) : 'someone'}</b>  ·  avg ${fmtX(e.avg)}  ·  ${e.calls} call${e.calls === 1 ? '' : 's'}  ·  🎯 ${pct(e.hits / e.calls)}`);
-  });
-  lines.push('', '<b>Best calls</b>');
-  board.top.slice(0, 10).forEach((r, i) => {
+  const row = (k, v) => `${k.padEnd(8)}${v}`;
+  const stats = [
+    row('Period', label), row('Calls', s.calls), row('Callers', s.callers),
+    row('Hit 2x', pct(s.hit2)), row('Hit 5x', pct(s.hit5)),
+    row('Median', fmtX(s.median)), row('Average', fmtX(s.avg)), row('Best', fmtX(s.best)),
+  ].map((l, i, all) => `${i === all.length - 1 ? '└' : '├'} ${l}`);
+  const nm = (n) => esc(String(n ?? 'someone').replace(/^@/, '').slice(0, 18));
+  const callers = board.callers.slice(0, 5).map((e, i) =>
+    `${medals[i] ?? `${i + 1}.`} ${nm(e.name)}\n   └ avg ${fmtX(e.avg)} · ${e.calls} call${e.calls === 1 ? '' : 's'} · 🎯 ${pct(e.hits / e.calls)}`);
+  const best = board.top.slice(0, 10).map((r, i) => {
     const sym = esc(r.symbol ? `$${r.symbol}` : `${r.mint.slice(0, 4)}…`);
-    const link = `<a href="https://dexscreener.com/solana/${r.mint}">${sym}</a>`;
     const age = formatDuration(now - new Date(r.created_at).getTime()) ?? '';
-    lines.push(`${medals[i] ?? `${i + 1}.`} ${link} @ ${formatUsd(r.mcap_usd)} → ${formatUsd(r.peakMcap)}  <b>Δ ${fmtX(r.x)}</b>`);
-    lines.push(`      ▲ ${age}  ↦ ${r.caller_name ? esc(r.caller_name) : 'someone'}`);
+    return `${medals[i] ?? `${i + 1}.`} <a href="https://dexscreener.com/solana/${r.mint}"><b>${sym}</b></a>  <code>${formatUsd(r.mcap_usd)} → ${formatUsd(r.peakMcap)}</code>  <b>Δ${fmtX(r.x)}</b>\n   └ ▲ ${age} ↦ ${nm(r.caller_name)}`;
   });
-  lines.push('', '<i>Multiple = the highest the token reached after the call vs the price when it was called.</i>');
-  return lines.join('\n');
+  return [
+    head, '',
+    '📊 <b>Group Stats</b>', `<pre>${stats.join('\n')}</pre>`, '',
+    '👑 <b>Top Callers</b>', `<pre>${callers.join('\n')}</pre>`, '',
+    '🔥 <b>Best Calls</b>', `<blockquote>${best.join('\n')}</blockquote>`, '',
+    '<i>Multiple = the highest the token reached after the call.</i>',
+  ].join('\n');
 }
 
 export function buildUserCallsText(calls, prices, who, now = Date.now()) {

@@ -264,7 +264,7 @@ test('group leaderboard uses the best moment of each call', () => {
   assert.equal(b.stats.calls, 2);
   assert.equal(b.callers[0].name, 'ann');
   const text = buildGroupBoardText(b, { label: '24h', groupName: 'My group', now });
-  assert.match(text, /Δ 5\.0x/);
+  assert.match(text, /Δ5\.0x/);
   assert.match(text, /dexscreener\.com\/solana\//);
   assert.match(buildGroupBoardText(buildGroupBoard([], new Map())), /No calls in this time/);
 });
