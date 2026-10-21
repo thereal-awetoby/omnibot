@@ -204,3 +204,18 @@ export async function getArt({ fetchFn = fetch, dir = DIR } = {}) {
   refillArt({ fetchFn, dir });
   return art;
 }
+
+// For /meme: only real memes (the downloaded stock), never the pictures in backgrounds/mine, which are card backgrounds.
+// If the stock is empty it waits a few seconds for the download to bring some.
+export async function getMeme({ fetchFn = fetch, dir = DIR, waitMs = 9_000 } = {}) {
+  let art = await pickLocalImage(dir);
+  const started = refillArt({ fetchFn, dir });
+  if (art) return art;
+  const stop = Date.now() + waitMs;
+  if (started) await Promise.race([started, new Promise((r) => setTimeout(r, waitMs))]);
+  while (!art && Date.now() < stop) {
+    art = await pickLocalImage(dir);
+    if (!art) await new Promise((r) => setTimeout(r, 600));
+  }
+  return art;
+}

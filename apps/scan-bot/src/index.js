@@ -15,14 +15,15 @@ import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { renderPng, renderRaw } from './bubblemap.js';
-import { getArt, refillArt, clearOldCache, OWN_DIR, sniffMime } from './memeart.js';
+import { getArt, getMeme, refillArt, clearOldCache, OWN_DIR, sniffMime } from './memeart.js';
+import { buildCandleSvg, defaultTf, parseTf, TFS } from './chartimg.js';
 import { shrinkArt, cardToJpeg, rawToJpeg, hasSharp } from './imgfast.js';
-import { buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX } from './ux.js';
+import { buildMyCallsText, buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX } from './ux.js';
 import { mkdir, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
-import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince, generateText } from './sources.js';
+import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince, fetchCandles, generateText } from './sources.js';
 import { formatDuration } from './scan.js';
 import { parseTargets, targetLabel, targetHit, parseDelay, analyzeCloses, buildTaText, TA_FRAMES, fetchCloses, isPublicUrl, stripHtml, parseTranslate, normPeriod, fetchTopCoins, buildHeatmapSvg, buildMoversText, fetchPolymarket, buildPolymarketText, parseAmount, parseEpoch, csvCell } from './extras.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
@@ -401,11 +402,6 @@ async function sendChart(ctx, mint) {
   }
   return ctx.reply('Open the live chart:', { reply_markup: kb });
 }
-bot.command('chart', async (ctx) => {
-  const mint = parseMintInput(ctx.match.trim());
-  if (!mint) return ctx.reply('Usage: /chart <token address>');
-  return sendChart(ctx, mint);
-});
 bot.command('trending', (ctx) => showTrending(ctx));
 
 // Quick commands (the bot's menu). Each takes an address, or works on the message you reply to.
@@ -522,9 +518,9 @@ bot.callbackQuery(/^lb:(\d+|all)$/, async (ctx) => {
 });
 bot.command(['calls', 'groupme'], async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('Call tracking works in groups. Post a token address in your group to make a call.');
-  const calls = await listUserCalls(ctx.chat.id, ctx.from.id, { limit: 10 });
+  const calls = await listUserCalls(ctx.chat.id, ctx.from.id, { limit: 20 });
   const prices = await pricesFor(calls.map((c) => c.mint));
-  return ctx.reply(buildUserCallsText(calls, prices, callerName(ctx.from)), HTML);
+  return ctx.reply(buildMyCallsText(calls, prices, callerName(ctx.from)), { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: new InlineKeyboard().text('🗑', 'x') });
 });
 // A call as a share card: /pnl (your latest call here) or /pnl <address> (whoever called it first).
 // CARD_FORMAT=jpg in .env makes cards smaller and faster to send (slightly softer). The default is the original: the picture untouched, the card saved as a lossless PNG.
@@ -590,7 +586,7 @@ bot.command('pnl', async (ctx) => {
   return replyPnl(ctx, { ...call, chat_id: call.chat_id ?? ctx.chat.id });
 });
 bot.command('meme', async (ctx) => {
-  const art = await getArt().catch(() => null);
+  const art = await getMeme().catch(() => null); // real memes only, never the pictures in your PnL backgrounds folder
   if (!art) return ctx.reply('No meme right now, try again in a moment.');
   const extra = art.title ? { caption: esc(art.title), parse_mode: 'HTML' } : {};
   return ctx.replyWithPhoto(new InputFile(art.buf, art.mime === 'image/png' ? 'meme.png' : 'meme.jpg'), extra);
@@ -674,6 +670,55 @@ bot.callbackQuery(/^hm:(1h|24h|7d|30d):(\d{2,3})$/, async (ctx) => {
     if (!r) return;
     await ctx.editMessageMedia({ type: 'photo', media: new InputFile(r.buf, r.name), caption: r.caption, parse_mode: 'HTML' }, { reply_markup: hmKeyboard(period, count) });
   } catch (e) { if (!/not modified/i.test(e.message)) console.error('heatmap button error:', e.message); }
+});
+// Candlestick chart in market cap (like Rick and Phanes): /chart <address> [1m 5m 15m 1h 4h 1d]. Falls back to the old line chart.
+const TF_ROW = ['1m', '5m', '15m', '1h', '4h', '1d'];
+const CANDLES_SHOWN = 120;
+const chartKeyboard = (mint, tf) => {
+  const kb = new InlineKeyboard();
+  TF_ROW.forEach((t) => kb.text(t === tf ? `• ${t}` : t, `ch:${t}:${mint}`));
+  return kb.row().url('DexScreener', `https://dexscreener.com/solana/${mint}`).url('Birdeye', `https://birdeye.so/token/${mint}?chain=solana`)
+    .row().url('GMGN', `https://gmgn.ai/sol/token/${mint}`).url('Solscan', `https://solscan.io/token/${mint}`).row().text('🗑', 'x');
+};
+async function chartPhoto(mint, tf, chat) {
+  const m = await getMarket(mint);
+  if (!m?.pairAddress) return null;
+  const use = tf ?? defaultTf(typeof m.createdAt === 'number' ? Date.now() - m.createdAt : null);
+  const [frame, aggregate] = TFS[use];
+  const [candles, first] = await Promise.all([
+    fetchCandles({ pairAddress: m.pairAddress, mint, frame, aggregate, limit: CANDLES_SHOWN }),
+    chat && (chat.type === 'group' || chat.type === 'supergroup') ? getFirstCall(chat.id, mint).catch(() => null) : null,
+  ]);
+  if (!candles) return null;
+  const scale = m.marketCapUsd > 0 && m.priceUsd > 0 ? m.marketCapUsd / m.priceUsd : null;
+  const call = first ? { at: new Date(first.created_at).getTime(), name: String(first.caller_name ?? '').replace(/^@/, '') } : null;
+  const svg = buildCandleSvg({ candles, scale, symbol: m.symbol ?? '', tf: use, call, started: candles.length < CANDLES_SHOWN });
+  const png = await renderPng(svg, 1280, { fast: true });
+  const { buf, name } = await cardToJpeg(png, 93);
+  const k = scale ?? 1;
+  const ath = Math.max(...candles.map((c) => c.h)) * k;
+  const label = m.symbol ? '$' + esc(m.symbol) : short(mint);
+  const caption = `📈 <b>${label}</b> · ${use}${scale ? ` · MC ${formatUsd(m.marketCapUsd)} · ATH ${formatUsd(ath)}` : ''}${first ? `\n🥇 First call: ${esc(String(first.caller_name ?? 'someone'))}${first.mcap_usd ? ` @ ${formatUsd(first.mcap_usd)}` : ''}` : ''}`;
+  return { buf, name, caption, tf: use };
+}
+bot.command(['chart', 'c'], async (ctx) => {
+  const args = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean);
+  const tf = parseTf(args);
+  const rest = args.filter((a) => !(a.toLowerCase() in TFS)).join(' ');
+  const mint = parseMintInput(rest) ?? extractMint(ctx.message?.reply_to_message?.text ?? ctx.message?.reply_to_message?.caption ?? '');
+  if (!mint) return ctx.reply('Usage: /chart <token address> [1m 5m 15m 1h 4h 1d]\nOr reply to a message that has the address.');
+  let r = null;
+  try { r = await withTyping(ctx, () => chartPhoto(mint, tf, ctx.chat), 'upload_photo'); } catch (e) { console.error('chart error:', e.message); }
+  if (!r) return sendChart(ctx, mint);
+  return ctx.replyWithPhoto(new InputFile(r.buf, r.name), { caption: r.caption, parse_mode: 'HTML', reply_markup: chartKeyboard(mint, r.tf) });
+});
+bot.callbackQuery(/^ch:(1m|5m|15m|1h|4h|1d):([1-9A-HJ-NP-Za-km-z]{32,44})$/, async (ctx) => {
+  await ctx.answerCallbackQuery().catch(() => {});
+  try {
+    const r = await chartPhoto(ctx.match[2], ctx.match[1], ctx.chat);
+    if (!r) return;
+    await ctx.editMessageMedia({ type: 'photo', media: new InputFile(r.buf, r.name), caption: r.caption, parse_mode: 'HTML' }, { reply_markup: chartKeyboard(ctx.match[2], r.tf) });
+  } catch (e) { if (!/not modified/i.test(e.message)) console.error('chart button error:', e.message); }
 });
 const movers = (dir) => async (ctx) => {
   const args = (ctx.match ?? '').toLowerCase().split(/\s+/).filter(Boolean);
@@ -1038,6 +1083,7 @@ bot.start({
       { command: 'last', description: 'Last calls in the group' },
       { command: 'ta', description: 'Technical read of a token' },
       { command: 'target', description: 'Alert me at 3x, 4x, -50%...' },
+      { command: 'chart', description: 'Candlestick chart (1m 5m 1h...)' },
       { command: 'targets', description: 'Your price alerts' },
       { command: 'untarget', description: 'Remove price alerts' },
       { command: 'remindme', description: 'Reminder to you (private)' },

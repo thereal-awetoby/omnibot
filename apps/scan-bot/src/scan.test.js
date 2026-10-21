@@ -268,3 +268,11 @@ test('group leaderboard uses the best moment of each call', () => {
   assert.match(text, /dexscreener\.com\/solana\//);
   assert.match(buildGroupBoardText(buildGroupBoard([], new Map())), /No calls in this time/);
 });
+
+test('scan card: the curve fill % is shown even when RugCheck reports a lock, and when the price is unknown', () => {
+  const market = { symbol: 'GRO', name: 'Groyper', priceUsd: null, marketCapUsd: null, liquidityUsd: null, dex: 'pump.fun curve', change: {}, volume: {} };
+  const intel = { curve: { complete: false, progressPct: 41.6, liquidityUsd: null }, lpLockedPct: 100, holdersTotal: 132 };
+  const t = buildScanCard({ mint: 'ARAxPf4ZEmaP95W5oJPocTinBgmYXCEAcy4ZW4iMpump', market, intel });
+  assert.match(t, /Bonding curve<\/b> · 42% filled/);
+  assert.doesNotMatch(t, /locked\/burned/);
+});

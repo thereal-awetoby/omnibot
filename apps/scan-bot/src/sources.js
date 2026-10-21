@@ -198,6 +198,23 @@ export async function fetchPriceSeries({ pairAddress, mint }, fetchImpl = fetch,
   }
 }
 
+// Candles for a pool: [{ t (s), o, h, l, c, v }] oldest first, or null. frame = minute | hour | day.
+export async function fetchCandles({ pairAddress, mint, frame, aggregate = 1, limit = 150 }, fetchImpl = fetch, now = Date.now()) {
+  if (!pairAddress || now < geckoPausedUntil) return null;
+  try {
+    const res = await fetchImpl(`https://api.geckoterminal.com/api/v2/networks/solana/pools/${pairAddress}/ohlcv/${frame}?aggregate=${aggregate}&limit=${limit}&currency=usd&token=${mint}`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(8_000) });
+    if (res.status === 429) { geckoPausedUntil = now + 60_000; throw new Error('GeckoTerminal rate limit, pausing 60s'); }
+    if (!res.ok) throw new Error(`GeckoTerminal returned HTTP ${res.status}`);
+    const list = (await res.json())?.data?.attributes?.ohlcv_list;
+    const out = (Array.isArray(list) ? list : []).map((r) => ({ t: num(r?.[0]), o: num(r?.[1]), h: num(r?.[2]), l: num(r?.[3]), c: num(r?.[4]), v: num(r?.[5]) ?? 0 }))
+      .filter((k) => k.t !== null && k.o > 0 && k.h > 0 && k.l > 0 && k.c > 0).sort((a, b) => a.t - b.t);
+    return out.length >= 2 ? out : null;
+  } catch (e) {
+    console.error('candles error:', e.message);
+    return null;
+  }
+}
+
 // A picture URL Telegram can fetch: QuickChart draws the line chart as a PNG.
 export function buildChartUrl(points, title) {
   const up = points.at(-1).c >= points[0].c;

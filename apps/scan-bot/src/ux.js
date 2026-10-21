@@ -85,3 +85,36 @@ export function buildHelpText() {
   ].join('\n\n');
 }
 export { formatPriceCard };
+
+// /calls: one summary block, then every call in a quote block (collapsed after a few lines).
+// calls: newest first, { mint, symbol, price_usd, mcap_usd, peak_price_usd, created_at }; prices: Map(mint -> { priceUsd }).
+export function buildMyCallsText(calls, prices, who, now = Date.now()) {
+  if (!calls.length) return 'You have no calls in this group yet. Post a token address that nobody has called.';
+  const rows = calls.map((c) => {
+    const entry = Number(c.price_usd) || 0;
+    const nowP = prices.get(c.mint)?.priceUsd ?? null;
+    const best = Math.max(Number(c.peak_price_usd) || 0, nowP || 0);
+    return { c, x: entry && nowP ? nowP / entry : null, ath: entry && best ? Math.max(1, best / entry) : null };
+  });
+  const known = rows.filter((r) => r.x !== null);
+  const pnl = known.length ? (known.reduce((a, r) => a + (r.x - 1), 0) / known.length) * 100 : null;
+  const green = known.filter((r) => r.x > 1.0005).length;
+  const red = known.filter((r) => r.x < 0.9995).length;
+  const aths = rows.filter((r) => r.ath !== null);
+  const avgAth = aths.length ? aths.reduce((a, r) => a + r.ath, 0) / aths.length : null;
+  const top = aths.length ? aths.reduce((a, b) => (b.ath > a.ath ? b : a)) : null;
+  const hit = aths.length ? (aths.filter((r) => r.ath >= 2).length / aths.length) * 100 : null;
+  const pctTxt = (v) => (v === null ? 'n/a' : `${v >= 0 ? '+' : ''}${v.toFixed(Math.abs(v) >= 100 ? 0 : 0)}%`);
+  const stats = tree([
+    ['PNL', `${pctTxt(pnl)} (${green} 🟢 / ${red} 🔴)`],
+    ['ATH', avgAth ? `${fmtX(avgAth)} avg` : 'n/a'],
+    ['Best', top ? `${sym(top.c)} ${fmtX(top.ath)}` : 'n/a'],
+    ['Hit', hit === null ? 'n/a' : `${hit.toFixed(0)}% ≥2x`],
+  ]);
+  const list = rows.map(({ c, x, ath }) => {
+    const age = ago(now - new Date(c.created_at).getTime());
+    const cur = x === null ? 'n/a' : `${x >= 1 ? '+' : ''}${((x - 1) * 100).toFixed(0)}%`;
+    return `<b>${esc(sym(c))}</b> @ ${formatUsd(c.mcap_usd)} <i>(${age})</i>\n└ Now ${x === null ? '' : x >= 1 ? '🟢' : '🔴'} <b>${cur}</b> | ATH <b>${ath ? fmtX(ath) : '-'}</b>`;
+  });
+  return `📣 <b>Last ${calls.length} Call${calls.length === 1 ? '' : 's'}</b> · ${esc(String(who ?? 'you').replace(/^@/, ''))}\n<pre>${esc(stats)}</pre>\n<blockquote expandable>${list.join('\n')}</blockquote>`;
+}

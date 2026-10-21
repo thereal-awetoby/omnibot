@@ -28,7 +28,7 @@ export async function gatherIntel(mint, market, pre = startIntel(mint)) {
   const athP = market ? within(fetchAth({ pairAddress: market.pairAddress, mint, createdAt: market.createdAt }), 2_500) : Promise.resolve(null);
   // The dev is the creator stored on-chain (pump.fun); RugCheck's creator is only the fallback.
   const creatorP = Promise.all([within(getCurveCreator(mint), 3_000), rugP]).then(([curve, rug]) => curve ?? rug?.creator ?? null);
-  const curveP = market?.priceUsd > 0 ? within(getCurveState(mint, market.priceUsd), 3_500) : Promise.resolve(null);
+  const curveP = within(getCurveState(mint, market?.priceUsd ?? 0), 3_500); // the fill % needs no price, so it is read even when the price is unknown
   const holdersP = rugP.then((rug) => (typeof rug?.totalHolders === 'number' ? null : within(fetchHolderCount(mint).then((n) => n ?? getHolderCount(mint)), 5_000)));
   const devP = Promise.all([creatorP, securityP]).then(([creator, sec]) => within(getDevHolding(creator, mint, sec?.supply), 3_000));
   const freshP = securityP.then((sec) => within(getFreshWallets(sec?.top), 3_000));

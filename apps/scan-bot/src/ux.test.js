@@ -53,3 +53,17 @@ test('help lists every section and every html tag is closed', () => {
   assert.equal((h.match(/<blockquote>/g) ?? []).length, (h.match(/<\/blockquote>/g) ?? []).length);
   assert.ok(h.length < 4000);
 });
+
+import { buildMyCallsText } from './ux.js';
+test('calls: summary block, then every call in a collapsible quote', () => {
+  const mk = (symbol, entry, mcap, peak, hoursAgo) => ({ symbol, mint: symbol.padEnd(32, 'A'), price_usd: entry, mcap_usd: mcap, peak_price_usd: peak, created_at: new Date(now - hoursAgo * 3_600_000) });
+  const calls = [mk('DREAM', 1, 3220, 1.1, 4), mk('SPCX', 1, 15530, 3.3, 41), mk('DITTO', 1, 3100, 1, 9)];
+  const prices = new Map([[calls[0].mint, { priceUsd: 0.93 }], [calls[1].mint, { priceUsd: 0.32 }], [calls[2].mint, { priceUsd: 1 }]]);
+  const t = buildMyCallsText(calls, prices, '@Davidtobyawe', now);
+  assert.match(t, /Last 3 Calls/);
+  assert.match(t, /PNL\s+-\d+% \(0 🟢 \/ 2 🔴\)/);
+  assert.match(t, /Best\s+\$SPCX 3\.30x/);
+  assert.match(t, /Hit\s+33% ≥2x/);
+  assert.match(t, /<blockquote expandable>[\s\S]*<b>\$DREAM<\/b> @ \$3\.22K[\s\S]*Now 🔴 <b>-7%<\/b> \| ATH <b>1\.10x<\/b>/);
+  assert.equal(buildMyCallsText([], new Map(), 'x'), 'You have no calls in this group yet. Post a token address that nobody has called.');
+});

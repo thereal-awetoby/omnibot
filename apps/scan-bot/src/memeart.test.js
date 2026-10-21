@@ -105,3 +105,18 @@ test('your own folder: every picture once per round, never deleted', async () =>
   assert.ok(await pickOwnImage(dir));               // next round starts again
   assert.equal((await readdir(dir)).length, 2);     // nothing moved or removed
 });
+
+import { getMeme } from './memeart.js';
+test('getMeme never hands out the pictures from your own backgrounds folder', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'meme-'));
+  await mkdir(join(dir, 'mine'), { recursive: true });
+  await writeFile(join(dir, 'mine', 'mine.jpg'), JPG);
+  await mkdir(join(dir, 'cache'), { recursive: true });
+  await writeFile(join(dir, 'cache', 'meme1.jpg'), Buffer.concat([JPG, Buffer.from('meme-one')]));
+  const noNet = async () => { throw new Error('offline'); };
+  const a = await getMeme({ dir, fetchFn: noNet, waitMs: 300 });
+  assert.ok(a && a.source !== 'mine' && a.buf.includes(Buffer.from('meme-one')));
+  const b = await getMeme({ dir, fetchFn: noNet, waitMs: 300 }); // the stock is empty now: nothing, and certainly not mine.jpg
+  assert.equal(b, null);
+  assert.equal((await readdir(join(dir, 'mine'))).length, 1);
+});
