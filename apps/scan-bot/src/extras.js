@@ -26,31 +26,36 @@ export async function fetchTopCoins({ fetchFn = fetch, now = Date.now() } = {}) 
   return list;
 }
 
-const SCALE = { '1h': 3, '24h': 8, '7d': 20, '14d': 30, '30d': 40, '1y': 150 };
+const SCALE = { '1h': 2, '24h': 5, '7d': 12, '14d': 20, '30d': 30, '1y': 100 };
 export function heatColor(pct, period = '24h') {
   if (pct == null) return '#3a3f4b';
-  const t = Math.max(-1, Math.min(1, pct / (SCALE[period] ?? 8)));
-  const mix = (a, b, k) => Math.round(a + (b - a) * k);
-  const base = [44, 48, 58];
-  const to = t >= 0 ? [22, 163, 74] : [220, 38, 38];
-  const k = Math.min(1, Math.abs(t) * 1.15);
-  return `rgb(${mix(base[0], to[0], k)},${mix(base[1], to[1], k)},${mix(base[2], to[2], k)})`;
+  const t = Math.max(-1, Math.min(1, pct / (SCALE[period] ?? 5)));
+  const k = Math.sqrt(Math.abs(t)); // small moves already show a clear colour
+  const from = [58, 63, 75], to = t >= 0 ? [18, 184, 82] : [226, 54, 62];
+  const mix = (i) => Math.round(from[i] + (to[i] - from[i]) * k);
+  return `rgb(${mix(0)},${mix(1)},${mix(2)})`;
 }
 const fmtPct = (p) => (p == null ? 'n/a' : `${p >= 0 ? '+' : ''}${Math.abs(p) >= 100 ? p.toFixed(0) : p.toFixed(1)}%`);
 
-// Treemap: the bigger the market cap, the bigger the square; green up, red down.
+// Treemap: the bigger the market cap, the bigger the square (square-rooted, so Bitcoin does not swallow the screen); green up, red down.
 export function buildHeatmapSvg(coins, period = '24h', title = 'Crypto heatmap', W = 1280, H = 720) {
   const top = 56;
-  const root = hierarchy({ children: coins.map((c) => ({ ...c, value: c.mcap })) }).sum((d) => d.value ?? 0).sort((a, b) => b.value - a.value);
-  treemap().tile(treemapSquarify).size([W, H - top]).paddingInner(3).round(true)(root);
+  const root = hierarchy({ children: coins.map((c) => ({ ...c, value: Math.sqrt(c.mcap) })) }).sum((d) => d.value ?? 0).sort((a, b) => b.value - a.value);
+  treemap().tile(treemapSquarify).size([W, H - top]).paddingInner(2).round(true)(root);
   const f = 'font-family="Arial, Helvetica, sans-serif"';
   const cells = root.leaves().map((n) => {
     const w = n.x1 - n.x0, h = n.y1 - n.y0, c = n.data;
     const pct = c.change[period];
-    const fs = Math.max(9, Math.min(54, Math.min(w / (c.symbol.length * 0.72), h / 2.4)));
-    const show = w > 34 && h > 24;
-    const label = show ? `<text x="${n.x0 + w / 2}" y="${n.y0 + h / 2 + (h > 60 ? 0 : fs * 0.35)}" text-anchor="middle" ${f} font-size="${fs.toFixed(0)}" font-weight="700" fill="#fff">${esc(c.symbol)}</text>${h > 60 ? `<text x="${n.x0 + w / 2}" y="${n.y0 + h / 2 + fs * 0.95}" text-anchor="middle" ${f} font-size="${Math.max(9, fs * 0.5).toFixed(0)}" fill="#fff" fill-opacity="0.92">${fmtPct(pct)}</text>` : ''}` : '';
-    return `<rect x="${n.x0}" y="${n.y0 + top}" width="${w}" height="${h}" fill="${heatColor(pct, period)}"/>${label.replace(/y="([\d.]+)"/g, (_, y) => `y="${(Number(y) + top).toFixed(1)}"`)}`;
+    const cx = n.x0 + w / 2, cy = n.y0 + top + h / 2;
+    const fs = Math.max(8, Math.min(46, Math.min(w / (c.symbol.length * 0.8), h / 2.1)));
+    const showSym = w > 22 && h > 14;
+    const showPct = showSym && h > 34 && w > 40;
+    let label = '';
+    if (showSym) {
+      label = `<text x="${cx}" y="${(showPct ? cy - fs * 0.05 : cy + fs * 0.35).toFixed(1)}" text-anchor="middle" ${f} font-size="${fs.toFixed(0)}" font-weight="700" fill="#fff">${esc(c.symbol)}</text>`;
+      if (showPct) label += `<text x="${cx}" y="${(cy + fs * 0.85).toFixed(1)}" text-anchor="middle" ${f} font-size="${Math.max(8, fs * 0.5).toFixed(0)}" fill="#fff" fill-opacity="0.95">${fmtPct(pct)}</text>`;
+    }
+    return `<rect x="${n.x0}" y="${n.y0 + top}" width="${w}" height="${h}" fill="${heatColor(pct, period)}"/>${label}`;
   });
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><rect width="${W}" height="${H}" fill="#0b0f17"/>`,
@@ -78,19 +83,20 @@ export function parsePolymarket(body, term = '', limit = 6) {
   }).filter((m) => m.question && m.slug && m.outcomes.length && m.prices.length === m.outcomes.length && (!t || m.question.toLowerCase().includes(t))).slice(0, limit);
 }
 export async function fetchPolymarket(term, { fetchFn = fetch } = {}) {
-  const res = await fetchFn('https://gamma-api.polymarket.com/markets?limit=200&active=true&closed=false&order=volume24hr&ascending=false', { signal: AbortSignal.timeout(10_000) });
+  const res = await fetchFn('https://gamma-api.polymarket.com/markets?limit=500&active=true&closed=false&order=volume24hr&ascending=false', { signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`Polymarket returned HTTP ${res.status}`);
   return parsePolymarket(await res.json(), term);
 }
-export function buildPolymarketText(list, term) {
-  if (!list.length) return `No active Polymarket market found${term ? ` for "${esc(term)}"` : ''}.`;
+export function buildPolymarketText(list, term, now = Date.now()) {
+  if (!list.length) return `🎲 <b>Polymarket</b>\n\nNo active market found${term ? ` for "${esc(term)}"` : ''}.`;
   const vol = (v) => (v >= 1e6 ? `$${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `$${(v / 1e3).toFixed(0)}K` : `$${v.toFixed(0)}`);
-  const lines = [`🎲 <b>Polymarket</b>${term ? ` · ${esc(term)}` : ' · most traded today'}`, ''];
-  for (const m of list) {
-    const odds = m.outcomes.map((o, i) => `${esc(o)} <b>${Math.round(m.prices[i] * 100)}%</b>`).join('  ·  ');
-    lines.push(`<a href="https://polymarket.com/market/${encodeURIComponent(m.slug)}">${esc(m.question)}</a>`, `   ${odds}  ·  ${vol(m.volume24h)} 24h`);
-  }
-  return lines.join('\n');
+  const ends = (d) => { const t = d ? new Date(d).getTime() : NaN; if (!Number.isFinite(t) || t < now) return null; const days = Math.floor((t - now) / 864e5); return days >= 1 ? `${days}d` : `${Math.max(1, Math.floor((t - now) / 36e5))}h`; };
+  const items = list.map((m, i) => {
+    const odds = m.outcomes.slice(0, 3).map((o, k) => `${esc(o)} <b>${Math.round(m.prices[k] * 100)}%</b>`).join('  ·  ');
+    const e = ends(m.endDate);
+    return `${i + 1}. <a href="https://polymarket.com/market/${encodeURIComponent(m.slug)}">${esc(m.question)}</a>\n   ${odds}\n   Vol ${vol(m.volume24h)} 24h${e ? ` · ends in ${e}` : ''}`;
+  });
+  return `🎲 <b>Polymarket</b>${term ? ` · ${esc(term)}` : ' · most traded'}\n<blockquote>${items.join('\n\n')}</blockquote>`;
 }
 
 // ---------- /v convert ----------

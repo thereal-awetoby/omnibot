@@ -171,8 +171,35 @@ export function refillArt({ fetchFn = fetch, dir = DIR } = {}) {
   })();
 }
 
+// Your own picture folder (backgrounds/mine): every picture is shown once per round, in random order, and then the round starts again.
+// These are pictures you chose, so they are reused; nothing is moved or deleted.
+const rounds = new Map(); // dir -> Set of file names already shown in this round
+export async function pickOwnImage(dir = join(DIR, 'mine')) {
+  let files = [];
+  try { files = (await readdir(dir)).filter((f) => /\.(jpe?g|png|webp)$/i.test(f)); } catch { return null; }
+  if (!files.length) return null;
+  let used = rounds.get(dir) ?? new Set();
+  let left = files.filter((f) => !used.has(f));
+  if (!left.length) { used = new Set(); left = files; }
+  while (left.length) {
+    const i = Math.floor(Math.random() * left.length);
+    const f = left.splice(i, 1)[0];
+    used.add(f);
+    try {
+      const buf = await readFile(join(dir, f));
+      const mime = sniffMime(buf);
+      if (mime && buf.length <= 15_000_000) { rounds.set(dir, used); return { buf, mime, title: null, source: 'mine' }; }
+    } catch { /* try another */ }
+  }
+  rounds.set(dir, used);
+  return null;
+}
+export const OWN_DIR = join(DIR, 'mine');
+
 // Instant. A picture that was never used before, or null (the card is then plain: a picture is never reused).
 export async function getArt({ fetchFn = fetch, dir = DIR } = {}) {
+  const mine = await pickOwnImage(join(dir, 'mine'));
+  if (mine) return mine; // your own folder wins; nothing is downloaded
   const art = await pickLocalImage(dir);
   refillArt({ fetchFn, dir });
   return art;

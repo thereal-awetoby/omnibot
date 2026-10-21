@@ -280,6 +280,7 @@ export function buildGroupBoard(calls, prices) {
   const xs = rows.map((r) => r.x);
   const n = rows.length;
   return {
+    rows,
     stats: n ? {
       calls: n, callers: by.size, avg: xs.reduce((a, b) => a + b, 0) / n, median: median(xs), best: Math.max(...xs),
       hit2: xs.filter((v) => v >= 2).length / n, hit5: xs.filter((v) => v >= 5).length / n,

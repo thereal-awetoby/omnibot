@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { imageSize, sniffMime, parseMemePosts, pickLocalImage, fetchMemeBatch, getArt, clearOldCache } from './memeart.js';
+import { imageSize, sniffMime, parseMemePosts, pickLocalImage, fetchMemeBatch, getArt, clearOldCache, pickOwnImage } from './memeart.js';
 
 const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(40)]);
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(40)]);
@@ -92,4 +92,16 @@ test('clearOldCache works without arguments and clears saved memes once', async 
   await writeFile(join(dir, 'cache', 'new.png'), PNG);
   await clearOldCache(dir); // second time: leaves new files alone
   assert.deepEqual((await readdir(join(dir, 'cache'))).sort(), ['.original-sources', 'new.png']);
+});
+
+test('your own folder: every picture once per round, never deleted', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mine-'));
+  assert.equal(await pickOwnImage(dir), null);
+  await writeFile(join(dir, 'a.png'), PNG);
+  await writeFile(join(dir, 'b.png'), Buffer.concat([PNG, Buffer.from([1])]));
+  const seen = new Set();
+  for (let i = 0; i < 2; i++) seen.add((await pickOwnImage(dir)).buf.length);
+  assert.equal(seen.size, 2);                       // both shown before any repeats
+  assert.ok(await pickOwnImage(dir));               // next round starts again
+  assert.equal((await readdir(dir)).length, 2);     // nothing moved or removed
 });

@@ -15,7 +15,11 @@ import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { renderPng } from './bubblemap.js';
-import { getArt, refillArt, clearOldCache } from './memeart.js';
+import { getArt, refillArt, clearOldCache, OWN_DIR, sniffMime } from './memeart.js';
+import { shrinkArt, cardToJpeg, hasSharp } from './imgfast.js';
+import { buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX } from './ux.js';
+import { mkdir, writeFile, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince, generateText } from './sources.js';
@@ -373,9 +377,7 @@ async function doUnwatch(ctx, mint, { edit = false } = {}) {
 }
 
 bot.command('start', showHome);
-bot.command('help', (ctx) => ctx.reply(
-  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard 1h | 20 minutes | 1 week | 1 month | all  /calls  /pnl  (groups)\n/meme  random crypto meme\n/fc  /last  /elb  (groups: first caller, last calls, export)\n/hm [count] [period]  heatmap\n/best  /worst [period]\n/poly <term>  Polymarket\n/v <amount|%> <token>\n/userid  /chatid  /flip  /epoch\n/target <address> 3x 4x  alert me at a multiple (/targets, /untarget)\n/remindme 30m <text>  /listreminders  /nevermind <id>\n/ta <address>  technical read\n/tr <text> [-fr]  /tldr <text or link>  /eli5 <text>\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
-));
+bot.command('help', (ctx) => ctx.reply(buildHelpText(), { ...HTML, reply_markup: new InlineKeyboard().text('🗑', 'x') }));
 bot.command('token', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
   if (!mint) return ctx.reply('Usage: /token <token address>');
@@ -541,29 +543,31 @@ async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   const peakMcap = call.mcap_usd ? call.mcap_usd * x : (p?.marketCapUsd && now ? p.marketCapUsd * (peakPrice / now) : null);
   const ageText = formatDuration(Date.now() - calledAt);
   const tHist = Date.now() - t0;
-  const art = await getArt().catch(() => null); // instant: a saved or ready meme, never waits for the internet
+  const art = await shrinkArt(await getArt().catch(() => null)); // instant: your folder or a saved meme, never waits for the internet
   const t1 = Date.now();
   // Telegram shrinks photos to 1280 px anyway, so a bigger card only makes the upload slower.
   const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, peakMcap, x, ageText, groupName, art }), 1280, { fast: true });
-  console.log(`pnl card: history ${tHist}ms, draw ${Date.now() - t1}ms, ${Math.round(png.length / 1024)} KB`);
-  return { png, x };
+  const out = await cardToJpeg(png);
+  console.log(`pnl card: history ${tHist}ms, draw ${Date.now() - t1}ms, ${Math.round(out.buf.length / 1024)} KB ${out.name.split('.')[1]}`);
+  return { png: out.buf, name: out.name, x };
+}
+async function replyPnl(ctx, call) {
+  const tB = Date.now();
+  const prices = await pricesFor([call.mint]);
+  const tPrice = Date.now() - tB;
+  const r = await pnlPng(call, prices, ctx.chat.title);
+  if (!r) return ctx.reply('No price found for that token right now.');
+  const tC = Date.now();
+  const sent = await ctx.replyWithPhoto(new InputFile(r.png, r.name), { caption: buildPnlCaption({ symbol: call.symbol, callerName: call.caller_name, x: r.x }), parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('🗑', 'x') });
+  console.log(`/pnl: price ${tPrice}ms, upload ${Date.now() - tC}ms`);
+  return sent;
 }
 bot.command('pnl', async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('PnL cards work in groups. Post a token address in your group to make a call, then send /pnl there.');
   const mint = parseMintInput(ctx.match);
-  const tA = Date.now();
   const call = mint ? await getFirstCall(ctx.chat.id, mint) : (await listUserCalls(ctx.chat.id, ctx.from.id, { limit: 1 }))[0];
-  const tDb = Date.now() - tA;
   if (!call) return ctx.reply(mint ? 'I have no call for that token in this group. I only count tokens posted here after I joined, so post the address once and I will track it from then.' : 'You have no calls in this group yet. Post a token address that nobody has called.');
-  const tB = Date.now();
-  const prices = await pricesFor([call.mint]);
-  const tPrice = Date.now() - tB;
-  const r = await pnlPng({ ...call, chat_id: call.chat_id ?? ctx.chat.id }, prices, ctx.chat.title);
-  if (!r) return ctx.reply('No price found for that token right now.');
-  const tC = Date.now();
-  const sent = await ctx.replyWithPhoto(new InputFile(r.png, 'pnl.png'), { caption: buildPnlCaption({ symbol: call.symbol, callerName: call.caller_name, x: r.x }), parse_mode: 'HTML' });
-  console.log(`/pnl: database ${tDb}ms, price ${tPrice}ms, upload ${Date.now() - tC}ms`);
-  return sent;
+  return replyPnl(ctx, { ...call, chat_id: call.chat_id ?? ctx.chat.id });
 });
 bot.command('meme', async (ctx) => {
   const art = await getArt().catch(() => null);
@@ -573,23 +577,35 @@ bot.command('meme', async (ctx) => {
 });
 
 // ---- Extra commands: group tools, market, converters, small utilities ----
+const MINT_RE = '([1-9A-HJ-NP-Za-km-z]{32,44})';
+const KB_DEL = new InlineKeyboard().text('🗑', 'x');
 const firstMint = (ctx) => parseMintInput((ctx.match ?? '').trim()) ?? extractMint(ctx.message?.reply_to_message?.text ?? ctx.message?.reply_to_message?.caption ?? '');
-const callLabel = (c) => (c.symbol ? `$${esc(c.symbol)}` : `<code>${short(c.mint)}</code>`);
 bot.command('fc', async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('This works in groups: it shows who called a token first.');
   const mint = firstMint(ctx);
   if (!mint) return ctx.reply('Usage: /fc <token address>, or reply to a message that has one.');
   const c = await getFirstCall(ctx.chat.id, mint);
   if (!c) return ctx.reply('Nobody has called that token in this group yet (I only count tokens posted here after I joined).');
-  const age = formatDuration(Date.now() - new Date(c.created_at).getTime()) ?? '';
-  return ctx.reply(`🥇 <b>First call</b>  ${callLabel(c)}\nBy <b>${c.caller_name ? esc(c.caller_name) : 'someone'}</b>  ·  ${age} ago\nCalled at ${formatUsd(c.mcap_usd)}`, HTML);
+  const p = (await pricesFor([mint])).get(mint);
+  const best = Math.max(0, Number(c.peak_price_usd) || 0, p?.priceUsd || 0);
+  const roi = p?.priceUsd && c.price_usd ? p.priceUsd / c.price_usd : null;
+  const athX = best && c.price_usd ? Math.max(1, best / c.price_usd) : null;
+  return ctx.reply(buildFcText({ call: c, nowMcap: p?.marketCapUsd ?? null, roi, athX }), { ...HTML, reply_markup: new InlineKeyboard().text('📸 PnL card', `pnl:${mint}`).text('🗑', 'x') });
+});
+bot.callbackQuery(new RegExp(`^pnl:${MINT_RE}$`), async (ctx) => {
+  await ctx.answerCallbackQuery().catch(() => {});
+  if (!isGroup(ctx)) return;
+  const call = await getFirstCall(ctx.chat.id, ctx.match[1]);
+  if (!call) return;
+  return replyPnl(ctx, { ...call, chat_id: call.chat_id ?? ctx.chat.id });
 });
 bot.command('last', async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('This works in groups.');
   const calls = await listChatCalls(ctx.chat.id, { seconds: 20 * 365 * 86400, limit: 10 });
-  if (!calls.length) return ctx.reply('No calls in this group yet.');
-  const lines = calls.map((c, i) => `${String(i + 1).padStart(2)}. ${callLabel(c)}  ${formatUsd(c.mcap_usd)}  ·  ${c.caller_name ? esc(c.caller_name) : 'someone'}  ·  ${formatDuration(Date.now() - new Date(c.created_at).getTime()) ?? ''} ago`);
-  return ctx.reply(`🕘 <b>Last calls</b>\n<blockquote>${lines.join('\n')}</blockquote>`, HTML);
+  if (!calls.length) return ctx.reply(buildLastText([]), HTML);
+  const board = buildGroupBoard(calls, await pricesFor(calls.map((c) => c.mint)));
+  const rows = [...board.rows].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  return ctx.reply(buildLastText(rows), { ...HTML, reply_markup: KB_DEL });
 });
 bot.command('elb', async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('This works in groups.');
@@ -602,22 +618,49 @@ bot.command('elb', async (ctx) => {
   const csv = '\ufeff' + rows.map((r) => r.map(csvCell).join(',')).join('\n');
   return ctx.replyWithDocument(new InputFile(Buffer.from(csv, 'utf8'), 'leaderboard.csv'), { caption: `Leaderboard export · ${period.label}` });
 });
+
+// Heatmap with buttons: period and number of coins change the same picture.
+const HM_PERIODS = [['1H', '1h'], ['24H', '24h'], ['7D', '7d'], ['30D', '30d']];
+const HM_COUNTS = [30, 50, 100];
+const hmKeyboard = (period, count) => {
+  const kb = new InlineKeyboard();
+  for (const [label, p] of HM_PERIODS) kb.text(p === period ? `• ${label}` : label, `hm:${p}:${count}`);
+  kb.row();
+  for (const n of HM_COUNTS) kb.text(n === count ? `• Top ${n}` : `Top ${n}`, `hm:${period}:${n}`);
+  return kb.row().text('🗑', 'x');
+};
+async function heatmapPhoto(period, count) {
+  const coins = await fetchTopCoins();
+  if (!coins.length) return null;
+  const shown = Math.min(count, coins.length);
+  const png = await renderPng(buildHeatmapSvg(coins.slice(0, shown), period, `Crypto heatmap · top ${shown}`), 1280, { fast: true });
+  const { buf, name } = await cardToJpeg(png, 88);
+  return { buf, name, caption: `🗺 <b>Crypto heatmap</b> · top ${shown} by market cap · ${period} change` };
+}
 bot.command('hm', async (ctx) => {
   const args = (ctx.match ?? '').toLowerCase().split(/\s+/).filter(Boolean);
   const period = normPeriod(args.find((a) => /^(1h|24h|1d|7d|1w|14d|30d|1m|1y)$/.test(a)));
-  const count = Math.max(5, Math.min(150, Number(args.find((a) => /^\d+$/.test(a))) || 50));
-  let coins;
-  try { coins = await withTyping(ctx, () => fetchTopCoins()); } catch (e) { console.error('heatmap error:', e.message); return ctx.reply('The heatmap data is not reachable right now. Try again in a minute.'); }
-  if (!coins.length) return ctx.reply('No market data right now.');
-  const png = await renderPng(buildHeatmapSvg(coins.slice(0, count), period, `Crypto heatmap · top ${Math.min(count, coins.length)}`), 1280, { fast: true });
-  return ctx.replyWithPhoto(new InputFile(png, 'heatmap.png'), { caption: `🗺 Top ${Math.min(count, coins.length)} coins by market cap · ${period} change\n<i>/hm 100 7d for more coins or another period</i>`, parse_mode: 'HTML' });
+  const count = Math.max(10, Math.min(150, Number(args.find((a) => /^\d+$/.test(a))) || 50));
+  let r;
+  try { r = await withTyping(ctx, () => heatmapPhoto(period, count)); } catch (e) { console.error('heatmap error:', e.message); return ctx.reply('The heatmap data is not reachable right now. Try again in a minute.'); }
+  if (!r) return ctx.reply('No market data right now.');
+  return ctx.replyWithPhoto(new InputFile(r.buf, r.name), { caption: r.caption, parse_mode: 'HTML', reply_markup: hmKeyboard(period, count) });
+});
+bot.callbackQuery(/^hm:(1h|24h|7d|30d):(\d{2,3})$/, async (ctx) => {
+  await ctx.answerCallbackQuery().catch(() => {});
+  const period = ctx.match[1], count = Number(ctx.match[2]);
+  try {
+    const r = await heatmapPhoto(period, count);
+    if (!r) return;
+    await ctx.editMessageMedia({ type: 'photo', media: new InputFile(r.buf, r.name), caption: r.caption, parse_mode: 'HTML' }, { reply_markup: hmKeyboard(period, count) });
+  } catch (e) { if (!/not modified/i.test(e.message)) console.error('heatmap button error:', e.message); }
 });
 const movers = (dir) => async (ctx) => {
   const args = (ctx.match ?? '').toLowerCase().split(/\s+/).filter(Boolean);
   const period = normPeriod(args.find((a) => /^(1h|24h|1d|7d|1w|14d|30d|1m|1y)$/.test(a)));
   let coins;
   try { coins = await withTyping(ctx, () => fetchTopCoins()); } catch (e) { console.error('movers error:', e.message); return ctx.reply('Market data is not reachable right now. Try again in a minute.'); }
-  return ctx.reply(buildMoversText(coins, period, dir), HTML);
+  return ctx.reply(buildMoversText(coins, period, dir), { ...HTML, reply_markup: KB_DEL });
 };
 bot.command('best', movers('best'));
 bot.command('worst', movers('worst'));
@@ -625,13 +668,13 @@ bot.command('poly', async (ctx) => {
   const term = (ctx.match ?? '').trim();
   let list;
   try { list = await withTyping(ctx, () => fetchPolymarket(term)); } catch (e) { console.error('polymarket error:', e.message); return ctx.reply('Polymarket is not reachable right now. Try again in a minute.'); }
-  return ctx.reply(buildPolymarketText(list, term), HTML);
+  return ctx.reply(buildPolymarketText(list, term), { ...HTML, reply_markup: KB_DEL });
 });
 bot.command('v', async (ctx) => {
   const [a, ...rest] = (ctx.match ?? '').trim().split(/\s+/);
   const amt = parseAmount(a);
   const q = rest.join(' ').trim();
-  if (!amt || !q) return ctx.reply('Usage: /v <amount or %> <token>\nExamples: /v 1m bonk  ·  /v 2% <address>');
+  if (!amt || !q) return ctx.reply('Usage: <code>/v 1m bonk</code>  or  <code>/v 2% &lt;address&gt;</code>', HTML);
   let mint = parseMintInput(q);
   if (!mint) {
     try { mint = (await withTyping(ctx, () => searchTokens(q)))[0]?.mint ?? null; } catch { mint = null; }
@@ -639,50 +682,64 @@ bot.command('v', async (ctx) => {
   }
   const m = await getMarket(mint);
   if (!m?.priceUsd) return ctx.reply('No price found for that token yet.');
-  const name = m.symbol ? `$${esc(m.symbol)}` : short(mint);
-  if (amt.kind === 'amount') return ctx.reply(`${formatCount(amt.n)} ${name} = <b>${formatUsd(amt.n * m.priceUsd)}</b>\n<i>Price ${formatPriceCard(m.priceUsd)}</i>`, HTML);
+  const tk = m.symbol ? `$${m.symbol}` : short(mint);
+  if (amt.kind === 'amount') return ctx.reply(buildConvertText({ label: `${formatCount(amt.n)} ${tk}`, value: formatUsd(amt.n * m.priceUsd), price: formatPriceCard(m.priceUsd), mcap: formatUsd(m.marketCapUsd) }), { ...HTML, reply_markup: KB_DEL });
   if (!m.marketCapUsd) return ctx.reply('No market cap for that token, so I cannot work out a share of the supply.');
-  const tokens = (m.marketCapUsd / m.priceUsd) * (amt.n / 100);
-  return ctx.reply(`${amt.n}% of ${name} supply = <b>${formatUsd(m.marketCapUsd * amt.n / 100)}</b>\n<i>${formatCount(tokens)} tokens · market cap ${formatUsd(m.marketCapUsd)}</i>`, HTML);
+  return ctx.reply(buildConvertText({ label: `${amt.n}% of ${tk}`, value: formatUsd(m.marketCapUsd * amt.n / 100), tokens: formatCount((m.marketCapUsd / m.priceUsd) * (amt.n / 100)), price: formatPriceCard(m.priceUsd), mcap: formatUsd(m.marketCapUsd) }), { ...HTML, reply_markup: KB_DEL });
 });
-bot.command('userid', (ctx) => ctx.reply(`Your ID: <code>${ctx.from.id}</code>`, HTML));
-bot.command('chatid', (ctx) => ctx.reply(`Chat ID: <code>${ctx.chat.id}</code>`, HTML));
-bot.command('flip', (ctx) => ctx.reply(Math.random() < 0.5 ? '🪙 Heads' : '🪙 Tails'));
+async function replyId(ctx, title, id) {
+  const sent = await ctx.reply(buildIdText(title, id), { ...HTML, reply_markup: KB_DEL });
+  setTimeout(() => ctx.api.deleteMessage(sent.chat.id, sent.message_id).catch(() => {}), 60_000).unref?.();
+}
+bot.command('userid', (ctx) => replyId(ctx, 'Your ID', ctx.from.id));
+bot.command('chatid', (ctx) => replyId(ctx, 'Chat ID', ctx.chat.id));
+bot.command('flip', (ctx) => ctx.reply(Math.random() < 0.5 ? '🪙 <b>Heads</b>' : '🪙 <b>Tails</b>', HTML));
 bot.command('epoch', (ctx) => {
   const d = parseEpoch(ctx.match);
-  if (!d) return ctx.reply('Usage: /epoch <unix timestamp>');
-  return ctx.reply(`<code>${d.toISOString().replace('T', ' ').slice(0, 19)} UTC</code>\n${formatDuration(Math.abs(Date.now() - d.getTime())) ?? ''} ${d.getTime() <= Date.now() ? 'ago' : 'from now'}`, HTML);
+  if (!d) return ctx.reply('Usage: <code>/epoch 1700000000</code>', HTML);
+  return ctx.reply(buildEpochText(d), { ...HTML, reply_markup: KB_DEL });
 });
 
 // ---- Price targets (3x, 4x, -50%...) ----
+const targetValue = (base, mult, mcap) => (mcap ? formatUsd(mcap * mult) : formatPriceCard(base * mult));
 bot.command(['target', 'alertx'], async (ctx) => {
   const args = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean);
   const first = args[0] ? parseMintInput(args[0]) : null;
   const mint = first ?? extractMint(ctx.message?.reply_to_message?.text ?? ctx.message?.reply_to_message?.caption ?? '');
   const rest = first ? args.slice(1) : args;
-  if (!mint) return ctx.reply('Usage: /target <address> 3x 4x 10x\nAlso works with percents: /target <address> +50% -30%\nNo multiples = 2x 3x 5x. You can also reply to a message that has the address.');
+  if (!mint) return ctx.reply('Usage: <code>/target &lt;address&gt; 3x 4x 10x</code>\nPercents work too: <code>+50% -30%</code>. No multiples = 2x 3x 5x. You can also reply to a message that has the address.', HTML);
   const mults = rest.length ? parseTargets(rest.join(' ')) : [2, 3, 5];
   if (!mults) return ctx.reply('I did not understand those targets. Examples: 3x  4.5x  +50%  -30%');
   const m = await withTyping(ctx, () => getMarket(mint));
   if (!m?.priceUsd) return ctx.reply('No price found for that token yet.');
   const added = await addTargets({ telegramId: ctx.from.id, mint, symbol: m.symbol, basePrice: m.priceUsd, mults });
-  const name = m.symbol ? `$${esc(m.symbol)}` : short(mint);
-  return ctx.reply(`🎯 <b>${name}</b>: I will message you when it reaches ${mults.map(targetLabel).join(', ')} from ${formatPriceCard(m.priceUsd)}${m.marketCapUsd ? ` (${formatUsd(m.marketCapUsd)})` : ''}.\n<i>${added ? '' : 'Already set, the base price is reset to now. '}/targets to see them, /untarget to remove.</i>`, HTML);
+  return ctx.reply(buildTargetSetText({
+    symbol: m.symbol ? `$${m.symbol}` : short(mint), nowLabel: m.marketCapUsd ? formatUsd(m.marketCapUsd) : formatPriceCard(m.priceUsd),
+    targets: mults.map((x) => ({ label: targetLabel(x), value: targetValue(m.priceUsd, x, m.marketCapUsd) })), inGroup: isGroup(ctx), botUser: ctx.me?.username, refreshed: !added,
+  }), { ...HTML, reply_markup: new InlineKeyboard().text('📋 My alerts', 'tg:list').text('🗑', 'x') });
 });
-bot.command('targets', async (ctx) => {
-  const rows = await listTargets(ctx.from.id);
-  if (!rows.length) return ctx.reply('You have no price targets. Try: /target <address> 3x 5x');
+const targetsPayload = async (telegramId) => {
+  const rows = await listTargets(telegramId);
   const by = new Map();
-  for (const r of rows) { const e = by.get(r.mint) ?? { r, list: [] }; e.list.push(r.mult); by.set(r.mint, e); }
-  const lines = [...by.values()].map(({ r, list }) => `${r.symbol ? `$${esc(r.symbol)}` : `<code>${short(r.mint)}</code>`}  from ${formatPriceCard(r.base_price_usd)}  →  ${list.map(targetLabel).join(', ')}`);
-  return ctx.reply(`🎯 <b>Your price targets</b>\n<blockquote>${lines.join('\n')}</blockquote>\n<i>/untarget <address> or /untarget all</i>`, HTML);
+  for (const r of rows) { const e = by.get(r.mint) ?? { r, list: [] }; e.list.push(r); by.set(r.mint, e); }
+  const groups = [...by.values()].map(({ r, list }) => ({ symbol: r.symbol ? `$${r.symbol}` : short(r.mint), from: formatPriceCard(r.base_price_usd), targets: list.map((t) => ({ label: targetLabel(t.mult), value: formatPriceCard(t.base_price_usd * t.mult) })) }));
+  return { text: buildTargetsText(groups), has: rows.length > 0 };
+};
+bot.command('targets', async (ctx) => {
+  const { text, has } = await targetsPayload(ctx.from.id);
+  return ctx.reply(text, { ...HTML, reply_markup: has ? new InlineKeyboard().text('Clear all', 'tg:clear').text('🗑', 'x') : KB_DEL });
+});
+bot.callbackQuery('tg:list', async (ctx) => { await ctx.answerCallbackQuery().catch(() => {}); const { text } = await targetsPayload(ctx.from.id); return ctx.reply(text, { ...HTML, reply_markup: KB_DEL }); });
+bot.callbackQuery('tg:clear', async (ctx) => {
+  await ctx.answerCallbackQuery({ text: `Removed ${await removeTargets(ctx.from.id)} alert(s)` }).catch(() => {});
+  return ctx.editMessageText(buildTargetsText([]), { ...HTML, reply_markup: KB_DEL }).catch(() => {});
 });
 bot.command('untarget', async (ctx) => {
   const a = (ctx.match ?? '').trim();
-  if (a.toLowerCase() === 'all') return ctx.reply(`Removed ${await removeTargets(ctx.from.id)} target(s).`);
+  if (a.toLowerCase() === 'all') return ctx.reply(`Removed ${await removeTargets(ctx.from.id)} alert(s).`);
   const mint = parseMintInput(a) ?? extractMint(ctx.message?.reply_to_message?.text ?? '');
-  if (!mint) return ctx.reply('Usage: /untarget <address>  or  /untarget all');
-  return ctx.reply(`Removed ${await removeTargets(ctx.from.id, mint)} target(s).`);
+  if (!mint) return ctx.reply('Usage: <code>/untarget &lt;address&gt;</code>  or  <code>/untarget all</code>', HTML);
+  return ctx.reply(`Removed ${await removeTargets(ctx.from.id, mint)} alert(s).`);
 });
 let checkingTargets = false;
 async function checkTargets() {
@@ -697,7 +754,7 @@ async function checkTargets() {
       if (!p?.priceUsd || !targetHit(r.base_price_usd, p.priceUsd, r.mult)) continue;
       const x = p.priceUsd / r.base_price_usd;
       try {
-        await bot.api.sendMessage(r.telegram_id, `🎯 <b>${r.symbol ? `$${esc(r.symbol)}` : short(r.mint)}</b> reached <b>${targetLabel(r.mult)}</b>\nNow ${formatPriceCard(p.priceUsd)}${p.marketCapUsd ? ` · ${formatUsd(p.marketCapUsd)}` : ''}  (${x >= 1 ? x.toFixed(2) + 'x' : shortPct((x - 1) * 100)} since you set it)`, {
+        await bot.api.sendMessage(r.telegram_id, buildTargetHitText({ symbol: r.symbol ? `$${r.symbol}` : short(r.mint), label: targetLabel(r.mult), nowLabel: p.marketCapUsd ? formatUsd(p.marketCapUsd) : formatPriceCard(p.priceUsd), since: x >= 1 ? fmtX(x) : shortPct((x - 1) * 100) }), {
           ...HTML, reply_markup: new InlineKeyboard().text('Open card', `t:${r.mint}`).url('⚡ Buy on Omni Trade', tradeLink(r.mint)),
         });
         await markTargetFired(r.id);
@@ -709,29 +766,35 @@ async function checkTargets() {
   } catch (e) { console.error('target check error:', e.message); } finally { checkingTargets = false; }
 }
 
-// ---- Reminders ----
+// ---- Reminders (in groups the reminder is pinned, like Rick) ----
 const fmtWhen = (d) => `${new Date(d).toISOString().replace('T', ' ').slice(0, 16)} UTC`;
 async function makeReminder(ctx, { here }) {
   const arg = (ctx.match ?? '').trim();
   const d = parseDelay(arg);
-  if (!d) return ctx.reply(`Usage: ${here ? '/remind' : '/remindme'} <time> <what>\nExamples: /remindme 30m check the chart  ·  /remindme 2h30m sell half  ·  /remind 1d post the update`);
+  if (!d) return ctx.reply(`Usage: <code>${here ? '/remind' : '/remindme'} 30m check the chart</code>\nTimes: <code>10m</code>  <code>2h30m</code>  <code>1d</code>  <code>in 2 hours</code>`, HTML);
   const reply = ctx.message?.reply_to_message;
   const body = (d.rest || reply?.text || reply?.caption || 'Reminder').slice(0, 300);
   const id = await addReminder({ telegramId: ctx.from.id, chatId: here ? ctx.chat.id : ctx.from.id, fireAt: new Date(Date.now() + d.ms), body, who: callerName(ctx.from) });
-  if (id === null) return ctx.reply('You have too many active reminders (25). Remove one with /nevermind <id>.');
-  return ctx.reply(`⏰ Ok, ${here ? 'I will remind this chat' : 'I will remind you'} in ${formatDuration(d.ms)} (${fmtWhen(Date.now() + d.ms)}).\n<i>ID ${id} · /nevermind ${id} to cancel</i>`, HTML);
+  if (id === null) return ctx.reply('You have too many active reminders (25). Remove one with /listreminders.');
+  return ctx.reply(buildReminderSetText({ id, delay: formatDuration(d.ms), at: fmtWhen(Date.now() + d.ms), body, here }), { ...HTML, reply_markup: new InlineKeyboard().text('Cancel', `rm:${id}`).text('🗑', 'x') });
 }
 bot.command('remindme', (ctx) => makeReminder(ctx, { here: false }));
 bot.command('remind', (ctx) => makeReminder(ctx, { here: true }));
 bot.command('listreminders', async (ctx) => {
   const rows = await listReminders(ctx.from.id);
-  if (!rows.length) return ctx.reply('You have no reminders. Try: /remindme 1h check the chart');
-  return ctx.reply(`⏰ <b>Your reminders</b>\n<blockquote>${rows.map((r) => `${r.id} · ${fmtWhen(r.fire_at)} · ${esc(r.body.slice(0, 60))}`).join('\n')}</blockquote>`, HTML);
+  const kb = new InlineKeyboard();
+  rows.slice(0, 8).forEach((r, i) => { kb.text(`Cancel ${r.id}`, `rm:${r.id}`); if (i % 3 === 2) kb.row(); });
+  return ctx.reply(buildRemindersText(rows, fmtWhen), { ...HTML, reply_markup: rows.length ? kb.row().text('🗑', 'x') : KB_DEL });
+});
+bot.callbackQuery(/^rm:(\d+)$/, async (ctx) => {
+  const ok = await removeReminder(Number(ctx.match[1]), ctx.from.id);
+  await ctx.answerCallbackQuery({ text: ok ? 'Reminder cancelled' : 'Already gone' }).catch(() => {});
+  if (ok) await ctx.editMessageText('⏰ Reminder cancelled.', HTML).catch(() => {});
 });
 bot.command('nevermind', async (ctx) => {
   const id = Number((ctx.match ?? '').trim());
-  if (!Number.isInteger(id) || id <= 0) return ctx.reply('Usage: /nevermind <reminder id>  (see /listreminders)');
-  return ctx.reply((await removeReminder(id, ctx.from.id)) ? 'Reminder removed.' : 'I could not find that reminder.');
+  if (!Number.isInteger(id) || id <= 0) return ctx.reply('Usage: <code>/nevermind &lt;reminder id&gt;</code>  (see /listreminders)', HTML);
+  return ctx.reply((await removeReminder(id, ctx.from.id)) ? 'Reminder cancelled.' : 'I could not find that reminder.');
 });
 let checkingReminders = false;
 async function checkReminders() {
@@ -741,12 +804,30 @@ async function checkReminders() {
     for (const r of await dueReminders()) {
       try {
         const group = Number(r.chat_id) !== Number(r.telegram_id);
-        await bot.api.sendMessage(r.chat_id, `⏰ ${group ? `<a href="tg://user?id=${r.telegram_id}">${esc(r.who ?? 'Reminder')}</a>: ` : ''}${esc(r.body)}`, HTML);
+        const sent = await bot.api.sendMessage(r.chat_id, buildReminderFiredText({ body: r.body, who: r.who, group }), HTML);
+        if (group) await bot.api.pinChatMessage(r.chat_id, sent.message_id).catch(() => {}); // needs the admin right to pin; skipped quietly without it
       } catch (e) { console.error('reminder send error:', e.message); }
       await markReminderDone(r.id).catch(() => {});
     }
   } catch (e) { console.error('reminder check error:', e.message); } finally { checkingReminders = false; }
 }
+
+// ---- Your own PnL pictures: an admin replies to a photo with /pnlbg and it joins the folder ----
+bot.command('pnlbg', async (ctx) => {
+  const admins = (process.env.ADMIN_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!admins.includes(String(ctx.from.id))) return ctx.reply('Only the bot owner can add PnL pictures.');
+  const photo = ctx.message?.reply_to_message?.photo?.at(-1) ?? ctx.message?.reply_to_message?.document;
+  if (!photo) return ctx.reply('Reply to a photo (send it as a photo or a file) with /pnlbg and I will add it to the PnL pictures.');
+  try {
+    const file = await ctx.api.getFile(photo.file_id);
+    const res = await fetch(`https://api.telegram.org/file/bot${process.env.SCAN_BOT_TOKEN ?? bot.token}/${file.file_path}`, { signal: AbortSignal.timeout(20_000) });
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!sniffMime(buf)) return ctx.reply('That file is not a jpg, png or webp picture.');
+    await mkdir(OWN_DIR, { recursive: true });
+    await writeFile(join(OWN_DIR, `tg-${Date.now()}.${sniffMime(buf) === 'image/png' ? 'png' : sniffMime(buf) === 'image/webp' ? 'webp' : 'jpg'}`), buf);
+    return ctx.reply(`✅ Added. Your folder now has ${(await readdir(OWN_DIR)).filter((f) => /\.(jpe?g|png|webp)$/i.test(f)).length} pictures.`);
+  } catch (e) { console.error('pnlbg error:', e.message); return ctx.reply('I could not save that picture.'); }
+});
 
 // ---- /ta technical read ----
 bot.command('ta', withMint('/ta', async (ctx, mint) => {
@@ -889,7 +970,7 @@ async function checkCalls() {
         const title = (await bot.api.getChat(r.chat_id).catch(() => null))?.title;
         const card = await pnlPng(r, prices, title, { skipHistory: true });
         if (!card) continue;
-        await bot.api.sendPhoto(r.chat_id, new InputFile(card.png, 'pnl.png'), { caption: buildPnlCaption({ symbol: r.symbol, callerName: r.caller_name, x: card.x, milestone: true }), parse_mode: 'HTML' });
+        await bot.api.sendPhoto(r.chat_id, new InputFile(card.png, card.name), { caption: buildPnlCaption({ symbol: r.symbol, callerName: r.caller_name, x: card.x, milestone: true }), parse_mode: 'HTML' });
       } catch (e) { console.error('multiplier post error:', e.message); }
       await new Promise((res) => setTimeout(res, 100));
     }
@@ -943,6 +1024,7 @@ bot.start({
       { command: 'help', description: 'All commands' },
     ]).catch((e) => console.error('setMyCommands error:', e.message));
     keepDbWarm();
+    hasSharp().then((ok) => console.log(ok ? 'Pictures: sharp is on (small, fast cards)' : 'Pictures: run npm install to switch on small, fast cards'));
     clearOldCache().finally(() => refillArt());
     setInterval(checkAlerts, 60_000);
     setInterval(checkCalls, 90_000);

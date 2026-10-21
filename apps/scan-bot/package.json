@@ -12,6 +12,7 @@
     "@resvg/resvg-js": "^2.6.2",
     "@solana/web3.js": "^1.98.0",
     "d3-hierarchy": "^3.1.2",
-    "grammy": "^1.30.0"
+    "grammy": "^1.30.0",
+    "sharp": "^0.34.4"
   }
 }
