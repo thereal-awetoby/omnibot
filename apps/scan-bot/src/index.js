@@ -12,11 +12,11 @@ import {
   multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, parsePeriod, buildGroupBoard, buildGroupBoardText, buildUserCallsText, buildSocialLine, formatPriceCard, formatCount, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel, within, hedge } from './intel.js';
-import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCurveRaw, getTokenMeta, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
+import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getTokenMeta, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { renderPng, renderRaw } from './bubblemap.js';
 import { getArt, getMeme, refillArt, clearOldCache, OWN_DIR, sniffMime } from './memeart.js';
-import { priceFromCurve, fetchSolUsd } from './curvemarket.js';
+import { usdFromQuote, quoteUsd } from './curvemarket.js';
 import { buildCandleSvg, defaultTf, parseTf, TFS } from './chartimg.js';
 import { shrinkArt, cardToJpeg, rawToJpeg, hasSharp } from './imgfast.js';
 import { buildMyCallsText, buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX } from './ux.js';
@@ -87,13 +87,13 @@ async function getMarket(mint) {
       if (f) m = { mint, ...f, volume24h: null, change1h: null, change24h: null };
     } catch (e) { console.error('fallback market error:', e.message); }
   }
-  // A new pump.fun token that no website API knows yet: price and market cap come from the bonding curve itself.
-  if (!m?.priceUsd) {
+  // A new pump.fun token is quoted in another token (WLFI...): DexScreener then gives only the price in that token,
+  // so the dollar price is that times the quote token's own dollar price. Never a guess: no quote price, no number.
+  if (m && !m.priceUsd && m.priceNative > 0 && m.quoteAddress) {
     try {
-      const [raw, solUsd] = await Promise.all([within(getCurveRaw(mint), 3_000), fetchSolUsd(fetchPairsByTokens)]);
-      const c = priceFromCurve(raw, solUsd);
-      if (c) m = { volume24h: null, change1h: null, change24h: null, ...(m ?? {}), mint, priceUsd: c.priceUsd, marketCapUsd: m?.marketCapUsd ?? c.marketCapUsd, dex: m?.dex ?? c.dex };
-    } catch (e) { console.error('curve market error:', e.message); }
+      const u = usdFromQuote(m, await quoteUsd(fetchPairsByTokens, m.quoteAddress));
+      if (u) m = { ...m, priceUsd: u.priceUsd, marketCapUsd: m.marketCapUsd ?? (m.dex && /pump/i.test(m.dex) ? u.marketCapUsd : null) };
+    } catch (e) { console.error('quote price error:', e.message); }
   }
   // Links (X, Telegram, website) and names from the token's own metadata when nothing else listed them.
   if (m && !(m.socials?.length) && !(m.websites?.length)) {

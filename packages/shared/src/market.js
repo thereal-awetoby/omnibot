@@ -142,6 +142,10 @@ export async function fetchPairsByTokens(mints, fetchImpl = fetch) {
       name: p.baseToken.name,
       symbol: p.baseToken.symbol,
       priceUsd: num(p.priceUsd),
+      // pump.fun tokens are now quoted in another token (for example WLFI): DexScreener may then give only the price in that token
+      priceNative: num(p.priceNative),
+      quoteAddress: typeof p.quoteToken?.address === 'string' ? p.quoteToken.address : null,
+      quoteSymbol: typeof p.quoteToken?.symbol === 'string' ? p.quoteToken.symbol : null,
       liquidityUsd: num(p.liquidity?.usd),
       marketCapUsd: num(p.marketCap ?? p.fdv),
       volume24h: num(p.volume?.h24),

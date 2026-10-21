@@ -69,3 +69,12 @@ test('fetchPairsByTokens exposes age, txns, volume windows, socials and profile 
   assert.equal(bare.hasProfile, false);
   assert.deepEqual(bare.websites, []);
 });
+
+test('fetchPairsByTokens keeps the price in the quote token when DexScreener has no dollar price', async () => {
+  const impl = async () => ({ ok: true, json: async () => [{ chainId: 'solana', baseToken: { address: 'A', symbol: 'GRO', name: 'Groyper' }, quoteToken: { address: 'WLFI', symbol: 'WLFI' }, priceNative: '0.00005748', dexId: 'pumpfun' }] });
+  const m = (await fetchPairsByTokens(['A'], impl)).get('A');
+  assert.equal(m.priceUsd, null);
+  assert.equal(m.priceNative, 0.00005748);
+  assert.equal(m.quoteAddress, 'WLFI');
+  assert.equal(m.quoteSymbol, 'WLFI');
+});
