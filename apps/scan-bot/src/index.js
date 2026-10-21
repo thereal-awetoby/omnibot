@@ -14,9 +14,9 @@ import {
 import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
-import { renderPng } from './bubblemap.js';
+import { renderPng, renderRaw } from './bubblemap.js';
 import { getArt, refillArt, clearOldCache, OWN_DIR, sniffMime } from './memeart.js';
-import { shrinkArt, cardToJpeg, hasSharp } from './imgfast.js';
+import { shrinkArt, cardToJpeg, rawToJpeg, hasSharp } from './imgfast.js';
 import { buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX } from './ux.js';
 import { mkdir, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -527,6 +527,7 @@ bot.command(['calls', 'groupme'], async (ctx) => {
   return ctx.reply(buildUserCallsText(calls, prices, callerName(ctx.from)), HTML);
 });
 // A call as a share card: /pnl (your latest call here) or /pnl <address> (whoever called it first).
+const CARD_W = Math.min(1920, Math.max(640, Number(process.env.CARD_WIDTH) || 1280)); // lower it (for example 1000) in .env if drawing is slow on your computer
 async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   const p = prices.get(call.mint);
   const now = p?.priceUsd ?? null;
@@ -549,9 +550,18 @@ async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   const tHist = Date.now() - t0;
   const t1 = Date.now();
   // Telegram shrinks photos to 1280 px anyway, so a bigger card only makes the upload slower.
-  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, peakMcap, x, ageText, groupName, art }), 1280, { fast: true });
-  const out = await cardToJpeg(png);
-  console.log(`pnl card: history ${tHist}ms, draw ${Date.now() - t1}ms, ${Math.round(out.buf.length / 1024)} KB ${out.name.split('.')[1]}`);
+  const svg = buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, peakMcap, x, ageText, groupName, art });
+  let out = null, tm = '';
+  if (await hasSharp()) {
+    try {
+      const raw = await renderRaw(svg, CARD_W);
+      const t2 = Date.now();
+      const jpg = await rawToJpeg(raw);
+      if (jpg) { out = { buf: jpg, name: 'pnl.jpg' }; tm = `setup ${raw.ms.setup}ms, draw ${raw.ms.draw}ms, encode ${Date.now() - t2}ms`; }
+    } catch (e) { console.error('card draw error:', e.message); }
+  }
+  if (!out) { out = await cardToJpeg(await renderPng(svg, CARD_W, { fast: true })); tm = `draw ${Date.now() - t1}ms`; }
+  console.log(`pnl card: prepare ${tHist}ms, ${tm}, ${Math.round(out.buf.length / 1024)} KB ${out.name.split('.')[1]}`);
   return { png: out.buf, name: out.name, x };
 }
 async function replyPnl(ctx, call) {

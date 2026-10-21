@@ -29,3 +29,11 @@ export async function cardToJpeg(png, quality = 90) {
   catch { return { buf: png, name: 'pnl.png' }; }
 }
 export const hasSharp = async () => Boolean(await sharp());
+
+// Raw pixels straight to JPEG (skips making and reading a PNG). null when sharp is missing.
+export async function rawToJpeg({ pixels, width, height }, quality = 90) {
+  const s = await sharp();
+  if (!s) return null;
+  try { return await s(pixels, { raw: { width, height, channels: 4 } }).jpeg({ quality, mozjpeg: false, chromaSubsampling: '4:4:4' }).toBuffer(); }
+  catch { return null; }
+}

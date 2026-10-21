@@ -153,6 +153,16 @@ export function buildBubbleSvg({ symbol, nodes, poolPct = 0, clusters = [], layo
 // Scanning every font on the computer takes seconds on each card. Cards use Arial only, so with `fast` just its files are loaded.
 const ARIAL = ['C:\\Windows\\Fonts\\arial.ttf', 'C:\\Windows\\Fonts\\arialbd.ttf', '/usr/share/fonts/truetype/msttcorefonts/Arial.ttf', '/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf', '/Library/Fonts/Arial.ttf', '/Library/Fonts/Arial Bold.ttf'];
 const arialFiles = ARIAL.filter((f) => existsSync(f));
+// Draws the SVG and returns the raw pixels (no PNG step): { pixels, width, height, ms } where ms = { setup, draw }.
+export async function renderRaw(svg, width = 1000) {
+  const t0 = Date.now();
+  const { Resvg } = await import('@resvg/resvg-js');
+  const font = arialFiles.length >= 2 ? { fontFiles: arialFiles, loadSystemFonts: false, defaultFontFamily: 'Arial' } : { loadSystemFonts: true, defaultFontFamily: 'Arial' };
+  const r = new Resvg(svg, { fitTo: { mode: 'width', value: width }, font });
+  const t1 = Date.now();
+  const img = r.render();
+  return { pixels: img.pixels, width: img.width, height: img.height, ms: { setup: t1 - t0, draw: Date.now() - t1 } };
+}
 export async function renderPng(svg, width = 1000, { fast = false } = {}) {
   const { Resvg } = await import('@resvg/resvg-js');
   const font = fast && arialFiles.length >= 2 ? { fontFiles: arialFiles, loadSystemFonts: false, defaultFontFamily: 'Arial' } : { loadSystemFonts: true, defaultFontFamily: 'Arial' };
