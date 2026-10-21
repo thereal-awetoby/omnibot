@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseMintInput, changePct, formatChange, shouldAlert, parseAlertPct, buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText,
-  formatPriceCard, formatCount, shortPct, formatDuration, safeUrl, buildSocialLine, buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, extractMint, multiple,
+  formatPriceCard, formatCount, shortPct, formatDuration, safeUrl, buildSocialLine, buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, parsePeriod, buildGroupBoard, buildGroupBoardText, extractMint, multiple,
 } from './scan.js';
 
 const MINT = 'So11111111111111111111111111111111111111112';
@@ -235,4 +235,36 @@ test('TH numbers link to the holder wallet when the address is known', () => {
   const intel = { top: [{ owner: w1, pct: 3.2 }, { owner: w2, pct: 2.1 }, { owner: 'x', pct: 1 }], top10Pct: 6.3, top1Pct: 3.2 };
   const card = buildScanCard({ mint: MINT, market, security: null, intel });
   assert.match(card, new RegExp(`<a href="https://solscan\\.io/account/${w1}">3\\.2</a> \\| <a href="https://solscan\\.io/account/${w2}">2\\.1</a> \\| 1\\.0`));
+});
+
+test('parsePeriod understands the time ranges', () => {
+  assert.equal(parsePeriod('').seconds, 86400);
+  assert.equal(parsePeriod('1h').seconds, 3600);
+  assert.equal(parsePeriod('20 minutes').seconds, 1200);
+  assert.equal(parsePeriod('20m').seconds, 1200);
+  assert.equal(parsePeriod('1 week').seconds, 7 * 86400);
+  assert.equal(parsePeriod('2 weeks').seconds, 14 * 86400);
+  assert.equal(parsePeriod('1 month').seconds, 30 * 86400);
+  assert.equal(parsePeriod('1mo').seconds, 30 * 86400);
+  assert.equal(parsePeriod('all').label, 'All time');
+  assert.equal(parsePeriod('banana'), null);
+  assert.equal(parsePeriod('0h'), null);
+});
+
+test('group leaderboard uses the best moment of each call', () => {
+  const now = Date.now();
+  const calls = [
+    { mint: 'A'.repeat(32), symbol: 'AAA', caller_id: 1, caller_name: 'ann', price_usd: 1, mcap_usd: 10_000, peak_price_usd: 5, created_at: new Date(now - 3_600_000) },
+    { mint: 'B'.repeat(32), symbol: 'BBB', caller_id: 2, caller_name: 'bob', price_usd: 1, mcap_usd: 20_000, peak_price_usd: null, created_at: new Date(now - 7_200_000) },
+  ];
+  const prices = new Map([[calls[0].mint, { priceUsd: 0.2 }], [calls[1].mint, { priceUsd: 0.5 }]]);
+  const b = buildGroupBoard(calls, prices);
+  assert.equal(b.top[0].x, 5);            // the peak, not the dump
+  assert.equal(b.top[1].x, 1);            // never below 1x
+  assert.equal(b.stats.calls, 2);
+  assert.equal(b.callers[0].name, 'ann');
+  const text = buildGroupBoardText(b, { label: '24h', groupName: 'My group', now });
+  assert.match(text, /Δ 5\.0x/);
+  assert.match(text, /dexscreener\.com\/solana\//);
+  assert.match(buildGroupBoardText(buildGroupBoard([], new Map())), /No calls in this time/);
 });

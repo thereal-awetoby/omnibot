@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 // Our own bubblemap: holders drawn as circles (size = share of supply), wallets first funded by the same address
 // grouped together. Everything here is pure (no network), except renderPng which turns the SVG into a PNG.
 import { hierarchy, pack } from 'd3-hierarchy';
@@ -149,9 +150,13 @@ export function buildBubbleSvg({ symbol, nodes, poolPct = 0, clusters = [], layo
 }
 
 // SVG text -> PNG bytes. resvg is loaded only when a map is drawn, so the rest of the bot never depends on it.
-export async function renderPng(svg, width = 1000) {
+// Scanning every font on the computer takes seconds on each card. Cards use Arial only, so with `fast` just its files are loaded.
+const ARIAL = ['C:\\Windows\\Fonts\\arial.ttf', 'C:\\Windows\\Fonts\\arialbd.ttf', '/usr/share/fonts/truetype/msttcorefonts/Arial.ttf', '/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf', '/Library/Fonts/Arial.ttf', '/Library/Fonts/Arial Bold.ttf'];
+const arialFiles = ARIAL.filter((f) => existsSync(f));
+export async function renderPng(svg, width = 1000, { fast = false } = {}) {
   const { Resvg } = await import('@resvg/resvg-js');
-  const r = new Resvg(svg, { fitTo: { mode: 'width', value: width }, font: { loadSystemFonts: true, defaultFontFamily: 'Arial' } });
+  const font = fast && arialFiles.length >= 2 ? { fontFiles: arialFiles, loadSystemFonts: false, defaultFontFamily: 'Arial' } : { loadSystemFonts: true, defaultFontFamily: 'Arial' };
+  const r = new Resvg(svg, { fitTo: { mode: 'width', value: width }, font });
   return r.render().asPng();
 }
 

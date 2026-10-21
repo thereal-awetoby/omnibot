@@ -237,6 +237,87 @@ export function buildLeaderboardText(board, days = 30) {
   return lines.join('\n');
 }
 
+// ---- Group leaderboard for any time range (/leaderboard 1h, 20 minutes, 2 weeks, 1 month, all) ----
+const UNIT = [
+  [/^(m|min|mins|minute|minutes)$/, 60, 'minute'], [/^(h|hr|hrs|hour|hours)$/, 3600, 'hour'],
+  [/^(d|day|days)$/, 86400, 'day'], [/^(w|wk|wks|week|weeks)$/, 7 * 86400, 'week'],
+  [/^(mo|mos|month|months)$/, 30 * 86400, 'month'], [/^(y|yr|yrs|year|years)$/, 365 * 86400, 'year'],
+];
+const ALL_SECONDS = 20 * 365 * 86400;
+// "1h", "20 minutes", "2w", "1 month", "all" -> { seconds, label }, or null when it is not a period. Empty text = last 24 hours.
+export function parsePeriod(text) {
+  const t = String(text ?? '').trim().toLowerCase();
+  if (!t) return { seconds: 86400, label: '24h' };
+  if (t === 'all' || t === 'alltime' || t === 'all time') return { seconds: ALL_SECONDS, label: 'All time' };
+  const m = /^(\d{1,4})?\s*([a-z]+)$/.exec(t);
+  if (!m) return null;
+  const n = m[1] ? Number(m[1]) : 1;
+  const u = UNIT.find(([re]) => re.test(m[2]));
+  if (!u || n < 1) return null;
+  const seconds = Math.min(n * u[1], ALL_SECONDS);
+  return { seconds, label: `${n} ${u[2]}${n === 1 ? '' : 's'}` };
+}
+
+const median = (arr) => { const a = [...arr].sort((x, y) => x - y); const k = a.length >> 1; return a.length ? (a.length % 2 ? a[k] : (a[k - 1] + a[k]) / 2) : 0; };
+
+// The best moment of every call (how high it went since it was called) and the group totals.
+export function buildGroupBoard(calls, prices) {
+  const rows = [];
+  for (const c of calls) {
+    const now = prices.get(c.mint)?.priceUsd;
+    const best = Math.max(0, ...[Number(c.peak_price_usd), now].filter((v) => Number.isFinite(v) && v > 0));
+    if (!(c.price_usd > 0) || !best) continue;
+    const x = Math.max(1, best / c.price_usd);
+    rows.push({ ...c, x, peakMcap: c.mcap_usd ? c.mcap_usd * x : null, peakPrice: c.price_usd * x });
+  }
+  const by = new Map();
+  for (const r of rows) {
+    const e = by.get(String(r.caller_id)) ?? { callerId: r.caller_id, name: null, calls: 0, hits: 0, sum: 0, best: 0 };
+    e.name = e.name ?? r.caller_name; // newest first: the latest name
+    e.calls += 1; e.sum += r.x; e.best = Math.max(e.best, r.x); if (r.x >= 2) e.hits += 1;
+    by.set(String(r.caller_id), e);
+  }
+  const xs = rows.map((r) => r.x);
+  const n = rows.length;
+  return {
+    stats: n ? {
+      calls: n, callers: by.size, avg: xs.reduce((a, b) => a + b, 0) / n, median: median(xs), best: Math.max(...xs),
+      hit2: xs.filter((v) => v >= 2).length / n, hit5: xs.filter((v) => v >= 5).length / n,
+    } : null,
+    callers: [...by.values()].map((e) => ({ ...e, avg: e.sum / e.calls })).sort((a, b) => b.avg - a.avg || b.calls - a.calls),
+    top: [...rows].sort((a, b) => b.x - a.x),
+  };
+}
+
+const fmtX = (x) => (x >= 10 ? x.toFixed(0) : x.toFixed(1)) + 'x';
+const pct = (v) => `${Math.round(v * 100)}%`;
+export function buildGroupBoardText(board, { label = '24h', groupName = null, now = Date.now() } = {}) {
+  const head = `🏆 <b>${groupName ? esc(groupName) : 'Group'}</b>  ·  last ${esc(label)}`;
+  if (!board.stats) return `${head}\n\nNo calls in this time. Post a token address and the first person to do it gets the call.`;
+  const s = board.stats;
+  const medals = ['🥇', '🥈', '🥉'];
+  const lines = [
+    head, '',
+    `📣 Calls: <b>${s.calls}</b>  ·  Callers: <b>${s.callers}</b>`,
+    `📈 Average: <b>${fmtX(s.avg)}</b>  ·  Median: <b>${fmtX(s.median)}</b>  ·  Best: <b>${fmtX(s.best)}</b>`,
+    `🎯 Hit rate  2x: <b>${pct(s.hit2)}</b>  ·  5x: <b>${pct(s.hit5)}</b>`,
+    '', '<b>Top callers</b>',
+  ];
+  board.callers.slice(0, 5).forEach((e, i) => {
+    lines.push(`${medals[i] ?? `${i + 1}.`} <b>${e.name ? esc(e.name) : 'someone'}</b>  ·  avg ${fmtX(e.avg)}  ·  ${e.calls} call${e.calls === 1 ? '' : 's'}  ·  🎯 ${pct(e.hits / e.calls)}`);
+  });
+  lines.push('', '<b>Best calls</b>');
+  board.top.slice(0, 10).forEach((r, i) => {
+    const sym = esc(r.symbol ? `$${r.symbol}` : `${r.mint.slice(0, 4)}…`);
+    const link = `<a href="https://dexscreener.com/solana/${r.mint}">${sym}</a>`;
+    const age = formatDuration(now - new Date(r.created_at).getTime()) ?? '';
+    lines.push(`${medals[i] ?? `${i + 1}.`} ${link} @ ${formatUsd(r.mcap_usd)} → ${formatUsd(r.peakMcap)}  <b>Δ ${fmtX(r.x)}</b>`);
+    lines.push(`      ▲ ${age}  ↦ ${r.caller_name ? esc(r.caller_name) : 'someone'}`);
+  });
+  lines.push('', '<i>Multiple = the highest the token reached after the call vs the price when it was called.</i>');
+  return lines.join('\n');
+}
+
 export function buildUserCallsText(calls, prices, who, now = Date.now()) {
   if (!calls.length) return 'You have no calls in this group yet. Post a token address that nobody has called.';
   const lines = [`<b>📣 Calls by ${esc(who)}</b>`, ''];

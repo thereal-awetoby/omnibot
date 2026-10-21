@@ -23,12 +23,13 @@ export async function getFirstCall(chatId, mint) {
 }
 
 // Calls in this chat from the last `days` days (newest first), for the leaderboard.
-export async function listChatCalls(chatId, { days = 30, limit = 300 } = {}) {
+// `seconds` (any length of time) wins over `days`.
+export async function listChatCalls(chatId, { days = 30, seconds = null, limit = 300 } = {}) {
   const { rows } = await query(
     `SELECT mint, symbol, caller_id, caller_name, price_usd, mcap_usd, peak_price_usd, created_at
-     FROM calls WHERE chat_id = $1 AND created_at > now() - make_interval(days => $2)
+     FROM calls WHERE chat_id = $1 AND created_at > now() - make_interval(secs => $2)
      ORDER BY created_at DESC LIMIT $3`,
-    [chatId, days, limit]
+    [chatId, seconds ?? days * 86400, limit]
   );
   return rows;
 }

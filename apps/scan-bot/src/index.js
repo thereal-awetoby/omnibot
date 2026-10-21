@@ -9,7 +9,7 @@ import {
 import {
   parseMintInput, extractMint, looksLikeMint, parseAlertPct, shouldAlert,
   buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText,
-  multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
+  multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, parsePeriod, buildGroupBoard, buildGroupBoardText, buildUserCallsText, buildSocialLine, formatPriceCard, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
@@ -373,7 +373,7 @@ async function doUnwatch(ctx, mint, { edit = false } = {}) {
 
 bot.command('start', showHome);
 bot.command('help', (ctx) => ctx.reply(
-  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard  /calls  /pnl  (groups)\n/meme  random crypto meme\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
+  'Paste a token address to see its card: stats, safety checks and holder info.\n\nIn a group, the first person to post a token gets the call.\n/leaderboard 1h | 20 minutes | 1 week | 1 month | all  /calls  /pnl  (groups)\n/meme  random crypto meme\n\n/token <address>\n/th <address>  top holders\n/dev <address>  deployer and launches\n/nar <address>  lore (the story)\n/soc <address>  social links\n/dp <address>  DEX Paid\n/p <address>  price\n/bm <address>  bubblemap\n/c <address>  chart\n/s <name>  search a token\n/i  top coins\n/trending\n/watch <address>  (no address: show watchlist)\n/unwatch <address>\n/alerts  (your watchlist)\n/alertpct <number>  (alert size, default 25)\n/trade  /launch'
 ));
 bot.command('token', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
@@ -485,11 +485,37 @@ bot.command('alertpct', async (ctx) => {
 async function pricesFor(mints) {
   try { return await fetchPairsByTokens([...new Set(mints)]); } catch (e) { console.error('prices error:', e.message); return new Map(); }
 }
+const LB_BUTTONS = [['1H', 3600], ['1D', 86400], ['1W', 7 * 86400], ['2W', 14 * 86400], ['1M', 30 * 86400], ['All', 'all']];
+const lbKeyboard = (active) => {
+  const kb = new InlineKeyboard();
+  for (const [name, secs] of LB_BUTTONS) kb.text(String(secs) === String(active) ? `• ${name}` : name, `lb:${secs}`);
+  return kb;
+};
+async function groupBoardText(chat, period) {
+  const calls = await listChatCalls(chat.id, { seconds: period.seconds, limit: 400 });
+  const prices = calls.length ? await pricesFor(calls.map((c) => c.mint)) : new Map();
+  const board = buildGroupBoard(calls, prices);
+  // remember new highs so the next board is right even when the chart has no history
+  for (const r of board.top.slice(0, 40)) if (r.x > 1 && r.peakPrice > (Number(r.peak_price_usd) || 0) * 1.0001) setCallPeak(chat.id, r.mint, r.peakPrice).catch(() => {});
+  return buildGroupBoardText(board, { label: period.label, groupName: plainName(chat.title) });
+}
+const plainName = (s) => String(s ?? '').replace(/[\p{Extended_Pictographic}\u200d\ufe0f]/gu, '').replace(/\s+/g, ' ').trim() || null;
 bot.command('leaderboard', async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('Leaderboards work in groups. Add me to your group and post token addresses there.');
-  const calls = await listChatCalls(ctx.chat.id, { days: 30 });
-  const prices = await pricesFor(calls.map((c) => c.mint));
-  return ctx.reply(buildLeaderboardText(buildLeaderboard(calls, prices), 30), HTML);
+  const period = parsePeriod(ctx.match);
+  if (!period) return ctx.reply('Try: /leaderboard 1h, /leaderboard 20 minutes, /leaderboard 1 week, /leaderboard 2 weeks, /leaderboard 1 month or /leaderboard all');
+  const text = await groupBoardText(ctx.chat, period);
+  return ctx.reply(text, { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: lbKeyboard(period.label === 'All time' ? 'all' : period.seconds) });
+});
+bot.callbackQuery(/^lb:(\d+|all)$/, async (ctx) => {
+  await ctx.answerCallbackQuery().catch(() => {});
+  if (!isGroup(ctx)) return;
+  const secs = ctx.match[1] === 'all' ? 'all' : Number(ctx.match[1]);
+  const labels = { 3600: '1 hour', 86400: '24h', 604800: '1 week', 1209600: '2 weeks', 2592000: '1 month', all: 'All time' };
+  if (!labels[secs]) return;
+  const period = { seconds: secs === 'all' ? 20 * 365 * 86400 : secs, label: labels[secs] };
+  const text = await groupBoardText(ctx.chat, period);
+  return ctx.editMessageText(text, { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: lbKeyboard(secs) }).catch(() => {});
 });
 bot.command('calls', async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('Call tracking works in groups. Post a token address in your group to make a call.');
@@ -517,7 +543,7 @@ async function pnlPng(call, prices, groupName, { skipHistory = false } = {}) {
   const art = await getArt().catch(() => null); // instant: a saved or ready meme, never waits for the internet
   const t1 = Date.now();
   // Telegram shrinks photos to 1280 px anyway, so a bigger card only makes the upload slower.
-  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, peakMcap, x, ageText, groupName, art }), 1280);
+  const png = await renderPng(buildPnlSvg({ symbol: call.symbol, callerName: call.caller_name, entryMcap: call.mcap_usd, peakMcap, x, ageText, groupName, art }), 1280, { fast: true });
   console.log(`pnl card: history ${tHist}ms, draw ${Date.now() - t1}ms, ${Math.round(png.length / 1024)} KB`);
   return { png, x };
 }
@@ -669,7 +695,7 @@ bot.start({
       { command: 'i', description: 'Get top coins' },
       { command: 'trending', description: 'View trending tokens' },
       { command: 'watch', description: 'Your watchlist / watch a token' },
-      { command: 'leaderboard', description: 'Group call leaderboard' },
+      { command: 'leaderboard', description: 'Group leaderboard (1h, 1 week, all...)' },
       { command: 'calls', description: 'Your calls in this group' },
       { command: 'pnl', description: 'PnL card of a call (groups)' },
       { command: 'meme', description: 'A random crypto meme' },
