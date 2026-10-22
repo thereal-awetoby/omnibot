@@ -3,7 +3,7 @@ import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
-  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, keepDbWarm,
+  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, keepDbWarm, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, MAX_X_FOLLOWS,
   MAX_WATCHES,
 } from '@omnibot/shared';
 import {
@@ -19,7 +19,8 @@ import { getArt, getMeme, refillArt, clearOldCache, OWN_DIR, sniffMime } from '.
 import { usdFromQuote, quoteUsd } from './curvemarket.js';
 import { buildCandleSvg, defaultTf, parseTf, TFS } from './chartimg.js';
 import { shrinkArt, cardToJpeg, rawToJpeg, hasSharp } from './imgfast.js';
-import { buildMyCallsText, buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX } from './ux.js';
+import { normHandle, extractMints, pickNew, xCallerId, fetchTweets } from './xfeed.js';
+import { buildFollowAddedText, buildFollowingText, buildXCallHeader, buildMyCallsText, buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX } from './ux.js';
 import { mkdir, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlcard.js';
@@ -1061,6 +1062,100 @@ async function checkCalls() {
   }
 }
 
+
+// ---- Followed X accounts: a token address they post becomes a call in the group ----
+const X_EVERY_MS = (Number(process.env.X_POLL_SECONDS) || 90) * 1000;
+const xBackoff = new Map(); // handle -> { fails, until }
+const xLogged = new Map();
+async function canManageGroup(ctx) {
+  const ids = (process.env.ADMIN_IDS ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+  if (ids.includes(String(ctx.from?.id))) return true;
+  try { const m = await ctx.getChatMember(ctx.from.id); return m.status === 'creator' || m.status === 'administrator'; } catch { return false; }
+}
+bot.command(['follow', 'addx', 'xfollow'], async (ctx) => {
+  if (!isGroup(ctx)) return ctx.reply('Following X accounts works in groups: add me to your group and send /follow @handle there.');
+  if (!(await canManageGroup(ctx))) return ctx.reply('Only group admins can change the followed accounts.');
+  const handle = normHandle(ctx.match);
+  if (!handle) return ctx.reply('Usage: /follow @handle\nAny token address that account posts is called in this group.');
+  const r = await addXFollow({ chatId: ctx.chat.id, handle, addedBy: ctx.from.id, addedByName: callerName(ctx.from) });
+  if (r === 'full') return ctx.reply(`This group already follows ${MAX_X_FOLLOWS} accounts. Remove one with /unfollow @handle first.`);
+  if (r === 'exists') return ctx.reply(`Already following @${handle}. Use /following to see the status.`);
+  // read it once now, so the answer says whether it works; posts up to now never become calls
+  const t = await withTyping(ctx, () => fetchTweets(handle));
+  if (t.error) {
+    await setXPoll({ handle, ok: false, error: t.error }).catch(() => {});
+    console.error(`x follow @${handle}: ${t.error}`);
+    return ctx.reply(buildFollowAddedText({ handle, error: t.error }), HTML);
+  }
+  const { cursor } = pickNew(t.tweets, null);
+  if (cursor) await setXCursor(ctx.chat.id, handle, cursor).catch(() => {});
+  const newest = [...t.tweets].sort((a, b) => (BigInt(a.id) > BigInt(b.id) ? -1 : 1))[0];
+  await setXPoll({ handle, ok: true, via: t.via, newestId: newest?.id ?? null, newestAt: newest?.createdAt ? new Date(newest.createdAt) : null }).catch(() => {});
+  return ctx.reply(buildFollowAddedText({ handle, latestAgoMs: newest?.createdAt ? Date.now() - newest.createdAt : null }), HTML);
+});
+bot.command(['unfollow', 'unx', 'xunfollow'], async (ctx) => {
+  if (!isGroup(ctx)) return ctx.reply('This works in groups.');
+  if (!(await canManageGroup(ctx))) return ctx.reply('Only group admins can change the followed accounts.');
+  const handle = normHandle(ctx.match);
+  if (!handle) return ctx.reply('Usage: /unfollow @handle');
+  return ctx.reply((await removeXFollow(ctx.chat.id, handle)) ? `Stopped following @${handle}.` : `This group does not follow @${handle}.`);
+});
+bot.command(['following', 'xlist'], async (ctx) => {
+  if (!isGroup(ctx)) return ctx.reply('This works in groups.');
+  return ctx.reply(buildFollowingText(await listXFollows(ctx.chat.id)), { ...HTML, reply_markup: KB_DEL });
+});
+
+// A token address found in a followed account's post: price it first (no price, no call: it may not be a token at all),
+// then record the call and post the card, exactly like a member posting the address.
+async function xCall(chatId, handle, tweet, mint) {
+  const card = await cachedCard(mint);
+  const m = card.market;
+  if (!m?.priceUsd) return;
+  const r = await recordFirstCall({ chatId, mint, symbol: m.symbol, callerId: xCallerId(handle), callerName: `@${handle}`, priceUsd: m.priceUsd, mcapUsd: m.marketCapUsd });
+  if (!r.first) return; // someone already called it in this group
+  const text = `${buildXCallHeader(handle, tweet.id)}\n\n${buildScanCard({ mint, market: m, security: card.security, intel: card.intel, callLine: buildCallLine(r.call, m.priceUsd), watched: false })}`;
+  const url = m.headerUrl || m.imageUrl || null;
+  await bot.api.sendMessage(chatId, text, { ...HTML, reply_markup: cardKeyboard(mint, false, true), ...(url ? { link_preview_options: { url, show_above_text: true, prefer_large_media: true } } : {}) });
+  console.log(`x call: @${handle} -> ${short(mint)} in ${chatId}`);
+}
+async function pollHandle(h) {
+  const r = await fetchTweets(h.handle);
+  if (r.error) {
+    const b = xBackoff.get(h.handle) ?? { fails: 0 };
+    b.fails += 1; b.until = Date.now() + Math.min(15 * 60_000, 60_000 * 2 ** Math.min(b.fails, 4));
+    xBackoff.set(h.handle, b);
+    await setXPoll({ handle: h.handle, ok: false, error: r.error }).catch(() => {});
+    if (Date.now() - (xLogged.get(h.handle) ?? 0) > 600_000) { xLogged.set(h.handle, Date.now()); console.error(`x feed @${h.handle}: ${r.error}`); }
+    return;
+  }
+  xBackoff.delete(h.handle);
+  const newest = [...r.tweets].sort((a, b) => (BigInt(a.id) > BigInt(b.id) ? -1 : 1))[0];
+  await setXPoll({ handle: h.handle, ok: true, via: r.via, newestId: newest?.id ?? null, newestAt: newest?.createdAt ? new Date(newest.createdAt) : null }).catch(() => {});
+  for (const c of h.chats) {
+    const { fresh, cursor } = pickNew(r.tweets, c.last_tweet_id);
+    if (cursor && cursor !== c.last_tweet_id) await setXCursor(c.chat_id, h.handle, cursor).catch(() => {}); // first, so a failed post is never repeated
+    for (const tw of fresh) {
+      for (const mint of extractMints(tw.text, tw.urls).slice(0, 3)) {
+        try { await xCall(c.chat_id, h.handle, tw, mint); } catch (e) { console.error(`x call error @${h.handle}:`, e.message); }
+      }
+    }
+  }
+}
+let checkingX = false;
+async function checkXFeeds() {
+  if (checkingX) return;
+  checkingX = true;
+  try {
+    const now = Date.now();
+    const due = (await listAllXFollows())
+      .filter((h) => (!h.polled_at || now - new Date(h.polled_at).getTime() >= X_EVERY_MS) && (xBackoff.get(h.handle)?.until ?? 0) < now)
+      .sort((a, b) => (new Date(a.polled_at ?? 0).getTime() - new Date(b.polled_at ?? 0).getTime()))
+      .slice(0, 4);
+    for (const h of due) { await pollHandle(h); await new Promise((r) => setTimeout(r, 1_500)); }
+  } catch (e) { console.error('x check error:', e.message); }
+  finally { checkingX = false; }
+}
+
 bot.catch((err) => console.error('bot error:', err.error?.message ?? err.message));
 bot.start({
   onStart: (me) => {
@@ -1099,6 +1194,9 @@ bot.start({
       { command: 'ta', description: 'Technical read of a token' },
       { command: 'target', description: 'Alert me at 3x, 4x, -50%...' },
       { command: 'chart', description: 'Candlestick chart (1m 5m 1h...)' },
+      { command: 'follow', description: 'Call tokens an X account posts' },
+      { command: 'unfollow', description: 'Stop following an X account' },
+      { command: 'following', description: 'Followed X accounts' },
       { command: 'targets', description: 'Your price alerts' },
       { command: 'untarget', description: 'Remove price alerts' },
       { command: 'remindme', description: 'Reminder to you (private)' },
@@ -1124,5 +1222,6 @@ bot.start({
     setInterval(checkCalls, 90_000);
     setInterval(checkTargets, 45_000);
     setInterval(checkReminders, 20_000);
+    ensureXTables().then(() => setInterval(checkXFeeds, 30_000)).catch((e) => console.error('x tables error:', e.message));
   },
 });

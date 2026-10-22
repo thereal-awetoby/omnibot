@@ -79,6 +79,7 @@ export function buildHelpText() {
     sec('🔎 Token data', [['/s', 'Search a token'], ['/p', 'Price'], ['/c', 'Chart'], ['/ta', 'Technical read'], ['/v', 'Convert an amount'], ['/th', 'Top holders'], ['/dev', 'Deployer and launches'], ['/nar', 'Lore (the story)'], ['/soc', 'Social links'], ['/dp', 'DEX Paid status'], ['/bm', 'Bubblemap']]),
     sec('🌍 Markets', [['/hm', 'Heatmap'], ['/best', 'Top gainers'], ['/worst', 'Top losers'], ['/i', 'Top coins'], ['/trending', 'Trending tokens'], ['/poly', 'Polymarket search']]),
     sec('👥 Group', [['/lb', 'Leaderboard (1h, 1 week, all…)'], ['/calls', 'Your calls'], ['/fc', 'First caller of a token'], ['/last', 'Last calls'], ['/pnl', 'PnL card'], ['/elb', 'Export leaderboard'], ['/meme', 'Random crypto meme']]),
+    sec('𝕏 X calls', [['/follow', 'Call tokens an X account posts'], ['/unfollow', 'Stop following'], ['/following', 'Followed accounts']]),
     sec('🔔 Alerts', [['/watch', 'Watch a token (moves of ±%)'], ['/target', 'Alert at 3x, 4x, -50%…'], ['/targets', 'Your alerts'], ['/untarget', 'Remove alerts'], ['/remindme', 'Reminder to you'], ['/remind', 'Reminder for the chat'], ['/listreminders', 'Your reminders']]),
     sec('🤖 AI tools', [['/tr', 'Translate (-fr, -es, -yo…)'], ['/tldr', 'Summarize text or a link'], ['/eli5', 'Explain simply']]),
     sec('🧰 Utilities', [['/userid', 'Your ID'], ['/chatid', 'Chat ID'], ['/epoch', 'Unix time'], ['/flip', 'Flip a coin'], ['/trade', 'Omni Trade'], ['/launch', 'Omni Launch']]),
@@ -118,3 +119,26 @@ export function buildMyCallsText(calls, prices, who, now = Date.now()) {
   });
   return `📣 <b>Last ${calls.length} Call${calls.length === 1 ? '' : 's'}</b> · ${esc(String(who ?? 'you').replace(/^@/, ''))}\n<pre>${esc(stats)}</pre>\n<blockquote expandable>${list.join('\n')}</blockquote>`;
 }
+
+// ---- followed X accounts ----
+const ago2 = (ms) => formatDuration(ms) ?? 'now';
+export function buildFollowAddedText({ handle, latestAgoMs = null, error = null }) {
+  const head = `𝕏 <b>Following @${esc(handle)}</b>\nAny token address they post will be called here as <i>called by @${esc(handle)}</i>.`;
+  if (error) return `${head}\n\n⚠️ I could not read their posts just now, so I will keep trying. /following shows the status.`;
+  return `${head}\n\n<pre>${esc(tree([['Status', 'reading OK'], ['Latest post', latestAgoMs == null ? 'n/a' : `${ago2(latestAgoMs)} ago`], ['Checks', 'every ~2 min']]))}</pre>`;
+}
+export function buildFollowingText(rows, now = Date.now()) {
+  if (!rows.length) return '𝕏 <b>Followed accounts</b>\n\nNone yet. Add one with <code>/follow @handle</code>: any token address they post will be called in this group.';
+  const lines = rows.map((r) => {
+    const polled = r.polled_at ? new Date(r.polled_at).getTime() : null;
+    const ok = r.ok_at ? new Date(r.ok_at).getTime() : null;
+    let st;
+    if (!polled) st = '⏳ not checked yet';
+    else if (r.last_error) st = `⚠️ cannot read right now${ok ? ` (last worked ${ago2(now - ok)} ago)` : ''}`;
+    else st = `✅ reading OK · checked ${ago2(now - polled)} ago`;
+    const post = r.newest_tweet_at ? ` · latest post ${ago2(now - new Date(r.newest_tweet_at).getTime())} ago` : '';
+    return `<b>@${esc(r.handle)}</b>\n└ ${st}${post}`;
+  });
+  return `𝕏 <b>Followed accounts</b> · ${rows.length}\n<blockquote>${lines.join('\n')}</blockquote>\n<i>Stop one with /unfollow @handle.</i>`;
+}
+export const buildXCallHeader = (handle, tweetId) => `𝕏 <a href="https://x.com/${esc(handle)}/status/${esc(tweetId)}">@${esc(handle)}</a> posted a token`;

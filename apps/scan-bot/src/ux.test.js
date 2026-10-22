@@ -67,3 +67,20 @@ test('calls: summary block, then every call in a collapsible quote', () => {
   assert.match(t, /<blockquote expandable>[\s\S]*<b>\$DREAM<\/b> @ \$3\.22K[\s\S]*Now 🔴 <b>-7%<\/b> \| ATH <b>1\.10x<\/b>/);
   assert.equal(buildMyCallsText([], new Map(), 'x'), 'You have no calls in this group yet. Post a token address that nobody has called.');
 });
+
+import { buildFollowAddedText, buildFollowingText, buildXCallHeader } from './ux.js';
+test('follow answers: added, status list, post header', () => {
+  const a = buildFollowAddedText({ handle: 'pumpdotfun', latestAgoMs: 5 * 60_000 });
+  assert.match(a, /Following @pumpdotfun/); assert.match(a, /reading OK/); assert.match(a, /called by @pumpdotfun/);
+  assert.match(buildFollowAddedText({ handle: 'x', error: 'boom' }), /could not read/);
+  const rows = [
+    { handle: 'good', polled_at: new Date(now - 60_000), ok_at: new Date(now - 60_000), last_error: null, newest_tweet_at: new Date(now - 3_600_000) },
+    { handle: 'bad', polled_at: new Date(now - 60_000), ok_at: new Date(now - 7_200_000), last_error: 'x' },
+    { handle: 'new', polled_at: null },
+  ];
+  const t = buildFollowingText(rows, now);
+  assert.match(t, /@good<\/b>\n└ ✅ reading OK/); assert.match(t, /@bad<\/b>\n└ ⚠️ cannot read right now \(last worked/); assert.match(t, /@new<\/b>\n└ ⏳ not checked yet/);
+  assert.match(buildFollowingText([], now), /None yet/);
+  assert.equal(buildXCallHeader('a_b', '123'), '𝕏 <a href="https://x.com/a_b/status/123">@a_b</a> posted a token');
+  assert.match(buildHelpText(), /\/follow/);
+});
