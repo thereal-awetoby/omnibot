@@ -980,9 +980,9 @@ bot.callbackQuery('x', async (ctx) => { await ctx.answerCallbackQuery().catch(()
 bot.callbackQuery(new RegExp(`^w:${MINT}$`), (ctx) => doWatch(ctx, ctx.match[1], { edit: true }));
 bot.callbackQuery(new RegExp(`^uw:${MINT}$`), (ctx) => doUnwatch(ctx, ctx.match[1], { edit: true }));
 
-bot.on('message:text', async (ctx) => {
+bot.on('message:text', async (ctx, next) => {
   const text = ctx.message.text;
-  if (text.startsWith('/')) return;
+  if (text.startsWith('/')) return next();
   if (isGroup(ctx)) {
     const mint = extractMint(text);
     if (!mint) return;
