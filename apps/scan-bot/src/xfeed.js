@@ -103,9 +103,10 @@ export function parseApiTweets(json) {
   }));
 }
 
+export const FREE_MIRRORS = ['https://nitter.net', 'https://nitter.poast.org', 'https://nitter.privacydev.net', 'https://xcancel.com'];
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
-async function viaSyndication(handle, fetchFn) {
-  const res = await fetchFn(`https://syndication.twitter.com/srv/timeline-profile/screen-name/${handle}`, { headers: { 'user-agent': UA, accept: 'text/html' }, signal: AbortSignal.timeout(9_000) });
+async function viaSyndication(handle, fetchFn, base = 'https://syndication.twitter.com/srv/timeline-profile/screen-name/') {
+  const res = await fetchFn(`${base}${handle}`, { headers: { 'user-agent': UA, accept: 'text/html' }, signal: AbortSignal.timeout(9_000) });
   if (!res.ok) throw new Error(`X embed HTTP ${res.status}`);
   const t = parseSyndication(await res.text());
   if (!t) throw new Error('X embed gave no timeline');
@@ -135,11 +136,15 @@ async function viaApi(handle, token, fetchFn) {
 export async function fetchTweets(handle, { env = process.env, fetchFn = fetch } = {}) {
   const tries = [];
   if (env.X_BEARER_TOKEN) tries.push(['x-api', () => viaApi(handle, env.X_BEARER_TOKEN, fetchFn)]);
-  for (const base of String(env.NITTER_URLS ?? '').split(',').map((s) => s.trim()).filter((s) => /^https:\/\//.test(s))) tries.push([`nitter ${new URL(base).host}`, () => viaNitter(handle, base, fetchFn)]);
+  const mine = String(env.NITTER_URLS ?? '').split(',').map((s) => s.trim()).filter((s) => /^https:\/\//.test(s));
+  // Free public mirrors are tried after yours; some are often down, so several are listed.
+  const bases = [...mine, ...(env.X_NO_MIRRORS ? [] : FREE_MIRRORS.filter((m) => !mine.includes(m)))];
+  for (const base of bases) tries.push([`nitter ${new URL(base).host}`, () => viaNitter(handle, base, fetchFn)]);
   tries.push(['x-embed', () => viaSyndication(handle, fetchFn)]);
+  tries.push(['x-embed2', () => viaSyndication(handle, fetchFn, 'https://cdn.syndication.twimg.com/srv/timeline-profile/screen-name/')]);
   const errors = [];
   for (const [via, run] of tries) {
     try { return { tweets: await run(), via }; } catch (e) { errors.push(`${via}: ${e.message}`); }
   }
-  return { error: errors.join(' | ').slice(0, 200) };
+  return { error: errors.join(' | ').slice(0, 420) };
 }
