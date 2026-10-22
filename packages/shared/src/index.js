@@ -6,3 +6,4 @@ export * from './watch.js';
 export * from './calls.js';
 export * from './targets.js';
 export * from './xfollow.js';
+export * from './chatmove.js';

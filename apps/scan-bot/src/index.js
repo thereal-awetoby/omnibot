@@ -3,7 +3,7 @@ import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
-  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, keepDbWarm, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, MAX_X_FOLLOWS,
+  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, MAX_X_FOLLOWS,
   MAX_WATCHES,
 } from '@omnibot/shared';
 import {
@@ -1155,6 +1155,40 @@ async function checkXFeeds() {
   } catch (e) { console.error('x check error:', e.message); }
   finally { checkingX = false; }
 }
+
+
+// ---- A group turned into a supergroup (new chat id): its saved calls must follow ----
+async function moveGroupData(oldId, newId, why) {
+  try {
+    const r = await moveChatData(oldId, newId);
+    console.log(`chat moved ${oldId} -> ${newId} (${why}): ${r.calls} calls, ${r.duplicates} duplicates, ${r.reminders} reminders, ${r.follows} followed accounts`);
+    return r;
+  } catch (e) { console.error('chat move error:', e.message); return null; }
+}
+bot.on('message:migrate_to_chat_id', (ctx) => moveGroupData(ctx.chat.id, ctx.message.migrate_to_chat_id, 'Telegram upgrade'));
+bot.on('message:migrate_from_chat_id', (ctx) => moveGroupData(ctx.message.migrate_from_chat_id, ctx.chat.id, 'Telegram upgrade'));
+// Owner tool: /movecalls lists the chats that have saved calls; /movecalls <old chat id> (sent in the group) brings them here.
+bot.command('movecalls', async (ctx) => {
+  const ids = (process.env.ADMIN_IDS ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+  if (!ids.includes(String(ctx.from?.id))) return ctx.reply(`Only the bot owner can use this. Add your Telegram ID (${ctx.from?.id}) to ADMIN_IDS in the .env file and restart the bot.`);
+  const arg = (ctx.match ?? '').trim();
+  if (!arg) {
+    const rows = await listCallChats();
+    if (!rows.length) return ctx.reply('No saved calls at all.');
+    const lines = [];
+    for (const r of rows) {
+      const title = (await ctx.api.getChat(r.chat_id).catch(() => null))?.title;
+      lines.push(`<code>${r.chat_id}</code> · ${r.n} call${r.n === 1 ? '' : 's'} · last ${formatDuration(Date.now() - new Date(r.last).getTime())} ago${String(r.chat_id) === String(ctx.chat.id) ? ' · <b>this chat</b>' : ''}${title ? ` · ${esc(title)}` : ' · <i>old or unreachable</i>'}`);
+    }
+    return ctx.reply(`📦 <b>Chats with saved calls</b>\n${lines.join('\n')}\n\nTo bring the calls of an old chat into a group, send this in that group:\n<code>/movecalls &lt;old chat id&gt;</code>`, HTML);
+  }
+  if (!isGroup(ctx)) return ctx.reply('Send /movecalls <old chat id> inside the group that should receive the calls.');
+  if (!/^-?\d{5,}$/.test(arg)) return ctx.reply('That does not look like a chat id. Send /movecalls on its own to see the list.');
+  if (String(arg) === String(ctx.chat.id)) return ctx.reply('That is this chat already.');
+  const r = await moveGroupData(arg, ctx.chat.id, 'owner command');
+  if (!r) return ctx.reply('The move failed. Nothing was changed. Check the bot window for the error.');
+  return ctx.reply(`✅ <b>Calls restored</b>\n<pre>${esc(`├ Calls moved    ${r.calls}\n├ Duplicates     ${r.duplicates} (the earlier call was kept)\n├ Reminders      ${r.reminders}\n└ Followed X     ${r.follows}`)}</pre>Try /calls or /lb now.`, HTML);
+});
 
 bot.catch((err) => console.error('bot error:', err.error?.message ?? err.message));
 bot.start({
