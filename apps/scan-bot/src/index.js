@@ -16,7 +16,7 @@ import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getT
 import { loadBubblemap, loadBubbleData } from './bubbleload.js';
 import { renderPng, renderRaw } from './bubblemap.js';
 import { getArt, getMeme, refillArt, clearOldCache, OWN_DIR, sniffMime } from './memeart.js';
-import { usdFromQuote, quoteUsd } from './curvemarket.js';
+import { usdFromQuote, quoteUsd, fetchLaunchMarket } from './curvemarket.js';
 import { buildCandleSvg, defaultTf, parseTf, TFS } from './chartimg.js';
 import { shrinkArt, cardToJpeg, rawToJpeg, hasSharp } from './imgfast.js';
 import { normHandle, extractMints, pickNew, xCallerId, fetchTweets } from './xfeed.js';
@@ -87,6 +87,13 @@ async function getMarket(mint) {
       const f = await fetchTokenMarket(mint);
       if (f) m = { mint, ...f, volume24h: null, change1h: null, change24h: null };
     } catch (e) { console.error('fallback market error:', e.message); }
+  }
+  // Tokens on other launchpads (letsbonk.fun...): DexScreener has no pair yet, Jupiter / GeckoTerminal already list them.
+  if (!m || !m.priceUsd) {
+    try {
+      const l = await fetchLaunchMarket(mint);
+      if (l) m = { ...(m ?? {}), ...l, mint, change1h: l.change1h ?? m?.change1h ?? null, change24h: l.change24h ?? m?.change24h ?? null };
+    } catch (e) { console.error('launchpad market error:', e.message); }
   }
   // A new pump.fun token is quoted in another token (WLFI...): DexScreener then gives only the price in that token,
   // so the dollar price is that times the quote token's own dollar price. Never a guess: no quote price, no number.

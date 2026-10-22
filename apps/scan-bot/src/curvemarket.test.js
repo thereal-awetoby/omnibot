@@ -25,3 +25,16 @@ test('links in the metadata file become social buttons', () => {
   assert.deepEqual(l.websites, [{ label: 'Web', url: 'https://groyper.fun' }]);
   assert.deepEqual(parseMetaLinks({ twitter: 'javascript:alert(1)', website: 'ftp://x' }), { socials: [], websites: [] });
 });
+
+import { parseJupiterToken, parseGeckoToken, fetchLaunchMarket } from './curvemarket.js';
+test('launchpad token: Jupiter + GeckoTerminal are merged, curve percent kept', async () => {
+  const mint = 'MINTbonk';
+  const jup = [{ id: mint, name: 'pempfun', symbol: 'pempfun', icon: 'i.png', usdPrice: 0.00000306, mcap: 3060, fdv: 3060, liquidity: 84, launchpad: 'letsbonk.fun', stats1h: { priceChange: -13.6 } }];
+  const gk = { data: { attributes: { name: 'pempfun', price_usd: '0.0000031', fdv_usd: '3150', total_reserve_in_usd: '2975', volume_usd: { h24: '14019' }, launchpad_details: { graduation_percentage: 1.36, completed: false } } } };
+  const fetchFn = async (url) => ({ ok: true, status: 200, json: async () => (url.includes('jup.ag') ? jup : gk) });
+  const m = await fetchLaunchMarket(mint, fetchFn);
+  assert.equal(m.priceUsd, 0.00000306); assert.equal(m.marketCapUsd, 3060); assert.equal(m.liquidityUsd, 84);
+  assert.equal(m.launchpadPct, 1.36); assert.equal(m.dex, 'letsbonk.fun'); assert.equal(m.volume24h, 14019);
+  assert.equal(parseJupiterToken([], mint), null); assert.equal(parseGeckoToken({}), null);
+  assert.equal(await fetchLaunchMarket(mint, async () => ({ ok: false, status: 500 })), null);
+});

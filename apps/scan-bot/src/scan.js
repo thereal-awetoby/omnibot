@@ -154,6 +154,7 @@ function securityBlock(sec, intel, market) {
   const curve = intel?.curve;
   // a token still on the pump.fun curve shows how full the curve is (RugCheck's "100% locked" for a curve is not a real lock)
   if (curve && !curve.complete) rows.push(row('LP', `${val('Bonding curve')} · ${Math.round(curve.progressPct)}% filled`));
+  else if (!curve && market?.launchpadPct != null && market?.launchpadDone === false) rows.push(row('LP', `${val('Bonding curve')} · ${Math.max(1, Math.round(market.launchpadPct))}% filled`));
   else rows.push(row('LP', typeof lp === 'number' ? `${val(`${pctText(lp, lp % 1 ? 1 : 0)} locked/burned`)}${lp >= 90 ? ' ✅' : ''}` : NA));
 
   const dev = intel?.devPct;
