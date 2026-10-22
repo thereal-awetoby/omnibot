@@ -1169,6 +1169,9 @@ bot.on('message:migrate_to_chat_id', (ctx) => moveGroupData(ctx.chat.id, ctx.mes
 bot.on('message:migrate_from_chat_id', (ctx) => moveGroupData(ctx.message.migrate_from_chat_id, ctx.chat.id, 'Telegram upgrade'));
 // Owner tool: /movecalls lists the chats that have saved calls; /movecalls <old chat id> (sent in the group) brings them here.
 bot.command('movecalls', async (ctx) => {
+  try { return await runMoveCalls(ctx); } catch (e) { console.error('movecalls error:', e.message); return ctx.reply(`⚠️ I cannot reach the database right now (${String(e.message).slice(0, 80)}). Nothing was changed. Check the internet connection of the computer running the bot, then try again.`); }
+});
+async function runMoveCalls(ctx) {
   const ids = (process.env.ADMIN_IDS ?? '').split(',').map((v) => v.trim()).filter(Boolean);
   if (!ids.includes(String(ctx.from?.id))) return ctx.reply(`Only the bot owner can use this. Add your Telegram ID (${ctx.from?.id}) to ADMIN_IDS in the .env file and restart the bot.`);
   const arg = (ctx.match ?? '').trim();
@@ -1188,7 +1191,7 @@ bot.command('movecalls', async (ctx) => {
   const r = await moveGroupData(arg, ctx.chat.id, 'owner command');
   if (!r) return ctx.reply('The move failed. Nothing was changed. Check the bot window for the error.');
   return ctx.reply(`✅ <b>Calls restored</b>\n<pre>${esc(`├ Calls moved    ${r.calls}\n├ Duplicates     ${r.duplicates} (the earlier call was kept)\n├ Reminders      ${r.reminders}\n└ Followed X     ${r.follows}`)}</pre>Try /calls or /lb now.`, HTML);
-});
+}
 
 bot.catch((err) => console.error('bot error:', err.error?.message ?? err.message));
 bot.start({
