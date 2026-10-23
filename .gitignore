@@ -3,3 +3,5 @@ node_modules/
 apps/scan-bot/backgrounds/cache/
 apps/scan-bot/backgrounds/used/
 apps/scan-bot/backgrounds/used.json
+__pycache__/
+accounts.db

@@ -88,3 +88,25 @@ test('fetchTweets falls through the sources and reports the errors when all fail
   const none = await fetchTweets('abc', { env: {}, fetchFn: async () => ({ ok: false, status: 429, text: async () => '' }) });
   assert.match(none.error, /x-embed: X embed HTTP 429/);
 });
+
+import { rowsToTweets, loadXFeed } from './xfeed.js';
+test('worker rows become posts; the worker is the only source unless X_FALLBACKS=1', async () => {
+  const rows = [{ tweet_id: '20', text: 'ca 9Yub94kkNZF8ZQ2KMM9rQ4Pump1111111111111111pump', urls: ['https://x.com/a'], created_at: new Date('2026-10-23T08:00:00Z'), is_retweet: false }];
+  assert.deepEqual(rowsToTweets(rows)[0], { id: '20', text: rows[0].text, urls: ['https://x.com/a'], createdAt: Date.parse('2026-10-23T08:00:00Z'), isRetweet: false });
+  const never = async () => { throw new Error('must not be called'); };
+  const ok = await fetchTweets('abc', { env: {}, fetchFn: never, workerFn: async () => rows });
+  assert.equal(ok.via, 'x-worker'); assert.equal(ok.tweets.length, 1);
+  const bad = await fetchTweets('abc', { env: {}, fetchFn: never, workerFn: async () => { throw new Error('worker is not running'); } });
+  assert.equal(bad.error, 'x-worker: worker is not running');
+  let calls = 0;
+  const wide = await fetchTweets('abc', { env: { X_FALLBACKS: '1' }, fetchFn: async () => { calls++; return { ok: false, status: 429, text: async () => '' }; }, workerFn: async () => { throw new Error('off'); } });
+  assert.ok(calls > 0 && /x-embed/.test(wide.error));
+});
+test('loadXFeed trusts only a fresh, successful worker check', async () => {
+  const mk = (status, rows = []) => async (sql) => (/FROM x_feed_status/.test(sql) ? { rows: status ? [status] : [] } : /FROM x_feed /.test(sql) ? { rows } : { rows: [], rowCount: 0 });
+  const now = new Date();
+  await assert.rejects(loadXFeed('a', { q: mk(null) }), /not read this account yet/);
+  await assert.rejects(loadXFeed('a', { q: mk({ ok: true, checked_at: new Date(Date.now() - 3_600_000) }) }), /not running/);
+  await assert.rejects(loadXFeed('a', { q: mk({ ok: false, error: 'rate limited', checked_at: now }) }), /worker: rate limited/);
+  assert.deepEqual(await loadXFeed('a', { q: mk({ ok: true, checked_at: now }, [{ tweet_id: '1' }]) }), [{ tweet_id: '1' }]);
+});

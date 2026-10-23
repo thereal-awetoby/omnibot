@@ -26,6 +26,23 @@ export function ensureXTables() {
         newest_tweet_id TEXT,
         newest_tweet_at TIMESTAMPTZ
       )`);
+      // Filled by the Omni X worker (apps/x-worker), which is the only program that talks to X.
+      await query(`CREATE TABLE IF NOT EXISTS x_feed (
+        handle TEXT NOT NULL,
+        tweet_id TEXT NOT NULL,
+        text TEXT NOT NULL DEFAULT '',
+        urls TEXT[] NOT NULL DEFAULT '{}',
+        created_at TIMESTAMPTZ,
+        is_retweet BOOLEAN NOT NULL DEFAULT false,
+        seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (handle, tweet_id)
+      )`);
+      await query(`CREATE TABLE IF NOT EXISTS x_feed_status (
+        handle TEXT PRIMARY KEY,
+        checked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        ok BOOLEAN NOT NULL DEFAULT false,
+        error TEXT
+      )`);
     })().catch((e) => { ready = null; throw e; });
   }
   return ready;

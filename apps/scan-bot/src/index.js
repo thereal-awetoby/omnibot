@@ -3,7 +3,7 @@ import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
-  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, MAX_X_FOLLOWS,
+  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, query, MAX_X_FOLLOWS,
   MAX_WATCHES,
 } from '@omnibot/shared';
 import {
@@ -19,7 +19,7 @@ import { getArt, getMeme, refillArt, clearOldCache, OWN_DIR, sniffMime } from '.
 import { usdFromQuote, quoteUsd, fetchLaunchMarket } from './curvemarket.js';
 import { buildCandleSvg, defaultTf, parseTf, TFS } from './chartimg.js';
 import { shrinkArt, cardToJpeg, rawToJpeg, hasSharp } from './imgfast.js';
-import { normHandle, extractMints, pickNew, xCallerId, fetchTweets } from './xfeed.js';
+import { normHandle, extractMints, pickNew, xCallerId, fetchTweets, loadXFeed } from './xfeed.js';
 import { buildFollowAddedText, buildFollowingText, buildXCallHeader, buildMyCallsText, buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX } from './ux.js';
 import { mkdir, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -1088,7 +1088,7 @@ bot.command(['follow', 'addx', 'xfollow'], async (ctx) => {
   if (r === 'full') return ctx.reply(`This group already follows ${MAX_X_FOLLOWS} accounts. Remove one with /unfollow @handle first.`);
   if (r === 'exists') return ctx.reply(`Already following @${handle}. Use /following to see the status.`);
   // read it once now, so the answer says whether it works; posts up to now never become calls
-  const t = await withTyping(ctx, () => fetchTweets(handle));
+  const t = await withTyping(ctx, () => fetchTweets(handle, { workerFn: xWorkerFeed }));
   if (t.error) {
     await setXPoll({ handle, ok: false, error: t.error }).catch(() => {});
     console.error(`x follow @${handle}: ${t.error}`);
@@ -1126,7 +1126,7 @@ async function xCall(chatId, handle, tweet, mint) {
   console.log(`x call: @${handle} -> ${short(mint)} in ${chatId}`);
 }
 async function pollHandle(h) {
-  const r = await fetchTweets(h.handle);
+  const r = await fetchTweets(h.handle, { workerFn: xWorkerFeed });
   if (r.error) {
     const b = xBackoff.get(h.handle) ?? { fails: 0 };
     b.fails += 1; b.until = Date.now() + Math.min(15 * 60_000, 60_000 * 2 ** Math.min(b.fails, 4));
@@ -1148,6 +1148,7 @@ async function pollHandle(h) {
     }
   }
 }
+const xWorkerFeed = (handle) => loadXFeed(handle, { q: query });
 let checkingX = false;
 async function checkXFeeds() {
   if (checkingX) return;

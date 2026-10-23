@@ -133,15 +133,34 @@ async function viaApi(handle, token, fetchFn) {
 }
 
 // Tries every configured source. Returns { tweets, via } or { error }.
-export async function fetchTweets(handle, { env = process.env, fetchFn = fetch } = {}) {
+// Rows saved by the X worker -> the same post shape the other sources give.
+export const rowsToTweets = (rows) => (rows ?? []).map((r) => ({
+  id: String(r.tweet_id), text: r.text ?? '', urls: r.urls ?? [],
+  createdAt: r.created_at ? new Date(r.created_at).getTime() : null, isRetweet: !!r.is_retweet,
+}));
+
+// The posts the X worker saved for an account. Throws a plain reason when they cannot be trusted (worker off, not read yet, X refused).
+export async function loadXFeed(handle, { q, freshMs = 6 * 60_000 } = {}) {
+  const st = (await q('SELECT ok, error, checked_at FROM x_feed_status WHERE handle = $1', [handle])).rows[0];
+  if (!st) throw new Error('worker has not read this account yet');
+  if (Date.now() - new Date(st.checked_at).getTime() > freshMs) throw new Error('worker is not running');
+  if (!st.ok) throw new Error(`worker: ${st.error ?? 'cannot read'}`);
+  const { rows } = await q('SELECT tweet_id, text, urls, created_at, is_retweet FROM x_feed WHERE handle = $1 ORDER BY length(tweet_id) DESC, tweet_id DESC LIMIT 40', [handle]);
+  return rows;
+}
+
+export async function fetchTweets(handle, { env = process.env, fetchFn = fetch, workerFn = null } = {}) {
   const tries = [];
-  if (env.X_BEARER_TOKEN) tries.push(['x-api', () => viaApi(handle, env.X_BEARER_TOKEN, fetchFn)]);
+  if (workerFn) tries.push(['x-worker', async () => rowsToTweets(await workerFn(handle))]);
+  // With the worker in use, the free mirrors (all refused by X) are skipped unless X_FALLBACKS=1, so a check never waits on dead sites.
+  const onlyWorker = !!workerFn && env.X_FALLBACKS !== '1';
+  if (!onlyWorker && env.X_BEARER_TOKEN) tries.push(['x-api', () => viaApi(handle, env.X_BEARER_TOKEN, fetchFn)]);
   const mine = String(env.NITTER_URLS ?? '').split(',').map((s) => s.trim()).filter((s) => /^https:\/\//.test(s));
   // Free public mirrors are tried after yours; some are often down, so several are listed.
-  const bases = [...mine, ...(env.X_NO_MIRRORS ? [] : FREE_MIRRORS.filter((m) => !mine.includes(m)))];
+  const bases = onlyWorker ? [] : [...mine, ...(env.X_NO_MIRRORS ? [] : FREE_MIRRORS.filter((m) => !mine.includes(m)))];
   for (const base of bases) tries.push([`nitter ${new URL(base).host}`, () => viaNitter(handle, base, fetchFn)]);
-  tries.push(['x-embed', () => viaSyndication(handle, fetchFn)]);
-  tries.push(['x-embed2', () => viaSyndication(handle, fetchFn, 'https://cdn.syndication.twimg.com/srv/timeline-profile/screen-name/')]);
+  if (!onlyWorker) tries.push(['x-embed', () => viaSyndication(handle, fetchFn)]);
+  if (!onlyWorker) tries.push(['x-embed2', () => viaSyndication(handle, fetchFn, 'https://cdn.syndication.twimg.com/srv/timeline-profile/screen-name/')]);
   const errors = [];
   for (const [via, run] of tries) {
     try { return { tweets: await run(), via }; } catch (e) { errors.push(`${via}: ${e.message}`); }

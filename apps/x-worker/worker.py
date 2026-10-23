@@ -1,0 +1,188 @@
+"""Omni X worker: the only program that talks to X.
+
+It reads the posts of every account people /follow in the Scan bot (table x_follows) with twscrape and a throwaway
+X account, and saves them in the database (table x_feed). The Scan bot reads that table and makes the calls, so
+calls, PnL cards and the leaderboard work exactly as for any other call. If this worker stops, only X reading stops.
+"""
+import asyncio
+import logging
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlsplit, parse_qs
+
+log = logging.getLogger("omni-x-worker")
+
+CHECK_EVERY = int(os.getenv("X_CHECK_SECONDS", "75"))      # one full round over all followed accounts
+PER_ACCOUNT_PAUSE = float(os.getenv("X_PAUSE_SECONDS", "4"))  # polite gap between two accounts
+FETCH_TIMEOUT = int(os.getenv("X_FETCH_TIMEOUT", "90"))
+TWEETS_PER_CHECK = 20
+KEEP_DAYS = 3
+
+
+def load_env():
+    """Reads DATABASE_URL from the bots' .env (two folders up) unless it is already set."""
+    if os.getenv("DATABASE_URL"):
+        return
+    env = Path(__file__).resolve().parents[2] / ".env"
+    if not env.exists():
+        return
+    for line in env.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip().strip('"').strip("'")
+        if k == "DATABASE_URL":
+            os.environ[k] = v
+
+
+def clean_dsn(url):
+    """asyncpg does not accept every option a Neon link carries (channel_binding...). Returns (dsn, ssl)."""
+    parts = urlsplit(url)
+    opts = parse_qs(parts.query)
+    wants_ssl = (opts.get("sslmode", [""])[0] in ("require", "verify-full", "verify-ca")) or (
+        parts.hostname not in (None, "localhost", "127.0.0.1")
+    )
+    dsn = f"{parts.scheme}://{parts.netloc}{parts.path}"
+    return dsn, ("require" if wants_ssl else None)
+
+
+def tweet_to_row(tw):
+    """One twscrape tweet -> the plain dict we store. Tolerant: different twscrape versions name fields differently."""
+    text = getattr(tw, "rawContent", None) or getattr(tw, "text", None) or ""
+    urls = []
+    for link in (getattr(tw, "links", None) or []):
+        u = getattr(link, "url", None) or getattr(link, "tcourl", None)
+        if u:
+            urls.append(str(u))
+    qt = getattr(tw, "quotedTweet", None)
+    if qt is not None:  # a quote post: the quoted text and links may hold the address too
+        text += "\n" + (getattr(qt, "rawContent", None) or "")
+        for link in (getattr(qt, "links", None) or []):
+            u = getattr(link, "url", None)
+            if u:
+                urls.append(str(u))
+    date = getattr(tw, "date", None)
+    if isinstance(date, datetime) and date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    return {
+        "id": str(getattr(tw, "id_str", None) or tw.id),
+        "text": text,
+        "urls": urls,
+        "created_at": date,
+        "is_retweet": getattr(tw, "retweetedTweet", None) is not None,
+    }
+
+
+async def fetch_handle(api, handle, uid_cache):
+    """The latest posts of one account. Raises if the account does not exist or X refuses."""
+    uid = uid_cache.get(handle)
+    if uid is None:
+        user = await api.user_by_login(handle)
+        if not user:
+            raise RuntimeError("no such X account")
+        uid = uid_cache[handle] = user.id
+    rows = []
+    async for tw in api.user_tweets(uid, limit=TWEETS_PER_CHECK):
+        rows.append(tweet_to_row(tw))
+        if len(rows) >= TWEETS_PER_CHECK:
+            break
+    return rows
+
+
+async def run_round(api, db, uid_cache, sleep=asyncio.sleep):
+    handles = await db.handles()
+    for h in handles:
+        try:
+            rows = await asyncio.wait_for(fetch_handle(api, h, uid_cache), FETCH_TIMEOUT)
+            await db.save(h, rows)
+            await db.status(h, True, None)
+            log.info("@%s: %d posts read", h, len(rows))
+        except Exception as e:  # one account failing never stops the others
+            msg = (str(e) or e.__class__.__name__)[:180]
+            log.warning("@%s: %s", h, msg)
+            try:
+                await db.status(h, False, msg)
+            except Exception as e2:
+                log.error("could not save status: %s", e2)
+        await sleep(PER_ACCOUNT_PAUSE)
+    return len(handles)
+
+
+class PgDb:
+    def __init__(self, pool):
+        self.pool = pool
+
+    @classmethod
+    async def connect(cls, url):
+        import asyncpg
+        dsn, ssl = clean_dsn(url)
+        pool = await asyncpg.create_pool(dsn, ssl=ssl, min_size=1, max_size=3, command_timeout=30)
+        db = cls(pool)
+        await db.ensure()
+        return db
+
+    async def ensure(self):  # same tables the Scan bot creates; safe to run twice
+        async with self.pool.acquire() as c:
+            await c.execute("""CREATE TABLE IF NOT EXISTS x_follows (chat_id BIGINT NOT NULL, handle TEXT NOT NULL, added_by BIGINT,
+                added_by_name TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_tweet_id TEXT, PRIMARY KEY (chat_id, handle))""")
+            await c.execute("""CREATE TABLE IF NOT EXISTS x_feed (handle TEXT NOT NULL, tweet_id TEXT NOT NULL, text TEXT NOT NULL DEFAULT '',
+                urls TEXT[] NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ, is_retweet BOOLEAN NOT NULL DEFAULT false,
+                seen_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (handle, tweet_id))""")
+            await c.execute("""CREATE TABLE IF NOT EXISTS x_feed_status (handle TEXT PRIMARY KEY, checked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                ok BOOLEAN NOT NULL DEFAULT false, error TEXT)""")
+
+    async def handles(self):
+        async with self.pool.acquire() as c:
+            return [r["handle"] for r in await c.fetch("SELECT DISTINCT handle FROM x_follows ORDER BY handle")]
+
+    async def save(self, handle, rows):
+        if not rows:
+            return
+        async with self.pool.acquire() as c:
+            async with c.transaction():
+                for r in rows:
+                    await c.execute(
+                        """INSERT INTO x_feed (handle, tweet_id, text, urls, created_at, is_retweet) VALUES ($1,$2,$3,$4,$5,$6)
+                           ON CONFLICT (handle, tweet_id) DO UPDATE SET text = EXCLUDED.text, urls = EXCLUDED.urls""",
+                        handle, r["id"], r["text"], r["urls"], r["created_at"], r["is_retweet"])
+                await c.execute("DELETE FROM x_feed WHERE handle = $1 AND seen_at < now() - ($2 || ' days')::interval", handle, str(KEEP_DAYS))
+
+    async def status(self, handle, ok, error):
+        async with self.pool.acquire() as c:
+            await c.execute(
+                """INSERT INTO x_feed_status (handle, checked_at, ok, error) VALUES ($1, now(), $2, $3)
+                   ON CONFLICT (handle) DO UPDATE SET checked_at = now(), ok = $2, error = $3""", handle, ok, error)
+
+
+async def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+    load_env()
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        sys.exit("DATABASE_URL was not found. Run this from the omnibot folder that has the .env file.")
+    from twscrape import API  # imported here so the tests do not need it
+    api = API(str(Path(__file__).resolve().parent / "accounts.db"))
+    if not await api.pool.accounts_info():
+        sys.exit("No X account added yet. Double-click add-account.bat first.")
+    db = await PgDb.connect(url)
+    log.info("Omni X worker running. Checking followed accounts every ~%ss. Press Ctrl+C to stop.", CHECK_EVERY)
+    uid_cache = {}
+    while True:
+        try:
+            n = await run_round(api, db, uid_cache)
+            if n == 0:
+                log.info("Nobody is followed yet. Use /follow @name in a group.")
+        except Exception as e:
+            log.error("round failed: %s", e)
+        await asyncio.sleep(CHECK_EVERY)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
