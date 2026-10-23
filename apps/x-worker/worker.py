@@ -199,6 +199,8 @@ class PgDb:
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+    for noisy in ("httpx", "httpcore"):  # one line per X request is just noise
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     load_env()
     url = os.getenv("DATABASE_URL")
     if not url:

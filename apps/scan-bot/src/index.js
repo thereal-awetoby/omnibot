@@ -1118,6 +1118,7 @@ async function xCall(chatId, handle, tweet, mint) {
   const card = await cachedCard(mint);
   const m = card.market;
   if (!m?.priceUsd) return;
+  await upsertUser({ id: xCallerId(handle), username: handle }); // calls.caller_id must point at a users row
   const r = await recordFirstCall({ chatId, mint, symbol: m.symbol, callerId: xCallerId(handle), callerName: `@${handle}`, priceUsd: m.priceUsd, mcapUsd: m.marketCapUsd });
   if (!r.first) return; // someone already called it in this group
   const text = `${buildXCallHeader(handle, tweet.id)}\n\n${buildScanCard({ mint, market: m, security: card.security, intel: card.intel, callLine: buildCallLine(r.call, m.priceUsd), watched: false })}`;
