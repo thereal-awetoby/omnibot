@@ -32,7 +32,7 @@ const noWalletKb = () => new InlineKeyboard().text('Create wallet', 'create').te
 const mainKb = () =>
   new InlineKeyboard()
     .text('🚀 Create token', 'newtoken').row()
-    .text('📂 My launches', 'launches').text('👛 Wallet', 'wallet').row()
+    .text('📂 My launches', 'launches').text('💼 Wallet', 'wallet').row()
     .text('🔑 Export key', 'exportkey').text('❓ Help', 'help').row()
     .url('Omni Scan', `https://t.me/${SCAN_USERNAME}`).url('Omni Trade', `https://t.me/${TRADE_USERNAME}`);
 
@@ -52,18 +52,30 @@ const autoDelete = (ctx, msg, ms = 60_000) =>
 
 const HELP = '<b>Omni Launch commands</b>\n\n/create - make a new token on pump.fun\n/launches - your previous launches\n/wallet - launch wallet and balance\n/createwallet - make a launch wallet\n/importwallet - use a wallet you already have\n/exportkey - show your private key\n/scan - open Omni Scan\n/trade - open Omni Trade\n\nTip: tap an address to copy it.';
 
+const quote = (inner) => `<blockquote>${inner}</blockquote>`;
+
+// Wallet + balance block shared by the home screen and /wallet.
+async function walletBlock(w) {
+  let bal = null;
+  try { bal = await getSolBalance(w.public_key); } catch { /* RPC hiccup */ }
+  const status = bal === null ? '' : bal >= CREATE_COST_SOL ? '\n✅ <i>Ready to launch</i>' : `\n⚠️ <i>Add at least ${CREATE_COST_SOL} SOL to launch a token</i>`;
+  return (
+    `💼 <b>Wallet</b>\n${quote(code(w.public_key))}\n` +
+    `💰 <b>Balance</b>\n${quote(`<b>${bal === null ? '?' : fmtSol(bal)} SOL</b>`)}${status}`
+  );
+}
+
 async function showHome(ctx) {
   const w = await getLaunchWallet(ctx.from.id);
   if (!w) {
     return ctx.reply(
-      '<b>🚀 Omni Launch</b>\nCreate your own token on pump.fun right from Telegram, in about a minute.\n\n<b>Step 1:</b> get a launch wallet. Create a new one, or import one you already have.',
+      '🚀 <b>OMNI LAUNCH</b>\n<i>Launch a token on pump.fun in about a minute.</i>\n\n' +
+      '💼 <b>Step 1: get a launch wallet</b>\n' + quote('Create a new one, or import one you already have.'),
       { ...HTML, reply_markup: noWalletKb() });
   }
-  let bal = '?';
-  try { bal = fmtSol(await getSolBalance(w.public_key)); } catch { /* RPC hiccup */ }
   return ctx.reply(
-    `<b>🚀 Omni Launch</b>\nCreate your token on pump.fun in about a minute.\n\n` +
-    `<b>Wallet</b>  ${code(w.public_key)}\n<b>Balance</b>  ${bal} SOL\n\nTap Create token to start.`,
+    '🚀 <b>OMNI LAUNCH</b>\n<i>Launch a token on pump.fun in about a minute.</i>\n\n' +
+    (await walletBlock(w)) + '\n\nTap <b>Create token</b> to start.',
     { ...HTML, reply_markup: mainKb() });
 }
 
@@ -80,9 +92,9 @@ async function doCreateWallet(ctx) {
     throw e;
   }
   const msg = await ctx.reply(
-    `Launch wallet created.\n\nAddress (tap to copy):\n${code(kp.publicKey.toBase58())}\n\n` +
-    `Private key. Save it somewhere safe NOW, this message deletes itself in 60 seconds:\n${code(secretToBase58(kp))}\n\n` +
-    'Never share the key with anyone. Send SOL to the address above to fund your launches.',
+    `✅ <b>Launch wallet created</b>\n\n💼 <b>Address</b> (tap to copy)\n${quote(code(kp.publicKey.toBase58()))}\n` +
+    `🔑 <b>Private key</b>\n${quote(code(secretToBase58(kp)))}\n` +
+    '⚠️ <b>Save the key somewhere safe NOW.</b> This message deletes itself in 60 seconds. Never share the key with anyone.\n\nSend SOL to the address above to fund your launches.',
     HTML);
   autoDelete(ctx, msg);
   return showHome(ctx);
@@ -91,11 +103,8 @@ async function doCreateWallet(ctx) {
 async function doWallet(ctx) {
   const w = await getLaunchWallet(ctx.from.id);
   if (!w) return ctx.reply('No launch wallet yet.', { reply_markup: noWalletKb() });
-  let bal = '?';
-  try { bal = fmtSol(await getSolBalance(w.public_key)); } catch { /* RPC hiccup */ }
   return ctx.reply(
-    `Launch wallet\n\nAddress (tap to copy):\n${code(w.public_key)}\n\nBalance: ${bal} SOL\n\n` +
-    `A launch needs about ${CREATE_COST_SOL} SOL for network costs, plus the first buy you choose.`,
+    (await walletBlock(w)) + `\n\n<i>A launch needs about ${CREATE_COST_SOL} SOL for network costs, plus the first buy you choose. Tap the address to copy it, then send SOL to it.</i>`,
     { ...HTML, reply_markup: mainKb() });
 }
 
@@ -104,7 +113,7 @@ async function doExport(ctx) {
   if (!w) return ctx.reply('No launch wallet yet.', { reply_markup: noWalletKb() });
   const kp = keypairFromBytes(decryptSecret(w.encrypted_secret));
   const msg = await ctx.reply(
-    `Private key for ${code(w.public_key)}\n\n${code(secretToBase58(kp))}\n\nThis message deletes itself in 60 seconds. Never share it.`, HTML);
+    `🔑 <b>Private key</b>\n${quote(code(secretToBase58(kp)))}\n💼 <b>Wallet</b>\n${quote(code(w.public_key))}\n⚠️ This message deletes itself in 60 seconds. Never share the key.`, HTML);
   autoDelete(ctx, msg);
 }
 
@@ -192,7 +201,7 @@ function summaryText(w) {
   const dev = lamportsToSol(d.devBuyLamports);
   return (
     `<b>✅ Ready to launch?</b>\n\n` +
-    `<b>${esc(d.name)}</b>  ($${esc(d.symbol)})\n${esc(d.description)}\n\n` +
+    `<b>${esc(d.name)}</b>  ($${esc(d.symbol)})\n${quote(esc(d.description))}\n` +
     `Logo: ✅\nX: ${d.twitter ? esc(d.twitter) : '-'}\nTelegram: ${d.telegram ? esc(d.telegram) : '-'}\nWebsite: ${d.website ? esc(d.website) : '-'}\n\n` +
     `First buy: ${dev > 0 ? fmtSol(dev) + ' SOL' : 'none'}\n` +
     `From your wallet: about ${fmtSol(lamportsToSol(neededLamports(d.devBuyLamports)))} SOL (${CREATE_COST_SOL} network costs${dev > 0 ? ' + first buy' : ''}). Unused network costs stay in your wallet.\n\n` +
@@ -322,13 +331,13 @@ async function doLaunch(ctx) {
     if (r.status === 'success') {
       await finishLaunch(launchId, { status: 'success', mint: mintAddr, signature: r.signature, metadataUri: uri });
       return set(
-        `<b>🎉 ${esc(d.name)} ($${esc(d.symbol)}) is live!</b>\n\nContract address (tap to copy):\n${code(mintAddr)}\n\nPaste the address in Omni Scan to see its scan card.`,
+        `🎉 <b>${esc(d.name)} ($${esc(d.symbol)}) is live!</b>\n\n📋 <b>Contract address</b> (tap to copy)\n${quote(code(mintAddr))}\n<i>Paste the address in Omni Scan to see its scan card.</i>`,
         doneKb(mintAddr, r.signature));
     }
     if (r.status === 'unknown') {
       await finishLaunch(launchId, { status: 'unknown', mint: mintAddr, signature: r.signature, metadataUri: uri, error: 'Sent but not confirmed in time' });
       return set(
-        `<b>⏳ Sent, not confirmed yet</b>\n\nIt may still land. Check the transaction before trying again.\n\nToken address:\n${code(mintAddr)}`,
+        `<b>⏳ Sent, not confirmed yet</b>\n\nIt may still land. Check the transaction before trying again.\n\n📋 <b>Token address</b>\n${quote(code(mintAddr))}`,
         doneKb(null, r.signature));
     }
     await finishLaunch(launchId, { status: 'failed', metadataUri: uri, error: r.error });
