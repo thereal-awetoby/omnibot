@@ -15,7 +15,8 @@ from urllib.parse import urlsplit, parse_qs
 
 log = logging.getLogger("omni-x-worker")
 
-CHECK_EVERY = int(os.getenv("X_CHECK_SECONDS", "75"))      # one full round over all followed accounts
+CHECK_EVERY = int(os.getenv("X_CHECK_SECONDS", "0"))        # 0 = automatic (see round_period); a number forces that many seconds
+SECONDS_PER_REQUEST = 22.5  # X allows about 40 timeline reads per 15 minutes per X account: one read every ~22s per account
 PER_ACCOUNT_PAUSE = float(os.getenv("X_PAUSE_SECONDS", "4"))  # polite gap between two accounts
 FETCH_TIMEOUT = int(os.getenv("X_FETCH_TIMEOUT", "90"))
 TWEETS_PER_CHECK = 20
@@ -120,6 +121,14 @@ async def fetch_handle(api, handle, uid_cache):
     return rows
 
 
+def round_period(handles, accounts):
+    """Seconds between the starts of two rounds: as fast as the X accounts allow, never faster (a rate-limited
+    account only makes everything slower). More throwaway accounts in the pool = a shorter wait."""
+    if CHECK_EVERY > 0:
+        return CHECK_EVERY
+    return max(15.0, SECONDS_PER_REQUEST * max(handles, 1) / max(accounts or 1, 1))
+
+
 async def run_round(api, db, uid_cache, sleep=asyncio.sleep):
     handles = await db.handles()
     if not handles:
@@ -210,16 +219,20 @@ async def main():
     if not await api.pool.accounts_info():
         sys.exit("No X account added yet. Double-click add-account.bat first.")
     db = await PgDb.connect(url)
-    log.info("Omni X worker running. Checking followed accounts every ~%ss. Press Ctrl+C to stop.", CHECK_EVERY)
+    log.info("Omni X worker running. Press Ctrl+C to stop.")
     uid_cache = {}
+    loop = asyncio.get_event_loop()
     while True:
+        started = loop.time()
+        n = 0
         try:
             n = await run_round(api, db, uid_cache)
             if n == 0:
                 log.info("Nobody is followed yet. Use /follow @name in a group.")
         except Exception as e:
             log.error("round failed: %s", e)
-        await asyncio.sleep(CHECK_EVERY)
+        period = round_period(n, await active_accounts(api))
+        await asyncio.sleep(max(3.0, period - (loop.time() - started)))
 
 
 if __name__ == "__main__":

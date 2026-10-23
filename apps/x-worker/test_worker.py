@@ -41,6 +41,12 @@ class T(unittest.TestCase):
         self.assertEqual(n, 3); self.assertEqual([r["id"] for r in db.saved["a"]], ["1", "2"])
         self.assertEqual(db.stat["a"], (True, None)); self.assertFalse(db.stat["b"][0]); self.assertEqual(db.stat["b"][1], "rate limited")
         self.assertEqual(db.stat["ghost"], (False, "no such X account"))
+    def test_round_pacing(self):
+        self.assertEqual(worker.round_period(1, 1), 22.5)
+        self.assertAlmostEqual(worker.round_period(3, 1), 67.5)
+        self.assertAlmostEqual(worker.round_period(3, 3), 22.5)
+        self.assertEqual(worker.round_period(0, None), 22.5)
+        self.assertEqual(worker.round_period(1, 10), 15.0)
     def test_dsn(self):
         d, ssl = worker.clean_dsn("postgresql://u:p@ep-x.neon.tech/db?sslmode=require&channel_binding=require")
         self.assertEqual(d, "postgresql://u:p@ep-x.neon.tech/db"); self.assertEqual(ssl, "require")

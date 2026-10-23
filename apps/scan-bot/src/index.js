@@ -1071,7 +1071,7 @@ async function checkCalls() {
 
 
 // ---- Followed X accounts: a token address they post becomes a call in the group ----
-const X_EVERY_MS = (Number(process.env.X_POLL_SECONDS) || 90) * 1000;
+const X_EVERY_MS = (Number(process.env.X_POLL_SECONDS) || 10) * 1000;
 const xBackoff = new Map(); // handle -> { fails, until }
 const xLogged = new Map();
 async function canManageGroup(ctx) {
@@ -1268,6 +1268,6 @@ bot.start({
     setInterval(checkCalls, 90_000);
     setInterval(checkTargets, 45_000);
     setInterval(checkReminders, 20_000);
-    ensureXTables().then(() => setInterval(checkXFeeds, 30_000)).catch((e) => console.error('x tables error:', e.message));
+    ensureXTables().then(() => setInterval(checkXFeeds, 10_000)).catch((e) => console.error('x tables error:', e.message));
   },
 });
