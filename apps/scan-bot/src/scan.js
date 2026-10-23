@@ -1,5 +1,6 @@
 // Pure helpers for the Scan bot: text cards, price-change maths, alert rules. No Telegram, no network.
 import { esc, formatUsd, formatPrice } from '@omnibot/shared';
+import { callerHtml, isXCaller } from './callerlink.js';
 
 const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 export const looksLikeMint = (s) => MINT_RE.test(String(s ?? '').trim());
@@ -201,7 +202,7 @@ export function buildScanCard({ mint, market, security = null, intel = null, cal
 }
 
 // ---- group calls ----
-const nameOf = (c) => (c?.caller_name ? esc(c.caller_name) : 'someone');
+const nameOf = (c) => (c?.caller_name ? (callerHtml(c.caller_name, c.caller_id, { at: String(c.caller_name).startsWith('@') }) || 'someone') : 'someone');
 
 export const multiple = (from, to) => (from > 0 && to > 0 ? to / from : null);
 const multText = (x) => (x === null ? '' : `  ·  now ${x >= 10 ? x.toFixed(0) : x.toFixed(2)}x ${x >= 2 ? '🚀' : x < 1 ? '🔻' : ''}`.trimEnd());
@@ -233,7 +234,7 @@ export function buildLeaderboardText(board, days = 30) {
   const medals = ['🥇', '🥈', '🥉'];
   const lines = [`<b>🏆 Leaderboard</b>  ·  last ${days} days`, ''];
   board.slice(0, 10).forEach((e, i) => {
-    lines.push(`${medals[i] ?? `${i + 1}.`} <b>${e.name ? esc(e.name) : 'someone'}</b>  ·  avg ${fx(e.avg)}x  ·  best ${fx(e.best)}x  ·  ${e.hits}/${e.calls} hit 2x`);
+    lines.push(`${medals[i] ?? `${i + 1}.`} <b>${e.name ? callerHtml(e.name, e.callerId, { at: String(e.name).startsWith('@') }) : 'someone'}</b>  ·  avg ${fx(e.avg)}x  ·  best ${fx(e.best)}x  ·  ${e.hits}/${e.calls} hit 2x`);
   });
   lines.push('', '<i>Multiple = price now vs price when first called here.</i>');
   return lines.join('\n');
@@ -305,9 +306,9 @@ export function buildGroupBoardText(board, { label = '24h', groupName = null, no
     row('Hit 2x', pct(s.hit2)), row('Hit 5x', pct(s.hit5)),
     row('Median', fmtX(s.median)), row('Average', fmtX(s.avg)), row('Best', fmtX(s.best)),
   ].map((l, i, all) => `${i === all.length - 1 ? '└' : '├'} ${l}`);
-  const nm = (n) => esc(String(n ?? 'someone').replace(/^@/, '').slice(0, 18));
+  const nm = (n, id) => (isXCaller(id) ? callerHtml(n, id, { at: false, max: 18 }) || 'someone' : esc(String(n ?? 'someone').replace(/^@/, '').slice(0, 18)));
   const callers = board.callers.slice(0, 5).map((e, i) =>
-    `${medals[i] ?? `${i + 1}.`} ${nm(e.name)}\n   └ avg ${fmtX(e.avg)} · ${e.calls} call${e.calls === 1 ? '' : 's'} · 🎯 ${pct(e.hits / e.calls)}`);
+    `${medals[i] ?? `${i + 1}.`} ${nm(e.name, e.callerId)}\n   └ avg ${fmtX(e.avg)} · ${e.calls} call${e.calls === 1 ? '' : 's'} · 🎯 ${pct(e.hits / e.calls)}`);
   const best = board.top.slice(0, 10).map((r, i) => {
     const sym = esc(r.symbol ? `$${r.symbol}` : `${r.mint.slice(0, 4)}…`);
     const age = formatDuration(now - new Date(r.created_at).getTime()) ?? '';

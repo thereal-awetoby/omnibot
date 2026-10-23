@@ -597,7 +597,7 @@ async function replyPnl(ctx, call) {
   const r = await pnlPng(call, prices, ctx.chat.title);
   if (!r) return ctx.reply('No price found for that token right now.');
   const tC = Date.now();
-  const sent = await ctx.replyWithPhoto(new InputFile(r.png, r.name), { caption: buildPnlCaption({ symbol: call.symbol, callerName: call.caller_name, x: r.x }), parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('🗑', 'x') });
+  const sent = await ctx.replyWithPhoto(new InputFile(r.png, r.name), { caption: buildPnlCaption({ symbol: call.symbol, callerName: call.caller_name, callerId: call.caller_id, x: r.x }), parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('🗑', 'x') });
   console.log(`/pnl: price ${tPrice}ms, upload ${Date.now() - tC}ms`);
   return sent;
 }
@@ -1058,7 +1058,7 @@ async function checkCalls() {
         const title = (await bot.api.getChat(r.chat_id).catch(() => null))?.title;
         const card = await pnlPng(r, prices, title, { skipHistory: true });
         if (!card) continue;
-        await bot.api.sendPhoto(r.chat_id, new InputFile(card.png, card.name), { caption: buildPnlCaption({ symbol: r.symbol, callerName: r.caller_name, x: card.x, milestone: true }), parse_mode: 'HTML' });
+        await bot.api.sendPhoto(r.chat_id, new InputFile(card.png, card.name), { caption: buildPnlCaption({ symbol: r.symbol, callerName: r.caller_name, callerId: r.caller_id, x: card.x, milestone: true }), parse_mode: 'HTML' });
       } catch (e) { console.error('multiplier post error:', e.message); }
       await new Promise((res) => setTimeout(res, 100));
     }

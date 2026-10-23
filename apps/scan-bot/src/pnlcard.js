@@ -1,4 +1,5 @@
 import { esc, formatUsd } from '@omnibot/shared';
+import { callerHtml } from './callerlink.js';
 
 // Multiples that get announced in the group (once each).
 export const MILESTONES = [2, 3, 5, 10, 20, 50, 100, 200, 500, 1000];
@@ -65,9 +66,9 @@ export function buildPnlSvg({ symbol, callerName, entryMcap, peakMcap, x, ageTex
   ].join('');
 }
 
-export function buildPnlCaption({ symbol, callerName, x, milestone = false }) {
+export function buildPnlCaption({ symbol, callerName, callerId = null, x, milestone = false }) {
   const name = symbol ? `$${esc(symbol)}` : 'This token';
-  const who = callerName ? esc(callerName) : 'someone';
+  const who = callerName ? (callerHtml(callerName, callerId, { at: String(callerName).startsWith('@') }) || 'someone') : 'someone';
   return milestone
     ? `🚀 <b>${name}</b> hit <b>${fmtMult(x)}</b> since ${who} called it`
     : `📊 <b>${name}</b> · peaked at <b>${fmtMult(x)}</b> since ${who} called it`;
