@@ -28,13 +28,12 @@ const launching = new Set(); // users with a launch in progress (stops double ta
 const OPTIONAL = { twitter: 'X (Twitter) link or @name', telegram: 'Telegram group/channel link', website: 'website link' };
 const NEXT = { name: 'symbol', symbol: 'description', description: 'image', image: 'twitter', twitter: 'telegram', telegram: 'website', website: 'devbuy' };
 
-const cancelKb = () => new InlineKeyboard().text('Cancel', 'cancel');
-const skipKb = () => new InlineKeyboard().text('Skip', 'skip').text('Cancel', 'cancel');
 const noWalletKb = () => new InlineKeyboard().text('Create wallet', 'create').text('Import wallet', 'import');
 const mainKb = () =>
   new InlineKeyboard()
-    .text('Create token', 'newtoken').text('My launches', 'launches').row()
-    .text('Wallet', 'wallet').text('Export key', 'exportkey').row()
+    .text('🚀 Create token', 'newtoken').row()
+    .text('📂 My launches', 'launches').text('👛 Wallet', 'wallet').row()
+    .text('🔑 Export key', 'exportkey').text('❓ Help', 'help').row()
     .url('Omni Scan', `https://t.me/${SCAN_USERNAME}`).url('Omni Trade', `https://t.me/${TRADE_USERNAME}`);
 
 bot.use(async (ctx, next) => {
@@ -51,15 +50,20 @@ bot.use(async (ctx, next) => {
 const autoDelete = (ctx, msg, ms = 60_000) =>
   setTimeout(() => ctx.api.deleteMessage(msg.chat.id, msg.message_id).catch(() => {}), ms);
 
+const HELP = '<b>Omni Launch commands</b>\n\n/create - make a new token on pump.fun\n/launches - your previous launches\n/wallet - launch wallet and balance\n/createwallet - make a launch wallet\n/importwallet - use a wallet you already have\n/exportkey - show your private key\n/scan - open Omni Scan\n/trade - open Omni Trade\n\nTip: tap an address to copy it.';
+
 async function showHome(ctx) {
   const w = await getLaunchWallet(ctx.from.id);
   if (!w) {
     return ctx.reply(
-      'Welcome to Omni Launch Bot.\n\nCreate your own token on pump.fun right from Telegram. First you need a launch wallet: create a new one or import one you already have.',
-      { reply_markup: noWalletKb() });
+      '<b>🚀 Omni Launch</b>\nCreate your own token on pump.fun right from Telegram, in about a minute.\n\n<b>Step 1:</b> get a launch wallet. Create a new one, or import one you already have.',
+      { ...HTML, reply_markup: noWalletKb() });
   }
+  let bal = '?';
+  try { bal = fmtSol(await getSolBalance(w.public_key)); } catch { /* RPC hiccup */ }
   return ctx.reply(
-    `Omni Launch Bot\n\nLaunch wallet (tap to copy):\n${code(w.public_key)}\n\nTap Create token to start.`,
+    `<b>🚀 Omni Launch</b>\nCreate your token on pump.fun in about a minute.\n\n` +
+    `<b>Wallet</b>  ${code(w.public_key)}\n<b>Balance</b>  ${bal} SOL\n\nTap Create token to start.`,
     { ...HTML, reply_markup: mainKb() });
 }
 
@@ -111,84 +115,129 @@ async function startImport(ctx) {
 }
 
 // ---------- wizard ----------
+// One message is edited in place for the whole flow, and your answers are deleted from the chat, so it stays clean.
 
-const PROMPTS = {
-  name: () => ['Step 1/8: What is the token name? (up to 32 characters)', cancelKb()],
-  symbol: () => ['Step 2/8: What is the ticker? Letters or numbers, up to 10 (example: OMNI)', cancelKb()],
-  description: () => ['Step 3/8: Write a short description (up to 500 characters).', cancelKb()],
-  image: () => [`Step 4/8: Send the logo as a picture (JPG, PNG, GIF or WEBP, up to ${MAX_IMAGE_BYTES / 1024 / 1024} MB). A square image looks best.`, cancelKb()],
-  twitter: () => [`Step 5/8: ${OPTIONAL.twitter}? Or tap Skip.`, skipKb()],
-  telegram: () => [`Step 6/8: ${OPTIONAL.telegram}? Or tap Skip.`, skipKb()],
-  website: () => [`Step 7/8: ${OPTIONAL.website}? Or tap Skip.`, skipKb()],
-  devbuy: () => [
-    `Step 8/8: How much SOL do you want to buy of your own token in the same transaction (your first buy)? Send an amount like 0.5, or 0 for none.\n\nThis is a normal buy from your own wallet, shown openly on pump.fun like any other.`,
-    new InlineKeyboard().text('0', 'dev:0').text('0.1', 'dev:0.1').text('0.5', 'dev:0.5').text('1', 'dev:1').row().text('Cancel', 'cancel'),
-  ],
+const STEPS = ['name', 'symbol', 'description', 'image', 'twitter', 'telegram', 'website', 'devbuy'];
+const LABEL = { name: 'Name', symbol: 'Ticker', description: 'Description', image: 'Logo', twitter: 'X', telegram: 'Telegram', website: 'Website', devbuy: 'First buy' };
+const ASK = {
+  name: 'What is your token called?\nUp to 32 characters.',
+  symbol: 'What is the ticker?\nLetters or numbers, up to 10. Example: OMNI',
+  description: 'Write a short description.\nUp to 500 characters.',
+  image: `Send the logo as a picture.\nJPG, PNG, GIF or WEBP, up to ${MAX_IMAGE_BYTES / 1024 / 1024} MB. Square looks best.`,
+  twitter: 'Your X (Twitter) link or @name.\nOptional.',
+  telegram: 'Your Telegram group or channel link.\nOptional.',
+  website: 'Your website link.\nOptional.',
+  devbuy: 'How much SOL do you want to buy of your own token in the same transaction?\nPick a button or type an amount like 0.5. It is a normal buy from your wallet, visible on pump.fun like any other.',
 };
+const bar = (i) => '▰'.repeat(i + 1) + '▱'.repeat(STEPS.length - i - 1);
 
-async function ask(ctx, step) {
-  const w = wizards.get(ctx.from.id);
+function collected(w) {
+  const d = w.d;
+  const rows = [];
+  if (d.name) rows.push(`Name: ${esc(d.name)}`);
+  if (d.symbol) rows.push(`Ticker: $${esc(d.symbol)}`);
+  if (d.description) rows.push(`About: ${esc(d.description.length > 60 ? d.description.slice(0, 57) + '...' : d.description)}`);
+  if (w.image) rows.push('Logo: ✅');
+  return rows.join('\n');
+}
+
+function stepText(w, step, err) {
+  const i = STEPS.indexOf(step);
+  const done = collected(w);
+  return (
+    `<b>🚀 New token</b>\n${bar(i)}  ${i + 1}/${STEPS.length}\n\n` +
+    (done ? `${done}\n\n` : '') +
+    (err ? `⚠️ ${esc(err)}\n\n` : '') +
+    `<b>${LABEL[step]}</b>\n${esc(ASK[step])}`
+  );
+}
+
+function stepKb(w, step) {
+  const kb = new InlineKeyboard();
+  if (step === 'devbuy') kb.text('0', 'dev:0').text('0.1', 'dev:0.1').text('0.5', 'dev:0.5').text('1', 'dev:1').row();
+  const i = STEPS.indexOf(step);
+  if (w.editing) kb.text('⬅️ Back to summary', 'summary');
+  else if (i > 0) kb.text('⬅️ Back', 'back');
+  if (OPTIONAL[step]) kb.text('Skip', 'skip');
+  return kb.text('✖️ Cancel', 'cancel');
+}
+
+// Edits the wizard message in place; sends a new one if that is not possible.
+async function show(ctx, w, text, kb) {
+  const other = { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb };
+  if (w.msgId) {
+    try { await ctx.api.editMessageText(ctx.chat.id, w.msgId, text, other); return; }
+    catch (e) { if (/not modified/i.test(e.message)) return; }
+  }
+  const m = await ctx.reply(text, other);
+  w.msgId = m.message_id;
+}
+
+async function ask(ctx, w, step, err) {
   w.step = step;
-  const [text, kb] = PROMPTS[step]();
-  return ctx.reply(text, { reply_markup: kb });
+  return show(ctx, w, stepText(w, step, err), stepKb(w, step));
 }
 
 async function startWizard(ctx) {
-  const w = await getLaunchWallet(ctx.from.id);
-  if (!w) return ctx.reply('You need a launch wallet first.', { reply_markup: noWalletKb() });
+  const wal = await getLaunchWallet(ctx.from.id);
+  if (!wal) return ctx.reply('You need a launch wallet first.', { reply_markup: noWalletKb() });
   if (launching.has(ctx.from.id)) return ctx.reply('A launch is already in progress. Wait for it to finish.');
-  wizards.set(ctx.from.id, { step: 'name', d: {}, image: null });
-  return ask(ctx, 'name');
+  const w = { step: 'name', d: {}, image: null, msgId: null, editing: false };
+  wizards.set(ctx.from.id, w);
+  return ask(ctx, w, 'name');
 }
 
 function summaryText(w) {
   const d = w.d;
   const dev = lamportsToSol(d.devBuyLamports);
   return (
-    `<b>Check your token</b>\n\n` +
-    `Name: ${esc(d.name)}\nTicker: $${esc(d.symbol)}\n` +
-    `Description: ${esc(d.description)}\n` +
-    `X: ${d.twitter ? esc(d.twitter) : '-'}\nTelegram: ${d.telegram ? esc(d.telegram) : '-'}\nWebsite: ${d.website ? esc(d.website) : '-'}\n` +
-    `First buy: ${dev > 0 ? fmtSol(dev) + ' SOL' : 'none'}\n\n` +
-    `Total from your wallet: about ${fmtSol(lamportsToSol(neededLamports(d.devBuyLamports)))} SOL ` +
-    `(about ${CREATE_COST_SOL} SOL network costs${dev > 0 ? ' + your first buy' : ''}). Network costs that are not used stay in your wallet.\n\n` +
-    `Launching is final. The token will be created on pump.fun from your wallet.`
+    `<b>✅ Ready to launch?</b>\n\n` +
+    `<b>${esc(d.name)}</b>  ($${esc(d.symbol)})\n${esc(d.description)}\n\n` +
+    `Logo: ✅\nX: ${d.twitter ? esc(d.twitter) : '-'}\nTelegram: ${d.telegram ? esc(d.telegram) : '-'}\nWebsite: ${d.website ? esc(d.website) : '-'}\n\n` +
+    `First buy: ${dev > 0 ? fmtSol(dev) + ' SOL' : 'none'}\n` +
+    `From your wallet: about ${fmtSol(lamportsToSol(neededLamports(d.devBuyLamports)))} SOL (${CREATE_COST_SOL} network costs${dev > 0 ? ' + first buy' : ''}). Unused network costs stay in your wallet.\n\n` +
+    `Launching is final. Tap a button below to change anything first.`
   );
 }
 
-async function showSummary(ctx) {
-  const w = wizards.get(ctx.from.id);
+const summaryKb = () =>
+  new InlineKeyboard()
+    .text('🚀 Launch now', 'go').row()
+    .text('Name', 'edit:name').text('Ticker', 'edit:symbol').text('About', 'edit:description').row()
+    .text('Logo', 'edit:image').text('X', 'edit:twitter').text('Telegram', 'edit:telegram').row()
+    .text('Website', 'edit:website').text('First buy', 'edit:devbuy').row()
+    .text('✖️ Cancel', 'cancel');
+
+async function showSummary(ctx, w) {
   w.step = 'confirm';
-  return ctx.reply(summaryText(w), {
-    ...HTML,
-    reply_markup: new InlineKeyboard().text('Launch now', 'go').text('Cancel', 'cancel'),
-  });
+  w.editing = false;
+  return show(ctx, w, summaryText(w), summaryKb());
 }
 
-async function advance(ctx, from) {
+async function advance(ctx, w, from) {
+  if (w.editing) return showSummary(ctx, w);
   const next = NEXT[from];
-  if (next) return ask(ctx, next);
-  return showSummary(ctx);
+  return next ? ask(ctx, w, next) : showSummary(ctx, w);
 }
 
 async function handleWizardText(ctx, w) {
   const t = ctx.message.text;
-  const bad = (r) => ctx.reply(r.error, { reply_markup: w.step === 'name' || w.step === 'symbol' || w.step === 'description' ? cancelKb() : skipKb() });
+  await ctx.deleteMessage().catch(() => {}); // keep the chat tidy
+  const fail = (r) => ask(ctx, w, w.step, r.error);
   switch (w.step) {
-    case 'name': { const r = parseName(t); if (!r.ok) return bad(r); w.d.name = r.value; return advance(ctx, 'name'); }
-    case 'symbol': { const r = parseSymbol(t); if (!r.ok) return bad(r); w.d.symbol = r.value; return advance(ctx, 'symbol'); }
-    case 'description': { const r = parseDescription(t); if (!r.ok) return bad(r); w.d.description = r.value; return advance(ctx, 'description'); }
-    case 'image': return ctx.reply('Please send the logo as a picture, not text.', { reply_markup: cancelKb() });
+    case 'name': { const r = parseName(t); if (!r.ok) return fail(r); w.d.name = r.value; return advance(ctx, w, 'name'); }
+    case 'symbol': { const r = parseSymbol(t); if (!r.ok) return fail(r); w.d.symbol = r.value; return advance(ctx, w, 'symbol'); }
+    case 'description': { const r = parseDescription(t); if (!r.ok) return fail(r); w.d.description = r.value; return advance(ctx, w, 'description'); }
+    case 'image': return ask(ctx, w, 'image', 'Please send a picture, not text.');
     case 'twitter': case 'telegram': case 'website': {
-      const r = parseSocial(w.step, t); if (!r.ok) return bad(r);
-      w.d[w.step] = r.value; return advance(ctx, w.step);
+      const r = parseSocial(w.step, t); if (!r.ok) return fail(r);
+      w.d[w.step] = r.value; return advance(ctx, w, w.step);
     }
     case 'devbuy': {
-      const r = parseDevBuy(t);
-      if (!r.ok) return ctx.reply(r.error, { reply_markup: cancelKb() });
-      w.d.devBuyLamports = r.value; return showSummary(ctx);
+      const r = parseDevBuy(t); if (!r.ok) return fail(r);
+      w.d.devBuyLamports = r.value; return showSummary(ctx, w);
     }
-    default: return ctx.reply('Tap a button above, or /start to begin again.');
+    default: return;
   }
 }
 
@@ -201,49 +250,63 @@ async function downloadFile(ctx, fileId) {
 }
 
 async function handleImage(ctx, w, fileId, mime, size) {
+  await ctx.deleteMessage().catch(() => {});
   const chk = checkImage({ mime, size });
-  if (!chk.ok) return ctx.reply(chk.error, { reply_markup: cancelKb() });
+  if (!chk.ok) return ask(ctx, w, 'image', chk.error);
   try {
     const bytes = await downloadFile(ctx, fileId);
-    if (bytes.length > MAX_IMAGE_BYTES) return ctx.reply('That image is too big (5 MB max).', { reply_markup: cancelKb() });
+    if (bytes.length > MAX_IMAGE_BYTES) return ask(ctx, w, 'image', 'That image is too big (5 MB max).');
     w.image = { bytes, mime };
   } catch {
-    return ctx.reply('I could not download that picture. Please send it again.', { reply_markup: cancelKb() });
+    return ask(ctx, w, 'image', 'I could not download that picture. Please send it again.');
   }
-  return advance(ctx, 'image');
+  return advance(ctx, w, 'image');
 }
 
 // ---------- launch ----------
 
+const PROGRESS = ['Upload logo and details', 'Create the token on pump.fun', 'Confirm on Solana'];
+const progressText = (d, at) =>
+  `<b>🚀 Launching ${esc(d.name)} ($${esc(d.symbol)})</b>\n\n` +
+  PROGRESS.map((p, i) => `${i < at ? '✅' : i === at ? '⏳' : '▫️'} ${p}`).join('\n') +
+  '\n\nThis takes under a minute. Please wait.';
+
+const doneKb = (mint, sig) => {
+  const kb = new InlineKeyboard();
+  if (mint) kb.url('pump.fun', `https://pump.fun/coin/${mint}`);
+  if (sig) kb.url('Transaction', `https://solscan.io/tx/${sig}`);
+  return kb.row().text('🚀 Create another', 'newtoken').text('📂 My launches', 'launches').row()
+    .url('Omni Scan', `https://t.me/${SCAN_USERNAME}`).url('Omni Trade', `https://t.me/${TRADE_USERNAME}`);
+};
+
 async function doLaunch(ctx) {
   const uid = ctx.from.id;
+  if (launching.has(uid)) return; // double tap: ignore
   const w = wizards.get(uid);
   if (!w || w.step !== 'confirm') return ctx.reply('Nothing to launch. Tap Create token to start.');
-  if (launching.has(uid)) return;
   launching.add(uid);
   const d = w.d;
   let launchId = null;
+  const set = (text, kb) => show(ctx, w, text, kb ?? new InlineKeyboard());
   try {
     const wallet = await getLaunchWallet(uid);
     if (!wallet) return ctx.reply('You need a launch wallet first.', { reply_markup: noWalletKb() });
     const need = neededLamports(d.devBuyLamports);
     const have = Math.round((await getSolBalance(wallet.public_key)) * 1e9);
     if (have < need) {
-      await ctx.reply(
-        `Not enough SOL. You need about ${fmtSol(lamportsToSol(need))} SOL but the wallet has ${fmtSol(lamportsToSol(have))} SOL.\n\nSend SOL to:\n${code(wallet.public_key)}\n\nthen tap Launch now again.`,
-        HTML);
-      return showSummary(ctx);
+      return show(ctx, w,
+        `⚠️ Not enough SOL.\n\nYou need about ${fmtSol(lamportsToSol(need))} SOL but the wallet has ${fmtSol(lamportsToSol(have))} SOL.\n\nSend SOL to (tap to copy):\n${code(wallet.public_key)}\n\nThen tap Launch now again.\n\n` + summaryText(w),
+        summaryKb());
     }
     wizards.delete(uid); // a second tap on "Launch now" can no longer start another launch
     launchId = await createLaunch({ telegramId: uid, ...d });
-    const status = await ctx.reply('Launching... uploading your logo and details.');
-    const edit = (text) => ctx.api.editMessageText(status.chat.id, status.message_id, text).catch(() => {});
+    await set(progressText(d, 0));
 
     const uri = await uploadMetadata({
       imageBytes: w.image.bytes, mime: w.image.mime, name: d.name, symbol: d.symbol,
       description: d.description, twitter: d.twitter, telegram: d.telegram, website: d.website,
     });
-    await edit('Launching... creating the token on pump.fun.');
+    await set(progressText(d, 1));
 
     const mint = newMintKeypair();
     const creator = keypairFromBytes(decryptSecret(wallet.encrypted_secret));
@@ -253,32 +316,27 @@ async function doLaunch(ctx) {
     });
     const raw = signCreateTx(txBytes, [mint, creator]);
     const mintAddr = mint.publicKey.toBase58();
+    await set(progressText(d, 2));
     const r = await sendAndConfirm(connection, raw);
 
     if (r.status === 'success') {
       await finishLaunch(launchId, { status: 'success', mint: mintAddr, signature: r.signature, metadataUri: uri });
-      await edit('Your token is live.');
-      return ctx.reply(
-        `<b>${esc(d.name)}</b> ($${esc(d.symbol)}) is live on pump.fun.\n\n` +
-        `Contract address (tap to copy):\n${code(mintAddr)}\n\n` +
-        `<a href="https://pump.fun/coin/${mintAddr}">Open on pump.fun</a>\n<a href="https://solscan.io/tx/${r.signature}">Transaction</a>\n\n` +
-        `Paste the address in Omni Scan to see its scan card.`,
-        { ...HTML, reply_markup: mainKb() });
+      return set(
+        `<b>🎉 ${esc(d.name)} ($${esc(d.symbol)}) is live!</b>\n\nContract address (tap to copy):\n${code(mintAddr)}\n\nPaste the address in Omni Scan to see its scan card.`,
+        doneKb(mintAddr, r.signature));
     }
     if (r.status === 'unknown') {
       await finishLaunch(launchId, { status: 'unknown', mint: mintAddr, signature: r.signature, metadataUri: uri, error: 'Sent but not confirmed in time' });
-      await edit('Sent, but I could not confirm it yet.');
-      return ctx.reply(
-        `The transaction was sent but I could not confirm it in time. It may still land.\n\nCheck here before trying again:\n<a href="https://solscan.io/tx/${r.signature}">Transaction</a>\nToken address: ${code(mintAddr)}`,
-        { ...HTML, reply_markup: mainKb() });
+      return set(
+        `<b>⏳ Sent, not confirmed yet</b>\n\nIt may still land. Check the transaction before trying again.\n\nToken address:\n${code(mintAddr)}`,
+        doneKb(null, r.signature));
     }
     await finishLaunch(launchId, { status: 'failed', metadataUri: uri, error: r.error });
-    await edit('Launch failed.');
-    return ctx.reply(`Launch failed: ${esc(r.error)}\n\nNothing was created and no SOL was spent on a token. You can try again.`, { ...HTML, reply_markup: mainKb() });
+    return set(`<b>❌ Launch failed</b>\n\n${esc(r.error)}\n\nNothing was created. You can try again.`, doneKb(null, null));
   } catch (err) {
     console.error('launch error:', err.message); // never log secrets
     if (launchId) await finishLaunch(launchId, { status: 'failed', error: String(err.message).slice(0, 200) }).catch(() => {});
-    return ctx.reply(`Launch failed: ${esc(err.message)}\n\nTap Create token to try again.`, { ...HTML, reply_markup: mainKb() });
+    return set(`<b>❌ Launch failed</b>\n\n${esc(err.message)}\n\nTap Create another to try again.`, doneKb(null, null));
   } finally {
     launching.delete(uid);
   }
@@ -299,8 +357,7 @@ async function doLaunches(ctx) {
 // ---------- routes ----------
 
 bot.command('start', showHome);
-bot.command('help', (ctx) => ctx.reply(
-  'Omni Launch Bot\n\n/create - make a new token on pump.fun\n/launches - your previous launches\n/wallet - launch wallet and balance\n/createwallet /importwallet\n/exportkey - show your private key\n/scan - Omni Scan\n/trade - Omni Trade'));
+bot.command('help', (ctx) => ctx.reply(HELP, HTML));
 bot.command('create', startWizard);
 bot.command('launches', doLaunches);
 bot.command('wallet', doWallet);
@@ -310,6 +367,7 @@ bot.command('exportkey', doExport);
 bot.command('scan', (ctx) => ctx.reply('Omni Scan:', { reply_markup: new InlineKeyboard().url('Open Omni Scan', `https://t.me/${SCAN_USERNAME}`) }));
 bot.command('trade', (ctx) => ctx.reply('Omni Trade:', { reply_markup: new InlineKeyboard().url('Open Omni Trade', `https://t.me/${TRADE_USERNAME}`) }));
 
+bot.callbackQuery('help', async (ctx) => { await ctx.answerCallbackQuery(); return ctx.reply(HELP, HTML); });
 bot.callbackQuery('create', async (ctx) => { await ctx.answerCallbackQuery(); return doCreateWallet(ctx); });
 bot.callbackQuery('import', async (ctx) => { await ctx.answerCallbackQuery(); return startImport(ctx); });
 bot.callbackQuery('wallet', async (ctx) => { await ctx.answerCallbackQuery(); return doWallet(ctx); });
@@ -320,7 +378,7 @@ bot.callbackQuery('cancel', async (ctx) => {
   wizards.delete(ctx.from.id);
   await ctx.answerCallbackQuery({ text: 'Cancelled' });
   await ctx.deleteMessage().catch(() => {});
-  return ctx.reply('Cancelled.', { reply_markup: mainKb() });
+  return showHome(ctx);
 });
 bot.callbackQuery('skip', async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -328,19 +386,37 @@ bot.callbackQuery('skip', async (ctx) => {
   if (!w || !OPTIONAL[w.step]) return;
   const step = w.step;
   w.d[step] = null;
-  return advance(ctx, step);
+  return advance(ctx, w, step);
+});
+bot.callbackQuery('back', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const w = wizards.get(ctx.from.id);
+  if (!w) return;
+  const i = STEPS.indexOf(w.step);
+  if (i > 0) return ask(ctx, w, STEPS[i - 1]);
+});
+bot.callbackQuery('summary', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const w = wizards.get(ctx.from.id);
+  if (w && w.d.name) return showSummary(ctx, w);
+});
+bot.callbackQuery(/^edit:(\w+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const w = wizards.get(ctx.from.id);
+  const step = ctx.match[1];
+  if (!w || !STEPS.includes(step)) return;
+  w.editing = true;
+  return ask(ctx, w, step);
 });
 bot.callbackQuery(/^dev:([\d.]+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const w = wizards.get(ctx.from.id);
   if (!w || w.step !== 'devbuy') return;
-  const r = parseDevBuy(ctx.match[1]);
-  w.d.devBuyLamports = r.value;
-  return showSummary(ctx);
+  w.d.devBuyLamports = parseDevBuy(ctx.match[1]).value;
+  return showSummary(ctx, w);
 });
 bot.callbackQuery('go', async (ctx) => {
   await ctx.answerCallbackQuery({ text: 'Launching...' });
-  await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {}); // remove the button
   return doLaunch(ctx);
 });
 
@@ -378,10 +454,21 @@ bot.on('message:text', async (ctx, next) => {
     return showHome(ctx);
   }
   const w = wizards.get(ctx.from.id);
-  if (w) return handleWizardText(ctx, w);
+  if (w && w.step !== 'confirm') return handleWizardText(ctx, w);
   return next();
 });
 
 bot.catch((err) => console.error('bot error:', err.error?.message ?? err.message)); // never log secrets
 
-bot.start({ onStart: (me) => console.log(`Omni Launch Bot running as @${me.username}`) });
+bot.start({
+  onStart: async (me) => {
+    console.log(`Omni Launch Bot running as @${me.username}`);
+    await bot.api.setMyCommands([
+      { command: 'create', description: 'Create a new token' },
+      { command: 'launches', description: 'My launches' },
+      { command: 'wallet', description: 'Launch wallet and balance' },
+      { command: 'help', description: 'Help' },
+      { command: 'start', description: 'Home' },
+    ]).catch(() => {});
+  },
+});
