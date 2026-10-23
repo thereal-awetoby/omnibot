@@ -84,3 +84,13 @@ test('follow answers: added, status list, post header', () => {
   assert.equal(buildXCallHeader('a_b', '123'), '𝕏 <a href="https://x.com/a_b/status/123">@a_b</a> posted a token');
   assert.match(buildHelpText(), /\/follow/);
 });
+
+import { explainXError } from './ux.js';
+test('/following explains the X reader state in plain words', () => {
+  assert.match(explainXError('x-worker: worker is not running'), /switched off/);
+  assert.match(explainXError('x-worker: worker: rate limited'), /limiting/);
+  assert.match(explainXError('x-worker: worker: account locked - need new cookies'), /fresh cookies/);
+  assert.match(explainXError('x-worker: worker: no such X account'), /does not exist/);
+  assert.match(explainXError('x-worker: worker has not read this account yet'), /waiting/);
+  assert.equal(explainXError('something else'), 'cannot read right now');
+});

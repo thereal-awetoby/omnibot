@@ -5,13 +5,16 @@ import re
 from pathlib import Path
 
 
+def _clean(value, name):
+    v = value.strip().strip('"').strip("'").rstrip(";").strip()
+    v = re.sub(rf"^{name}\s*=\s*", "", v, flags=re.I)  # accepts a paste like auth_token=abc123
+    if not re.fullmatch(r"[A-Za-z0-9%_\-]{20,400}", v):
+        raise ValueError(f"{name} looks wrong: it should be one long string of letters and numbers with no spaces.")
+    return v
+
+
 def build_cookies(auth_token, ct0):
-    a, c = auth_token.strip().strip('"'), ct0.strip().strip('"')
-    if not re.fullmatch(r"[0-9a-fA-F]{30,64}", a):
-        raise ValueError("auth_token should be a long string of letters and numbers (about 40 characters).")
-    if not re.fullmatch(r"[0-9a-zA-Z]{30,300}", c):
-        raise ValueError("ct0 should be a long string of letters and numbers.")
-    return f"auth_token={a}; ct0={c}"
+    return f"auth_token={_clean(auth_token, 'auth_token')}; ct0={_clean(ct0, 'ct0')}"
 
 
 async def main():
@@ -26,7 +29,8 @@ async def main():
         print("\nNot saved:", e)
         return
     await api.pool.add_account(user, "x", f"{user}@example.com", "x", cookies=cookies)
-    print(f"\nAdded @{user}. Accounts the worker now knows:")
+    print(f"\nAdded @{user}. You can run this again later to add more accounts: the worker rotates through all of them.")
+    print("Accounts the worker now knows:")
     for a in await api.pool.accounts_info():
         print(" -", a.get("username"), "| active" if a.get("active") else "| NOT active")
 

@@ -3,6 +3,8 @@ from datetime import datetime
 from types import SimpleNamespace as NS
 import worker, add_account
 
+async def _co(v): return v
+
 def tw(i, text, links=(), rt=False, qt=None, date=None):
     return NS(id=i, id_str=str(i), rawContent=text, links=[NS(url=u) for u in links], retweetedTweet=NS() if rt else None, quotedTweet=qt, date=date or datetime(2026, 10, 23, 8, 0))
 
@@ -37,7 +39,7 @@ class T(unittest.TestCase):
         async def nosleep(_): pass
         n = asyncio.run(worker.run_round(api, db, {}, sleep=nosleep))
         self.assertEqual(n, 3); self.assertEqual([r["id"] for r in db.saved["a"]], ["1", "2"])
-        self.assertEqual(db.stat["a"], (True, None)); self.assertFalse(db.stat["b"][0]); self.assertIn("rate limited", db.stat["b"][1])
+        self.assertEqual(db.stat["a"], (True, None)); self.assertFalse(db.stat["b"][0]); self.assertEqual(db.stat["b"][1], "rate limited")
         self.assertEqual(db.stat["ghost"], (False, "no such X account"))
     def test_dsn(self):
         d, ssl = worker.clean_dsn("postgresql://u:p@ep-x.neon.tech/db?sslmode=require&channel_binding=require")
@@ -48,5 +50,19 @@ class T(unittest.TestCase):
         self.assertEqual(ok, "auth_token=" + "a" * 40 + "; ct0=" + "b" * 64)
         with self.assertRaises(ValueError): add_account.build_cookies("short", "b" * 64)
         with self.assertRaises(ValueError): add_account.build_cookies("a" * 40, "x y")
+        self.assertEqual(add_account.build_cookies('auth_token=' + "A1" * 20 + ';', ' "' + "b" * 30 + '" '), "auth_token=" + "A1" * 20 + "; ct0=" + "b" * 30)
+    def test_error_wording(self):
+        c = worker.classify_error
+        self.assertEqual(c(RuntimeError("HTTP 429 Too Many Requests")), "rate limited")
+        self.assertEqual(c(RuntimeError("Account locked (326)")), "account locked - need new cookies")
+        self.assertEqual(c(RuntimeError("401 Could not authenticate you")), "authentication failed")
+        self.assertEqual(c(RuntimeError("no such X account")), "no such X account")
+        self.assertEqual(c(RuntimeError("No account available for queue UserTweets")), "no usable X account - need new cookies")
+        self.assertEqual(c(asyncio.TimeoutError()), "timed out (X slow or limiting)")
+    def test_no_usable_account_is_reported_for_every_handle(self):
+        api = FakeApi({"a": []}); api.pool = NS(accounts_info=lambda: _co([{"username": "t", "active": False}]))
+        db = FakeDb(["a", "b"])
+        asyncio.run(worker.run_round(api, db, {}, sleep=lambda _: _co(None)))
+        self.assertEqual(db.stat["a"], (False, "no usable X account - need new cookies")); self.assertEqual(db.saved, {})
 
 if __name__ == "__main__": unittest.main()

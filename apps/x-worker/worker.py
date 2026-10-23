@@ -77,6 +77,33 @@ def tweet_to_row(tw):
     }
 
 
+def classify_error(e):
+    """A short, plain reason the Scan bot can show in /following. Never the raw X text."""
+    if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
+        return "timed out (X slow or limiting)"
+    m = f"{e.__class__.__name__} {e}".lower()
+    if "no such x account" in m or "not found" in m or "suspended" in m:
+        return "no such X account"
+    if "locked" in m or "326" in m or "suspend" in m:
+        return "account locked - need new cookies"
+    if "429" in m or "rate limit" in m or "too many" in m:
+        return "rate limited"
+    if "no account available" in m or "noaccount" in m or "no active" in m:
+        return "no usable X account - need new cookies"
+    if "401" in m or "403" in m or "authenticat" in m or "unauthor" in m or "forbidden" in m or "login" in m:
+        return "authentication failed"
+    return (str(e) or e.__class__.__name__)[:120]
+
+
+async def active_accounts(api):
+    """How many X accounts in twscrape's pool can be used (None if this twscrape version cannot tell)."""
+    try:
+        info = await api.pool.accounts_info()
+    except Exception:
+        return None
+    return sum(1 for a in info if (a.get("active") if isinstance(a, dict) else getattr(a, "active", False)))
+
+
 async def fetch_handle(api, handle, uid_cache):
     """The latest posts of one account. Raises if the account does not exist or X refuses."""
     uid = uid_cache.get(handle)
@@ -95,20 +122,32 @@ async def fetch_handle(api, handle, uid_cache):
 
 async def run_round(api, db, uid_cache, sleep=asyncio.sleep):
     handles = await db.handles()
+    if not handles:
+        return 0
+    usable = await active_accounts(api)
+    if usable == 0:  # nothing to read with: say so for every account instead of waiting on X
+        log.error("NO usable X account in the pool - add fresh cookies with add-account.bat")
+        for h in handles:
+            await db.status(h, False, "no usable X account - need new cookies")
+        return len(handles)
+    ok_n = bad_n = 0
     for h in handles:
         try:
             rows = await asyncio.wait_for(fetch_handle(api, h, uid_cache), FETCH_TIMEOUT)
             await db.save(h, rows)
             await db.status(h, True, None)
-            log.info("@%s: %d posts read", h, len(rows))
+            ok_n += 1
+            log.info("@%s: OK, %d posts saved", h, len(rows))
         except Exception as e:  # one account failing never stops the others
-            msg = (str(e) or e.__class__.__name__)[:180]
-            log.warning("@%s: %s", h, msg)
+            msg = classify_error(e)
+            bad_n += 1
+            log.warning("@%s: FAILED - %s", h, msg)
             try:
                 await db.status(h, False, msg)
             except Exception as e2:
                 log.error("could not save status: %s", e2)
         await sleep(PER_ACCOUNT_PAUSE)
+    log.info("round done: %d ok, %d failed, X accounts in use: %s", ok_n, bad_n, "?" if usable is None else usable)
     return len(handles)
 
 

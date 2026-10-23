@@ -127,6 +127,16 @@ export function buildFollowAddedText({ handle, latestAgoMs = null, error = null 
   if (error) return `${head}\n\n⚠️ I could not read their posts just now, so I will keep trying. /following shows the status.`;
   return `${head}\n\n<pre>${esc(tree([['Status', 'reading OK'], ['Latest post', latestAgoMs == null ? 'n/a' : `${ago2(latestAgoMs)} ago`], ['Checks', 'every ~2 min']]))}</pre>`;
 }
+// What the X worker's saved reason means for the person reading /following.
+export function explainXError(err) {
+  const e = String(err ?? '').toLowerCase();
+  if (e.includes('not running')) return 'the X reader is switched off';
+  if (e.includes('not read this account yet')) return 'waiting for the X reader to check it';
+  if (e.includes('rate limited') || e.includes('timed out')) return 'X is limiting the reader, it will retry';
+  if (e.includes('locked') || e.includes('no usable') || e.includes('authentication')) return 'the reader\u2019s X login needs fresh cookies';
+  if (e.includes('no such x account')) return 'that X account does not exist';
+  return 'cannot read right now';
+}
 export function buildFollowingText(rows, now = Date.now()) {
   if (!rows.length) return '𝕏 <b>Followed accounts</b>\n\nNone yet. Add one with <code>/follow @handle</code>: any token address they post will be called in this group.';
   const lines = rows.map((r) => {
@@ -134,7 +144,7 @@ export function buildFollowingText(rows, now = Date.now()) {
     const ok = r.ok_at ? new Date(r.ok_at).getTime() : null;
     let st;
     if (!polled) st = '⏳ not checked yet';
-    else if (r.last_error) st = `⚠️ cannot read right now${ok ? ` (last worked ${ago2(now - ok)} ago)` : ''}`;
+    else if (r.last_error) st = `⚠️ ${explainXError(r.last_error)}${ok ? ` (last worked ${ago2(now - ok)} ago)` : ''}`;
     else st = `✅ reading OK · checked ${ago2(now - polled)} ago`;
     const post = r.newest_tweet_at ? ` · latest post ${ago2(now - new Date(r.newest_tweet_at).getTime())} ago` : '';
     return `<b>@${esc(r.handle)}</b>\n└ ${st}${post}`;
