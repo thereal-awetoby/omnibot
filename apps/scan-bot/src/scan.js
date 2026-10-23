@@ -202,7 +202,7 @@ export function buildScanCard({ mint, market, security = null, intel = null, cal
 }
 
 // ---- group calls ----
-const nameOf = (c) => (c?.caller_name ? (callerHtml(c.caller_name, c.caller_id, { at: String(c.caller_name).startsWith('@') }) || 'someone') : 'someone');
+const nameOf = (c) => (c?.caller_name ? (callerHtml(c.caller_name, c.caller_id, { at: String(c.caller_name).startsWith('@'), href: c.source_url }) || 'someone') : 'someone');
 
 export const multiple = (from, to) => (from > 0 && to > 0 ? to / from : null);
 const multText = (x) => (x === null ? '' : `  ·  now ${x >= 10 ? x.toFixed(0) : x.toFixed(2)}x ${x >= 2 ? '🚀' : x < 1 ? '🔻' : ''}`.trimEnd());

@@ -66,9 +66,9 @@ export function buildPnlSvg({ symbol, callerName, entryMcap, peakMcap, x, ageTex
   ].join('');
 }
 
-export function buildPnlCaption({ symbol, callerName, callerId = null, x, milestone = false }) {
+export function buildPnlCaption({ symbol, callerName, callerId = null, sourceUrl = null, x, milestone = false }) {
   const name = symbol ? `$${esc(symbol)}` : 'This token';
-  const who = callerName ? (callerHtml(callerName, callerId, { at: String(callerName).startsWith('@') }) || 'someone') : 'someone';
+  const who = callerName ? (callerHtml(callerName, callerId, { at: String(callerName).startsWith('@'), href: sourceUrl }) || 'someone') : 'someone';
   return milestone
     ? `🚀 <b>${name}</b> hit <b>${fmtMult(x)}</b> since ${who} called it`
     : `📊 <b>${name}</b> · peaked at <b>${fmtMult(x)}</b> since ${who} called it`;

@@ -4,10 +4,17 @@
 const escHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 export const isXCaller = (callerId) => { try { return BigInt(callerId) < 0n; } catch { return false; } };
 
+const POST = /^https:\/\/x\.com\/[A-Za-z0-9_]{1,15}\/status\/\d{5,25}$/;
+
 // HTML for a caller name (already safe to put in a message). Returns '' when there is no name.
-export function callerHtml(name, callerId, { at = true, max = 40 } = {}) {
+// For an X caller the link goes to the post the call came from (href) when we know it, else to their profile.
+export function callerHtml(name, callerId, { at = true, max = 40, href = null } = {}) {
   const raw = String(name ?? '').replace(/^@/, '').slice(0, max);
   if (!raw) return '';
-  if (isXCaller(callerId) && /^[A-Za-z0-9_]{1,15}$/.test(raw)) return `<a href="https://x.com/${raw}">${at ? '@' : ''}${raw}</a>`;
-  return escHtml(`${at ? '@' : ''}${raw}`);
+  const shown = `${at ? '@' : ''}${raw}`;
+  if (isXCaller(callerId) && /^[A-Za-z0-9_]{1,15}$/.test(raw)) {
+    const link = POST.test(String(href ?? '')) ? href : `https://x.com/${raw}`;
+    return `<a href="${link}">${shown}</a>`;
+  }
+  return escHtml(shown);
 }
