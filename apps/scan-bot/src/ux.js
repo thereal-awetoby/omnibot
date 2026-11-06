@@ -77,7 +77,8 @@ export function buildHelpText() {
   return [
     '<b>Omni Scan</b>\nPaste any token address and I pull up its card: price, safety checks, holders and links. In a group, the first person to post a token gets the call.',
     sec('🔎 Token data', [['/s', 'Search a token'], ['/p', 'Price'], ['/c', 'Chart'], ['/ta', 'Technical read'], ['/v', 'Convert an amount'], ['/th', 'Top holders'], ['/dev', 'Deployer and launches'], ['/nar', 'Lore (the story)'], ['/soc', 'Social links'], ['/dp', 'DEX Paid status'], ['/bm', 'Bubblemap']]),
-    sec('🌍 Markets', [['/hm', 'Heatmap'], ['/best', 'Top gainers'], ['/worst', 'Top losers'], ['/i', 'Top coins'], ['/trending', 'Trending tokens'], ['/poly', 'Polymarket search']]),
+    sec('🌍 Markets', [['/hm', 'Heatmap'], ['/best', 'Top gainers'], ['/worst', 'Top losers'], ['/i', 'Top coins'], ['/trending', 'Trending tokens'], ['/poly', 'Polymarket search'], ['/rekt', 'Liquidations (1h 4h 12h 24h)']]),
+    sec('🕵️ Wallets', [['/tt', 'Top traders of a token'], ['/tw', 'Top wallets of a token'], ['/ws', 'Wallet stats']]),
     sec('👥 Group', [['/lb', 'Leaderboard (1h, 1 week, all…)'], ['/calls', 'Your calls'], ['/fc', 'First caller of a token'], ['/last', 'Last calls'], ['/pnl', 'PnL card'], ['/elb', 'Export leaderboard'], ['/meme', 'Random crypto meme']]),
     sec('𝕏 X calls', [['/follow', 'Call tokens an X account posts'], ['/unfollow', 'Stop following'], ['/following', 'Followed accounts']]),
     sec('🔔 Alerts', [['/watch', 'Watch a token (moves of ±%)'], ['/target', 'Alert at 3x, 4x, -50%…'], ['/targets', 'Your alerts'], ['/untarget', 'Remove alerts'], ['/remindme', 'Reminder to you'], ['/remind', 'Reminder for the chat'], ['/listreminders', 'Your reminders']]),
