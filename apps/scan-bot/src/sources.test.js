@@ -280,6 +280,17 @@ test('fetchLoreStory (Gemini): 404 tries the next model, 429 gives up quietly, c
   assert.equal(await fetchLoreStory({ mint: 'G5', ...FACTS }, { geminiKey: 'GK', geminiModels: ['m'] }, async () => httpErr(429)), null);
 });
 
+test('fetchLoreStory (Gemini): a busy model (503/500) is skipped in favor of the next model, not treated as a hard failure', async () => {
+  const tried = [];
+  const r = await fetchLoreStory({ mint: 'G4b', ...FACTS }, { geminiKey: 'GK', geminiModels: ['busy', 'alsobusy', 'ok'] },
+    async (u) => { const m = u.includes('/busy:') ? 'busy' : u.includes('/alsobusy:') ? 'alsobusy' : 'ok'; tried.push(m); return m === 'busy' ? httpErr(503) : m === 'alsobusy' ? httpErr(500) : gem('Story.'); });
+  assert.deepEqual(tried, ['busy', 'alsobusy', 'ok']);
+  assert.equal(r.text, 'Story.');
+  // all models busy: a quiet null (not a thrown error), with a readable fallback reason for LORE_DEBUG
+  assert.equal(await fetchLoreStory({ mint: 'G4c', ...FACTS }, { geminiKey: 'GK', geminiModels: ['x'] }, async () => httpErr(503)), null);
+  assert.equal(getLastLoreError(), 'the AI answered with no text');
+});
+
 test('fetchLoreStory: Claude first, Gemini when Claude fails; per-user limit still applies', async () => {
   const order = [];
   const impl = async (u) => { order.push(u.includes('anthropic') ? 'claude' : 'gemini'); return u.includes('anthropic') ? httpErr(401) : gem('Gemini story.'); };
