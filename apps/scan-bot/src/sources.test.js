@@ -291,6 +291,15 @@ test('fetchLoreStory (Gemini): a busy model (503/500) is skipped in favor of the
   assert.equal(getLastLoreError(), 'the AI answered with no text');
 });
 
+test('fetchLoreStory (Gemini): a model that times out on BOTH the searched and plain call is skipped for the next model, instead of giving up', async () => {
+  const tried = [];
+  const timeout = () => { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; };
+  const r = await fetchLoreStory({ mint: 'G4d', ...FACTS }, { geminiKey: 'GK', geminiModels: ['slow', 'ok'] },
+    async (u) => { if (u.includes('/slow:')) { tried.push('slow'); return timeout(); } tried.push('ok'); return gem('Story.'); });
+  assert.deepEqual(tried, ['slow', 'slow', 'ok']); // searched + plain both tried on the slow model, then the next model
+  assert.equal(r.text, 'Story.');
+});
+
 test('fetchLoreStory: Claude first, Gemini when Claude fails; per-user limit still applies', async () => {
   const order = [];
   const impl = async (u) => { order.push(u.includes('anthropic') ? 'claude' : 'gemini'); return u.includes('anthropic') ? httpErr(401) : gem('Gemini story.'); };

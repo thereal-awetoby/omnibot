@@ -372,12 +372,13 @@ async function askGemini(facts, { apiKey, models, image = null }, fetchImpl) {
     if (a.e?.status === 404) continue;
     if (a.e?.status === 500 || a.e?.status === 503) continue; // this model is busy right now: try the next one
     if (a.e && ![400, 403, 429].includes(a.e.status) && !isTimeout(a.e)) throw a.e;
-    // Search not allowed, search quota used up (429), or an empty answer: ask again WITHOUT search.
+    // Search not allowed, search quota used up (429), or a slow/empty answer: ask again WITHOUT search (often faster, no search step).
     const b = await attempt(model, false);
     if (b.r) return b.r;
     if (b.e?.status === 404) continue;
     if (b.e?.status === 429) { quotaError = b.e; continue; } // this model's free quota is used: the next model has its own
     if (b.e?.status === 500 || b.e?.status === 503) continue; // busy: try the next model
+    if (b.e && isTimeout(b.e)) continue; // still slow without search: try the next model, do not give up
     if (b.e) throw b.e;
   }
   if (quotaError) throw quotaError;
