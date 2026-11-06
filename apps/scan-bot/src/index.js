@@ -29,6 +29,7 @@ import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchToke
 import { formatDuration } from './scan.js';
 import { parseTargets, targetLabel, targetHit, parseDelay, analyzeCloses, buildTaText, TA_FRAMES, fetchCloses, isPublicUrl, stripHtml, parseTranslate, normPeriod, fetchTopCoins, buildHeatmapSvg, buildMoversText, fetchPolymarket, buildPolymarketText, parseAmount, parseEpoch, csvCell } from './extras.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
+import { fetchTrades, aggregateTraders, estimateProfits, buildTopTradersText, buildTopWalletsText, buildWalletText, parseRektWindow, buildRektText, createLiquidationFeed } from './traders.js';
 
 // Windows often tries IPv6 first and waits for it to fail; going straight to IPv4 makes every web request faster
 // and fixes many "fetch failed" errors.
@@ -758,6 +759,50 @@ bot.command('poly', async (ctx) => {
   try { list = await withTyping(ctx, () => fetchPolymarket(term)); } catch (e) { console.error('polymarket error:', e.message); return ctx.reply('Polymarket is not reachable right now. Try again in a minute.'); }
   return ctx.reply(buildPolymarketText(list, term), { ...HTML, reply_markup: KB_DEL });
 });
+// ---- /tt top traders, /tw top wallets (from recent trades), /ws wallet stats, /rekt liquidations ----
+const liqFeed = createLiquidationFeed();
+async function recentTrades(ctx, mint) {
+  const m = await getMarket(mint);
+  if (!m?.pairAddress) { await ctx.reply('No trading pool found for that token yet.'); return null; }
+  try { return { m, trades: await fetchTrades(m.pairAddress, mint) }; }
+  catch (e) { console.error('trades error:', e.message); await ctx.reply('Recent trades are not available right now. Try again in a minute.'); return null; }
+}
+bot.command('tt', withMint('/tt', async (ctx, mint) => {
+  const r = await withTyping(ctx, () => recentTrades(ctx, mint));
+  if (!r) return;
+  return ctx.reply(buildTopTradersText({ market: r.m, trades: r.trades, rows: aggregateTraders(r.trades) }), { ...HTML, reply_markup: KB_DEL });
+}));
+bot.command('tw', withMint('/tw', async (ctx, mint) => {
+  const r = await withTyping(ctx, () => recentTrades(ctx, mint));
+  if (!r) return;
+  return ctx.reply(buildTopWalletsText({ market: r.m, trades: r.trades, profits: estimateProfits(aggregateTraders(r.trades), r.m.priceUsd) }), { ...HTML, reply_markup: KB_DEL });
+}));
+bot.command('ws', async (ctx) => {
+  const addr = parseMintInput((ctx.match ?? '').trim().split(/\s+/)[0]) ?? extractMint(ctx.message?.reply_to_message?.text ?? '');
+  if (!addr || !isAddr(addr)) return ctx.reply('Usage: /ws <wallet address>\nOr reply to a message that has the address.');
+  const text = await withTyping(ctx, async () => {
+    const [sol, tokenMap, funding, solMarket] = await Promise.all([
+      getSolBalance(addr).catch(() => null),
+      getHolderTokens([addr]).catch(() => new Map()),
+      getWalletFunding(addr).catch(() => null),
+      fetchPairsByTokens(['So11111111111111111111111111111111111111112']).catch(() => new Map()),
+    ]);
+    const list = tokenMap.get(addr);
+    let holdings = null;
+    if (list) {
+      let prices = new Map();
+      const mints = list.map((t) => t.mint).slice(0, 120);
+      if (mints.length) { try { prices = await fetchPairsByTokens(mints); } catch (e) { console.error('wallet prices error:', e.message); } }
+      holdings = valueHoldings(list, prices, null);
+    }
+    return buildWalletText({ address: addr, sol, solUsd: solMarket.get('So11111111111111111111111111111111111111112')?.priceUsd ?? null, holdings, funding });
+  });
+  return ctx.reply(text, { ...HTML, reply_markup: KB_DEL });
+});
+bot.command('rekt', (ctx) => {
+  const key = parseRektWindow(ctx.match);
+  return ctx.reply(buildRektText({ summary: liqFeed.summary(key), windowLabel: key, coveredMs: liqFeed.coveredMs() }), { ...HTML, reply_markup: KB_DEL });
+});
 bot.command('v', async (ctx) => {
   const [a, ...rest] = (ctx.match ?? '').trim().split(/\s+/);
   const amt = parseAmount(a);
@@ -1214,6 +1259,7 @@ bot.start({
     console.log(`RPC endpoints: ${rpcStats().endpoints.map((e) => e.host).join(', ')}`);
     console.log(`Lore AI: ${[process.env.ANTHROPIC_API_KEY ? 'Claude' : null, process.env.GEMINI_API_KEY ? 'Gemini' : null].filter(Boolean).join(' + ') || 'off (shows the token description and news only)'}`);
     // The menu next to the message box.
+    liqFeed.start();
     bot.api.setMyCommands([
       { command: 'token', description: 'Token card (paste an address)' },
       { command: 'th', description: 'View the top holders' },
@@ -1258,6 +1304,10 @@ bot.start({
       { command: 'chatid', description: 'This chat ID' },
       { command: 'flip', description: 'Flip a coin' },
       { command: 'poly', description: 'Search Polymarket' },
+      { command: 'tt', description: 'Top traders of a token' },
+      { command: 'tw', description: 'Top wallets of a token' },
+      { command: 'ws', description: 'Wallet stats' },
+      { command: 'rekt', description: 'Liquidations (1h 4h 12h 24h)' },
       { command: 'v', description: 'Convert a token amount to USD' },
       { command: 'help', description: 'All commands' },
     ]).catch((e) => console.error('setMyCommands error:', e.message));
