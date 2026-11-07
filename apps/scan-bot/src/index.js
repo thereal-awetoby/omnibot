@@ -3,7 +3,7 @@ import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
-  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, setCallMessage, getMilestoneSetting, setMilestoneSetting, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, query, MAX_X_FOLLOWS,
+  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, setCallMessage, getMilestoneSetting, setMilestoneSetting, findCallerByName, callerRecord, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, query, MAX_X_FOLLOWS,
   MAX_WATCHES,
 } from '@omnibot/shared';
 import {
@@ -20,12 +20,13 @@ import { usdFromQuote, quoteUsd, fetchLaunchMarket } from './curvemarket.js';
 import { buildCandleSvg, defaultTf, parseTf, TFS } from './chartimg.js';
 import { shrinkArt, cardToJpeg, rawToJpeg, hasSharp } from './imgfast.js';
 import { normHandle, extractMints, pickNew, xCallerId, fetchTweets, loadXFeed } from './xfeed.js';
-import { buildFollowAddedText, buildFollowingText, buildXCallHeader, buildMyCallsText, buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX } from './ux.js';
+import { buildFollowAddedText, buildFollowingText, buildXCallHeader, buildMyCallsText, buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX, callMsgLink } from './ux.js';
 import { mkdir, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { livePrices, parseMilestoneArg, buildMilestoneSettingText, buildMilestoneCaption } from './milestones.js';
+import { callMapRows, buildCallMapSvg, buildCallMapCaption } from './callmap.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince, fetchCandles, generateText } from './sources.js';
 import { formatDuration } from './scan.js';
 import { parseTargets, targetLabel, targetHit, parseDelay, analyzeCloses, buildTaText, TA_FRAMES, fetchCloses, isPublicUrl, stripHtml, parseTranslate, normPeriod, fetchTopCoins, buildHeatmapSvg, buildMoversText, fetchPolymarket, buildPolymarketText, parseAmount, parseEpoch, csvCell } from './extras.js';
@@ -498,8 +499,11 @@ bot.command('alertpct', async (ctx) => {
   await setAlertPct(ctx.from.id, pct);
   return ctx.reply(`Alert size set to ±${pct}% for your current watchlist and new watches.`);
 });
+// Prices for the call views (/calls, /fc, /last, /lb, /pnl, /callmap): DexScreener, then the quote token and the launchpads,
+// so curve and letsbonk calls show numbers instead of n/a. Fewer launchpad lookups than the background check, to stay quick.
 async function pricesFor(mints) {
-  try { return await fetchPairsByTokens([...new Set(mints)]); } catch (e) { console.error('prices error:', e.message); return new Map(); }
+  try { return await livePrices(mints, { fetchPairs: fetchPairsByTokens, quoteUsd, launchMarket: (m) => within(fetchLaunchMarket(m), 4_000, null), maxFallback: 8 }); }
+  catch (e) { console.error('prices error:', e.message); return new Map(); }
 }
 const LB_BUTTONS = [['1H', 3600], ['1D', 86400], ['1W', 7 * 86400], ['2W', 14 * 86400], ['1M', 30 * 86400], ['All', 'all']];
 const lbKeyboard = (active) => {
@@ -533,11 +537,24 @@ bot.callbackQuery(/^lb:(\d+|all)$/, async (ctx) => {
   const text = await groupBoardText(ctx.chat, period);
   return ctx.editMessageText(text, { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: lbKeyboard(secs) }).catch(() => {});
 });
+// /calls: your calls here. /calls @name, or /calls as a reply to someone's message: that member's calls.
+async function callsTarget(ctx) {
+  const replied = ctx.message?.reply_to_message?.from;
+  if (replied && !replied.is_bot && replied.id !== ctx.from.id) return { id: replied.id, name: callerName(replied), mine: false };
+  const arg = (ctx.match ?? '').trim().split(/\s+/)[0];
+  if (arg) {
+    const found = await findCallerByName(ctx.chat.id, arg);
+    return found ? { id: found.caller_id, name: found.caller_name, mine: false } : { missing: arg };
+  }
+  return { id: ctx.from.id, name: callerName(ctx.from), mine: true };
+}
 bot.command(['calls', 'groupme'], async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('Call tracking works in groups. Post a token address in your group to make a call.');
-  const calls = await listUserCalls(ctx.chat.id, ctx.from.id, { limit: 20 });
-  const prices = await pricesFor(calls.map((c) => c.mint));
-  return ctx.reply(buildMyCallsText(calls, prices, callerName(ctx.from)), { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: new InlineKeyboard().text('🗑', 'x') });
+  const who = await callsTarget(ctx);
+  if (who.missing) return ctx.reply(`No calls from ${esc(who.missing)} in this group. Use their @username as it shows on their calls, or reply to one of their messages with /calls.`, HTML);
+  const calls = await listUserCalls(ctx.chat.id, who.id, { limit: 20 });
+  const prices = await withTyping(ctx, () => pricesFor(calls.map((c) => c.mint)));
+  return ctx.reply(buildMyCallsText(calls, prices, who.name, Date.now(), { mine: who.mine }), { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: new InlineKeyboard().text('🗑', 'x') });
 });
 // A call as a share card: /pnl (your latest call here) or /pnl <address> (whoever called it first).
 // CARD_FORMAT=jpg in .env makes cards smaller and faster to send (slightly softer). The default is the original: the picture untouched, the card saved as a lossless PNG.
@@ -619,11 +636,14 @@ bot.command('fc', async (ctx) => {
   if (!mint) return ctx.reply('Usage: /fc <token address>, or reply to a message that has one.');
   const c = await getFirstCall(ctx.chat.id, mint);
   if (!c) return ctx.reply('Nobody has called that token in this group yet (I only count tokens posted here after I joined).');
-  const p = (await pricesFor([mint])).get(mint);
+  const [prices, record] = await Promise.all([pricesFor([mint]), callerRecord(ctx.chat.id, c.caller_id).catch(() => null)]);
+  const p = prices.get(mint);
   const best = Math.max(0, Number(c.peak_price_usd) || 0, p?.priceUsd || 0);
   const roi = p?.priceUsd && c.price_usd ? p.priceUsd / c.price_usd : null;
   const athX = best && c.price_usd ? Math.max(1, best / c.price_usd) : null;
-  return ctx.reply(buildFcText({ call: c, nowMcap: p?.marketCapUsd ?? null, roi, athX }), { ...HTML, reply_markup: new InlineKeyboard().text('📸 PnL card', `pnl:${mint}`).text('🗑', 'x') });
+  if (p?.priceUsd > (Number(c.peak_price_usd) || 0)) setCallPeak(ctx.chat.id, mint, p.priceUsd).catch(() => {});
+  const link = c.source_url ?? callMsgLink(ctx.chat.id, c.call_msg_id, ctx.chat.username);
+  return ctx.reply(buildFcText({ call: c, nowMcap: p?.marketCapUsd ?? null, roi, athX, record, link }), { ...HTML, link_preview_options: { is_disabled: true }, reply_markup: new InlineKeyboard().text('📸 PnL card', `pnl:${mint}`).text('📊 Card', `t:${mint}`).text('🗑', 'x') });
 });
 bot.callbackQuery(new RegExp(`^pnl:${MINT_RE}$`), async (ctx) => {
   await ctx.answerCallbackQuery().catch(() => {});
@@ -687,6 +707,50 @@ bot.callbackQuery(/^hm:(1h|24h|7d|30d):(\d{2,3})$/, async (ctx) => {
     if (!r) return;
     await ctx.editMessageMedia({ type: 'photo', media: new InputFile(r.buf, r.name), caption: r.caption, parse_mode: 'HTML' }, { reply_markup: hmKeyboard(period, count) });
   } catch (e) { if (!/not modified/i.test(e.message)) console.error('heatmap button error:', e.message); }
+});
+// The group's own call map: /callmap [24h|7d|30d] [ath]. Buttons switch the period and Now / ATH colours.
+const CM_PERIODS = [['24H', 86400], ['7D', 7 * 86400], ['30D', 30 * 86400]];
+const cmKeyboard = (secs, mode) => {
+  const kb = new InlineKeyboard();
+  for (const [label, s] of CM_PERIODS) kb.text(s === secs ? `• ${label}` : label, `cm:${s}:${mode}`);
+  kb.row().text(mode === 'now' ? '• Now' : 'Now', `cm:${secs}:now`).text(mode === 'ath' ? '• ATH' : 'ATH', `cm:${secs}:ath`);
+  return kb.row().text('🗑', 'x');
+};
+async function callMapPhoto(chat, secs, mode) {
+  const label = CM_PERIODS.find(([, s]) => s === secs)?.[0] ?? '7D';
+  const calls = await listChatCalls(chat.id, { seconds: secs, limit: 400 });
+  if (!calls.length) return { empty: `🗺 <b>Call map</b> · ${label}\n\nNo calls in this group in that time. Post a token address to make one.` };
+  const rows = callMapRows(calls, await pricesFor(calls.map((c) => c.mint)));
+  for (const r of rows) if (r.nowX > 1 && r.nowX > r.athX - 1e-9 && r.nowX * r.price_usd > (Number(r.peak_price_usd) || 0) * 1.0001) setCallPeak(chat.id, r.mint, r.nowX * r.price_usd).catch(() => {});
+  const png = await renderPng(buildCallMapSvg(rows, { mode, periodLabel: label, groupName: chat.title }), 1280, { fast: true });
+  const { buf, name } = await cardToJpeg(png, 88);
+  return { buf, name, caption: buildCallMapCaption(rows, { periodLabel: label }) };
+}
+bot.command(['callmap', 'chm', 'callheat', 'groupmap'], async (ctx) => {
+  if (!isGroup(ctx)) return ctx.reply('The call map shows a group\'s own calls: use /callmap in your group.');
+  const args = (ctx.match ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+  const p = args.map((a) => normPeriod(a, null)).find((v) => ['24h', '7d', '30d'].includes(v));
+  const secs = p === '24h' ? 86400 : p === '30d' ? 30 * 86400 : 7 * 86400;
+  const mode = args.includes('ath') ? 'ath' : 'now';
+  let r;
+  try { r = await withTyping(ctx, () => callMapPhoto(ctx.chat, secs, mode), 'upload_photo'); } catch (e) { console.error('call map error:', e.message); return ctx.reply('Could not draw the call map right now. Try again in a minute.'); }
+  if (r.empty) return ctx.reply(r.empty, { ...HTML, reply_markup: cmKeyboard(secs, mode) });
+  return ctx.replyWithPhoto(new InputFile(r.buf, r.name), { caption: r.caption, parse_mode: 'HTML', reply_markup: cmKeyboard(secs, mode) });
+});
+bot.callbackQuery(/^cm:(\d+):(now|ath)$/, async (ctx) => {
+  await ctx.answerCallbackQuery().catch(() => {});
+  if (!isGroup(ctx)) return;
+  const secs = Number(ctx.match[1]), mode = ctx.match[2];
+  if (!CM_PERIODS.some(([, s]) => s === secs)) return;
+  try {
+    const r = await callMapPhoto(ctx.chat, secs, mode);
+    if (r.empty) {
+      if (ctx.callbackQuery.message?.photo) return ctx.reply(r.empty, { ...HTML, reply_markup: cmKeyboard(secs, mode) });
+      return ctx.editMessageText(r.empty, { ...HTML, reply_markup: cmKeyboard(secs, mode) });
+    }
+    if (!ctx.callbackQuery.message?.photo) return ctx.replyWithPhoto(new InputFile(r.buf, r.name), { caption: r.caption, parse_mode: 'HTML', reply_markup: cmKeyboard(secs, mode) });
+    await ctx.editMessageMedia({ type: 'photo', media: new InputFile(r.buf, r.name), caption: r.caption, parse_mode: 'HTML' }, { reply_markup: cmKeyboard(secs, mode) });
+  } catch (e) { if (!/not modified/i.test(e.message)) console.error('call map button error:', e.message); }
 });
 // Candlestick chart in market cap (like Rick and Phanes): /chart <address> [1m 5m 15m 1h 4h 1d]. Falls back to the old line chart.
 const TF_ROW = ['1m', '5m', '15m', '1h', '4h', '1d'];
@@ -1306,6 +1370,7 @@ bot.start({
       { command: 'calls', description: 'Your calls in this group' },
       { command: 'pnl', description: 'PnL card of a call (groups)' },
       { command: 'milestones', description: 'Multiplier posts: on, off or from 5x (groups)' },
+      { command: 'callmap', description: "Heatmap of this group's calls (groups)" },
       { command: 'meme', description: 'A random crypto meme' },
       { command: 'hm', description: 'Crypto heatmap' },
       { command: 'best', description: 'Top gainers' },

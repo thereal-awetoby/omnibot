@@ -31,7 +31,7 @@ export async function recordFirstCall({ chatId, mint, symbol, callerId, callerNa
 export async function getFirstCall(chatId, mint) {
   await ensureCallCols();
   const { rows } = await query(
-    `SELECT chat_id, mint, symbol, caller_id, caller_name, price_usd, mcap_usd, peak_price_usd, created_at, source_url
+    `SELECT chat_id, mint, symbol, caller_id, caller_name, price_usd, mcap_usd, peak_price_usd, created_at, source_url, call_msg_id
      FROM calls WHERE chat_id = $1 AND mint = $2`,
     [chatId, mint]
   );
@@ -49,6 +49,32 @@ export async function listChatCalls(chatId, { days = 30, seconds = null, limit =
     [chatId, seconds ?? days * 86400, limit]
   );
   return rows;
+}
+
+// The caller_id behind a name used in this group ("@handle" or "handle"), newest call first; null when unknown.
+export async function findCallerByName(chatId, name) {
+  const n = String(name ?? '').trim().replace(/^@/, '').toLowerCase();
+  if (!n) return null;
+  const { rows } = await query(
+    `SELECT caller_id, caller_name FROM calls WHERE chat_id = $1 AND lower(ltrim(caller_name, '@')) = $2
+     ORDER BY created_at DESC LIMIT 1`,
+    [chatId, n]
+  );
+  return rows[0] ?? null;
+}
+
+// A caller's record in this group from the saved peaks (no price lookups): { calls, avgX, hit2, bestX }.
+export async function callerRecord(chatId, callerId) {
+  const { rows } = await query(
+    `SELECT count(*)::int AS calls,
+            avg(GREATEST(1, COALESCE(peak_price_usd, price_usd) / NULLIF(price_usd, 0)))::float8 AS avg_x,
+            avg(CASE WHEN COALESCE(peak_price_usd, 0) >= 2 * price_usd THEN 1 ELSE 0 END)::float8 AS hit2,
+            max(GREATEST(1, COALESCE(peak_price_usd, price_usd) / NULLIF(price_usd, 0)))::float8 AS best_x
+     FROM calls WHERE chat_id = $1 AND caller_id = $2 AND price_usd > 0`,
+    [chatId, callerId]
+  );
+  const r = rows[0];
+  return r?.calls ? { calls: r.calls, avgX: r.avg_x, hit2: r.hit2, bestX: r.best_x } : null;
 }
 
 export async function listUserCalls(chatId, callerId, { limit = 10 } = {}) {
