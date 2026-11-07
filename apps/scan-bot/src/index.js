@@ -116,7 +116,7 @@ async function getMarket(mint) {
 // Telegram only allows mini-app buttons in private chats; groups get the picture instead. The Bubblemaps.io link stays as an extra.
 const MINIAPP_URL = (process.env.MINIAPP_URL || '').trim().replace(/\/+$/, '');
 const miniMapUrl = (mint) => `${MINIAPP_URL}/map?mint=${mint}`;
-const bubbleUrl = (mint) => `https://v2.bubblemaps.io/map?address=${mint}`;
+const bubbleUrl = (mint) => `https://v2.bubblemaps.io/map?address=${mint}&chain=solana`;
 const bubbleButton = (kb, mint, group = false) => (MINIAPP_URL && !group ? kb.webApp('🫧 Bubblemap', miniMapUrl(mint)) : kb.text('🫧 Bubblemap', `b:${mint}`));
 
 // Data for the mini app: the same holders, funding groups and layout as the picture.
@@ -260,10 +260,11 @@ async function sendBubblemap(ctx, mint) {
   const origin = ctx.callbackQuery?.message?.message_id ?? ctx.message?.message_id;
   const reply = origin ? { reply_parameters: { message_id: origin, allow_sending_without_reply: true } } : {};
   const site = new InlineKeyboard().url('🌐 Bubblemaps.io', bubbleUrl(mint)).text('🗑 Close', 'x');
-  const interactive = MINIAPP_URL ? (isGroup(ctx) ? [['url', '🫧 Interactive map', miniMapUrl(mint)]] : [['web', '🫧 Interactive map', miniMapUrl(mint)]]) : [];
+  // The real bubblemaps.io, with its own zoom/pan graph: inside Telegram in a private chat, as an external tab in a group (Telegram only allows web_app buttons in private chats).
   if (!result) return ctx.reply('Could not build the bubblemap right now (holder data was not available). Try again in a moment.', { ...reply, reply_markup: site });
   const kb = new InlineKeyboard();
-  for (const [type, label, url] of interactive) { if (type === 'web') kb.webApp(label, url); else kb.url(label, url); kb.row(); }
+  if (isGroup(ctx)) kb.url('🫧 Interactive map', bubbleUrl(mint)); else kb.webApp('🫧 Interactive map', bubbleUrl(mint));
+  kb.row();
   kb.text('👥 Top holders', `h:${mint}`).text('👨‍💻 Dev', `d:${mint}`).row().url('🌐 Bubblemaps.io', bubbleUrl(mint)).text('🗑 Close', 'x');
   try {
     return await ctx.replyWithPhoto(new InputFile(result.png, 'bubblemap.png'), { caption: result.caption, parse_mode: 'HTML', reply_markup: kb, ...reply });
@@ -437,8 +438,8 @@ const withMint = (usage, fn) => async (ctx) => {
   if (!mint) return ctx.reply(`Usage: ${usage} <token address>\nOr reply to a message that has the address.`);
   return fn(ctx, mint);
 };
-bot.command('bm', withMint('/bm', (ctx, mint) => (MINIAPP_URL && !isGroup(ctx)
-  ? ctx.reply('Bubblemap: tap to open the interactive map.', { reply_markup: new InlineKeyboard().webApp('🫧 Open Bubblemap', miniMapUrl(mint)).row().text('🖼 Picture instead', `b:${mint}`) })
+bot.command('bm', withMint('/bm', (ctx, mint) => (!isGroup(ctx)
+  ? ctx.reply('Bubblemap: tap to open the interactive map.', { reply_markup: new InlineKeyboard().webApp('🫧 Open Bubblemap', bubbleUrl(mint)).row().text('🖼 Picture instead', `b:${mint}`) })
   : sendBubblemap(ctx, mint))));
 bot.command('bubblemap', withMint('/bubblemap', (ctx, mint) => sendBubblemap(ctx, mint)));
 bot.command('th', withMint('/th', (ctx, mint) => showDetail(ctx, 'h', mint, () => buildHolders(mint))));
