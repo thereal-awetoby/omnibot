@@ -62,6 +62,15 @@ async function build(mint, card) {
   return { png, caption };
 }
 
+// Just the holder-concentration summary (top wallets %, LP %, shared-funder check), with no picture drawn.
+// Shares the same 10-minute data cache as the picture and the interactive map, so this is cheap even right after someone used /b.
+export async function loadBubbleCaption(mint, card) {
+  const d = await collectCached(mint, card);
+  if (!d) return null;
+  const { built, groups, checked, total, curve, source } = d;
+  return buildBubbleCaption({ symbol: card.market?.symbol, built, groups, funderChecked: checked, funderTotal: total, poolLabel: curve ? 'Bonding curve' : 'Liquidity pool', source });
+}
+
 // The same data for the mini app: one lookup is shared by the picture and the interactive map for 10 minutes.
 const dataCache = new Map();
 const dataInflight = new Map();
