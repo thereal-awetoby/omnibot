@@ -5,10 +5,11 @@ import { callerHtml } from './callerlink.js';
 export const MILESTONES = [2, 3, 5, 10, 20, 50, 100, 200, 500, 1000];
 
 // The biggest milestone reached that has not been announced yet, or null.
-export function newMilestone(lastX, x) {
+// minX: the group's smallest multiple worth a post (a group set to 5x never hears about 2x and 3x).
+export function newMilestone(lastX, x, minX = null) {
   if (!(x > 0)) return null;
   let hit = null;
-  for (const m of MILESTONES) if (m <= x && m > (lastX || 1)) hit = m;
+  for (const m of MILESTONES) if (m <= x && m > (lastX || 1) && m >= (minX || 0)) hit = m;
   return hit;
 }
 
