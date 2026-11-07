@@ -3,7 +3,7 @@ import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
-  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, query, MAX_X_FOLLOWS,
+  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, setCallMessage, getMilestoneSetting, setMilestoneSetting, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, query, MAX_X_FOLLOWS,
   MAX_WATCHES,
 } from '@omnibot/shared';
 import {
@@ -25,6 +25,7 @@ import { mkdir, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
+import { livePrices, parseMilestoneArg, buildMilestoneSettingText, buildMilestoneCaption } from './milestones.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince, fetchCandles, generateText } from './sources.js';
 import { formatDuration } from './scan.js';
 import { parseTargets, targetLabel, targetHit, parseDelay, analyzeCloses, buildTaText, TA_FRAMES, fetchCloses, isPublicUrl, stripHtml, parseTranslate, normPeriod, fetchTopCoins, buildHeatmapSvg, buildMoversText, fetchPolymarket, buildPolymarketText, parseAmount, parseEpoch, csvCell } from './extras.js';
@@ -144,7 +145,7 @@ async function callFor(ctx, mint, market, record) {
   if (record && market?.priceUsd) {
     const r = await recordFirstCall({
       chatId: ctx.chat.id, mint, symbol: market.symbol, callerId: ctx.from.id, callerName: callerName(ctx.from),
-      priceUsd: market.priceUsd, mcapUsd: market.marketCapUsd,
+      priceUsd: market.priceUsd, mcapUsd: market.marketCapUsd, msgId: ctx.message?.message_id ?? null,
     });
     return r.call;
   }
@@ -1072,22 +1073,28 @@ async function checkAlerts() {
   }
 }
 
-// Posts a card in the group when a call reaches 2x, 3x, 5x, 10x... (each one once).
+// Posts a card in the group when a call reaches 2x, 3x, 5x, 10x... (each one once), as a reply to the message that
+// made the call. Groups choose with /milestones (off, or start at a bigger multiple).
+const CALL_TRACK_DAYS = Number(process.env.CALL_TRACK_DAYS) || 7;
+const callPrices = (mints) => livePrices(mints, { fetchPairs: fetchPairsByTokens, quoteUsd, launchMarket: fetchLaunchMarket });
+const deadChats = new Map(); // chatId -> time the bot was found removed; skipped for a while instead of erroring every run
 let checkingCalls = false;
 async function checkCalls() {
   if (checkingCalls) return;
   checkingCalls = true;
+  const t0 = Date.now();
+  let posted = 0;
   try {
-    const rows = await listLiveCalls({ days: 7 });
+    const rows = (await listLiveCalls({ days: CALL_TRACK_DAYS })).filter((r) => Date.now() - (deadChats.get(String(r.chat_id)) ?? 0) > 6 * 3600_000);
     if (!rows.length) return;
-    const prices = await fetchPairsByTokens([...new Set(rows.map((r) => r.mint))]);
+    const prices = await callPrices(rows.map((r) => r.mint));
     for (const r of rows) {
       const price = prices.get(r.mint)?.priceUsd;
       // announcements follow the HIGHEST price seen, so a quick pump is not missed between two checks
       const peakPrice = Math.max(Number(r.peak_price_usd) || 0, price || 0);
       if (price > (Number(r.peak_price_usd) || 0)) setCallPeak(r.chat_id, r.mint, price).catch(() => {});
       const x = multiple(r.price_usd, peakPrice);
-      const m = newMilestone(r.last_x, x);
+      const m = newMilestone(r.last_x, x, r.min_x);
       if (!m) continue;
       r.peak_price_usd = peakPrice;
       await setCallMilestone(r.chat_id, r.mint, m); // first, so a failed send never repeats
@@ -1095,16 +1102,44 @@ async function checkCalls() {
         const title = (await bot.api.getChat(r.chat_id).catch(() => null))?.title;
         const card = await pnlPng(r, prices, title, { skipHistory: true });
         if (!card) continue;
-        await bot.api.sendPhoto(r.chat_id, new InputFile(card.png, card.name), { caption: buildPnlCaption({ symbol: r.symbol, callerName: r.caller_name, callerId: r.caller_id, sourceUrl: r.source_url, x: card.x, milestone: true }), parse_mode: 'HTML' });
-      } catch (e) { console.error('multiplier post error:', e.message); }
+        const caption = buildMilestoneCaption({
+          symbol: r.symbol, callerName: r.caller_name, callerId: r.caller_id, sourceUrl: r.source_url, milestone: m, x: card.x,
+          entryMcap: Number(r.mcap_usd) || null, peakMcap: r.mcap_usd ? r.mcap_usd * card.x : null,
+          tookMs: Date.now() - new Date(r.created_at).getTime(),
+        });
+        await bot.api.sendPhoto(r.chat_id, new InputFile(card.png, card.name), {
+          caption, parse_mode: 'HTML',
+          reply_markup: new InlineKeyboard().text('📊 Card', `t:${r.mint}`).url('⚡ Buy', tradeLink(r.mint)),
+          ...(r.call_msg_id ? { reply_parameters: { message_id: Number(r.call_msg_id), allow_sending_without_reply: true } } : {}),
+        });
+        posted++;
+      } catch (e) {
+        // removed from the group, or the group is gone: stop trying there for a while
+        if (e.error_code === 403 || /chat not found|upgraded to a supergroup/i.test(e.description ?? e.message)) deadChats.set(String(r.chat_id), Date.now());
+        console.error('multiplier post error:', e.description ?? e.message);
+      }
       await new Promise((res) => setTimeout(res, 100));
     }
+    const priced = rows.filter((r) => prices.get(r.mint)?.priceUsd > 0).length;
+    if (posted || priced < rows.length) console.log(`calls check: ${rows.length} live, ${priced} priced, ${posted} posted, ${Date.now() - t0}ms`);
   } catch (e) {
     console.error('call check error:', e.message);
   } finally {
     checkingCalls = false;
   }
 }
+
+// /milestones: show or change this group's multiplier posts (admins change, everyone can look).
+bot.command(['milestones', 'multipliers', 'mx'], async (ctx) => {
+  if (!isGroup(ctx)) return ctx.reply('Multiplier posts are for groups: when a call in the group reaches 2x, 5x, 10x… I post a card there.');
+  const arg = (ctx.match ?? '').trim();
+  if (!arg) return ctx.reply(buildMilestoneSettingText(await getMilestoneSetting(ctx.chat.id)), { ...HTML, reply_markup: KB_DEL });
+  const want = parseMilestoneArg(arg);
+  if (!want) return ctx.reply('Try: /milestones off, /milestones on, or /milestones 5 (only 5x and bigger).');
+  if (!(await canManageGroup(ctx))) return ctx.reply('Only group admins can change the multiplier posts.');
+  const now = await setMilestoneSetting(ctx.chat.id, { enabled: want.enabled, minX: want.minX ?? undefined });
+  return ctx.reply(buildMilestoneSettingText(now), { ...HTML, reply_markup: KB_DEL });
+});
 
 
 // ---- Followed X accounts: a token address they post becomes a call in the group ----
@@ -1160,7 +1195,8 @@ async function xCall(chatId, handle, tweet, mint) {
   if (!r.first) return; // someone already called it in this group
   const text = `${buildXCallHeader(handle, tweet.id)}\n\n${buildScanCard({ mint, market: m, security: card.security, intel: card.intel, callLine: buildCallLine(r.call, m.priceUsd), watched: false })}`;
   const url = m.headerUrl || m.imageUrl || null;
-  await bot.api.sendMessage(chatId, text, { ...HTML, reply_markup: cardKeyboard(mint, false, true), ...(url ? { link_preview_options: { url, show_above_text: true, prefer_large_media: true } } : {}) });
+  const sent = await bot.api.sendMessage(chatId, text, { ...HTML, reply_markup: cardKeyboard(mint, false, true), ...(url ? { link_preview_options: { url, show_above_text: true, prefer_large_media: true } } : {}) });
+  if (sent?.message_id) setCallMessage(chatId, mint, sent.message_id).catch(() => {}); // the multiplier posts reply to this card
   console.log(`x call: @${handle} -> ${short(mint)} in ${chatId}`);
 }
 async function pollHandle(h) {
@@ -1269,6 +1305,7 @@ bot.start({
       { command: 'leaderboard', description: 'Group leaderboard (1h, 1 week, all...)' },
       { command: 'calls', description: 'Your calls in this group' },
       { command: 'pnl', description: 'PnL card of a call (groups)' },
+      { command: 'milestones', description: 'Multiplier posts: on, off or from 5x (groups)' },
       { command: 'meme', description: 'A random crypto meme' },
       { command: 'hm', description: 'Crypto heatmap' },
       { command: 'best', description: 'Top gainers' },

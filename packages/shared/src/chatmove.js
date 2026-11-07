@@ -27,6 +27,12 @@ export async function moveChatData(oldId, newId) {
       await c.query('DELETE FROM x_follows o USING x_follows n WHERE o.chat_id = $1 AND n.chat_id = $2 AND o.handle = n.handle', [from, to]);
       follows = (await c.query('UPDATE x_follows SET chat_id = $2 WHERE chat_id = $1', [from, to])).rowCount;
     }
+    // the group's multiplier-post setting moves too (a setting already saved under the new id wins)
+    if ((await c.query("SELECT to_regclass('call_settings') AS t")).rows[0].t) {
+      await c.query(`INSERT INTO call_settings (chat_id, milestones_on, min_x)
+        SELECT $2::bigint, milestones_on, min_x FROM call_settings WHERE chat_id = $1::bigint ON CONFLICT (chat_id) DO NOTHING`, [from, to]);
+      await c.query('DELETE FROM call_settings WHERE chat_id = $1', [from]);
+    }
     await c.query('COMMIT');
     return { calls: calls.rowCount, duplicates: d1.rowCount + d2.rowCount, reminders: reminders.rowCount, follows };
   } catch (e) {
