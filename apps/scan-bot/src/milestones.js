@@ -11,7 +11,7 @@ import { usdFromQuote } from './curvemarket.js';
 const misses = new Map(); // mint -> time of a launchpad lookup that found nothing; not asked again for a while
 const MISS_TTL_MS = 5 * 60_000;
 
-export async function livePrices(mints, { fetchPairs, quoteUsd, launchMarket, maxFallback = 15, chunk = 30, now = Date.now() } = {}) {
+export async function livePrices(mints, { fetchPairs, quoteUsd, launchMarket, maxFallback = 15, concurrency = 4, chunk = 30, now = Date.now() } = {}) {
   const wanted = [...new Set(mints)];
   const out = new Map();
   for (let i = 0; i < wanted.length; i += chunk) {
@@ -25,16 +25,34 @@ export async function livePrices(mints, { fetchPairs, quoteUsd, launchMarket, ma
     const u = usdFromQuote(m, await quoteUsd(fetchPairs, m.quoteAddress).catch(() => null));
     if (u) out.set(mint, { ...m, priceUsd: u.priceUsd, marketCapUsd: m.marketCapUsd ?? (/pump/i.test(m.dex ?? '') ? u.marketCapUsd : null) });
   }
-  // not on DexScreener at all
+  // not on DexScreener at all: a few at a time (these APIs have small free limits), recent answers reused
   if (launchMarket) {
-    const missing = wanted.filter((m) => !(out.get(m)?.priceUsd > 0) && now - (misses.get(m) ?? 0) > MISS_TTL_MS).slice(0, maxFallback);
-    for (const mint of missing) {
-      const l = await launchMarket(mint).catch(() => null);
-      if (l?.priceUsd > 0) out.set(mint, { ...(out.get(mint) ?? {}), ...l, mint });
-      else { if (misses.size > 2000) misses.clear(); misses.set(mint, now); }
+    const missing = [];
+    for (const m of wanted) {
+      if (out.get(m)?.priceUsd > 0) continue;
+      const hit = launchHits.get(m);
+      if (hit && now - hit.at < HIT_TTL_MS) { out.set(m, { ...(out.get(m) ?? {}), ...hit.v, mint: m }); continue; }
+      if (now - (misses.get(m) ?? 0) > MISS_TTL_MS) missing.push(m);
     }
+    await pool(missing.slice(0, maxFallback), concurrency, async (mint) => {
+      const l = await launchMarket(mint).catch(() => null);
+      if (l?.priceUsd > 0) {
+        out.set(mint, { ...(out.get(mint) ?? {}), ...l, mint });
+        if (launchHits.size > 1000) launchHits.clear();
+        launchHits.set(mint, { at: now, v: l });
+      } else { if (misses.size > 2000) misses.clear(); misses.set(mint, now); }
+    });
   }
   return out;
+}
+const launchHits = new Map(); // mint -> { at, v }: a launchpad price found in the last minute
+const HIT_TTL_MS = 60_000;
+
+// Runs fn over items, at most `n` at once.
+async function pool(items, n, fn) {
+  let i = 0;
+  const worker = async () => { while (i < items.length) await fn(items[i++]); };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
 }
 
 // ---- Per-group setting: /milestones on | off | <smallest multiple> ----

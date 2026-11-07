@@ -12,18 +12,37 @@ const name = (n) => esc(String(n ?? 'someone').replace(/^@/, '').slice(0, 24));
 const sym = (c) => (c.symbol ? `$${c.symbol}` : `${String(c.mint).slice(0, 4)}…`);
 const ago = (ms) => formatDuration(ms) ?? 'now';
 
-export function buildFcText({ call, nowMcap, roi, athX, now = Date.now() }) {
+// A link to a message in the group: public groups by @username, private supergroups by their internal id. Basic groups: none.
+export function callMsgLink(chatId, msgId, username = null) {
+  if (!msgId) return null;
+  if (username) return `https://t.me/${username}/${msgId}`;
+  const id = String(chatId);
+  return id.startsWith('-100') ? `https://t.me/c/${id.slice(4)}/${msgId}` : null;
+}
+const utcStamp = (d) => {
+  const t = new Date(d);
+  if (Number.isNaN(t.getTime())) return null;
+  const mon = t.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' });
+  return `${mon} ${t.getUTCDate()}, ${String(t.getUTCHours()).padStart(2, '0')}:${String(t.getUTCMinutes()).padStart(2, '0')} UTC`;
+};
+const signedPct = (x) => { const p = (x - 1) * 100; return `${p >= 0 ? '+' : ''}${Math.abs(p) >= 100 ? p.toFixed(0) : p.toFixed(1)}%`; };
+
+// record: the caller's track record in the group { calls, avgX, hit2, bestX }; link: the message that made the call.
+export function buildFcText({ call, nowMcap, roi, athX, now = Date.now(), record = null, link = null }) {
+  const athMcap = athX && call.mcap_usd ? call.mcap_usd * athX : null;
   const rows = [
     ['Caller', `${String(call.caller_name ?? 'someone').replace(/^@/, '')}  (${ago(now - new Date(call.created_at).getTime())} ago)`],
     ['Called', formatUsd(call.mcap_usd)],
-    ['Now', formatUsd(nowMcap)],
+    ['Now', `${formatUsd(nowMcap)}${roi ? `  ${roi >= 1 ? '🟢' : '🔴'} ${signedPct(roi)}` : ''}`],
     ['ROI', roi ? fmtX(roi) : 'n/a'],
-    ['ATH', athX ? fmtX(athX) : 'n/a'],
+    ['ATH', athX ? `${fmtX(athX)}${athMcap ? `  (${formatUsd(athMcap)})` : ''}` : 'n/a'],
   ];
-  return `🥇 <b>First Call</b> · ${esc(sym(call))}\n${pre(rows)}`;
+  const at = utcStamp(call.created_at);
+  if (at) rows.push(['At', at]);
+  if (record?.calls) rows.push(['Record', `${record.calls} call${record.calls === 1 ? '' : 's'} · avg ${fmtX(record.avgX)} · ${Math.round(record.hit2 * 100)}% ≥2x`]);
+  return `🥇 <b>First Call</b> · ${esc(sym(call))}\n${pre(rows)}${link ? `\n<a href="${esc(link)}">↪ Original call</a>` : ''}`;
 }
 
-// rows: group board rows (newest first) with x = highest multiple reached
 export function buildLastText(rows, now = Date.now()) {
   if (!rows.length) return '🕘 <b>Last calls</b>\n\nNo calls in this group yet.';
   const best = rows.reduce((a, b) => (b.x > a.x ? b : a));
@@ -79,7 +98,7 @@ export function buildHelpText() {
     sec('🔎 Token data', [['/s', 'Search a token'], ['/p', 'Price'], ['/c', 'Chart'], ['/ta', 'Technical read'], ['/v', 'Convert an amount'], ['/th', 'Top holders'], ['/dev', 'Deployer and launches'], ['/nar', 'Lore (the story)'], ['/soc', 'Social links'], ['/dp', 'DEX Paid status'], ['/bm', 'Bubblemap']]),
     sec('🌍 Markets', [['/hm', 'Heatmap'], ['/best', 'Top gainers'], ['/worst', 'Top losers'], ['/i', 'Top coins'], ['/trending', 'Trending tokens'], ['/poly', 'Polymarket search'], ['/rekt', 'Liquidations (1h 4h 12h 24h)']]),
     sec('🕵️ Wallets', [['/tt', 'Top traders of a token'], ['/tw', 'Top wallets of a token'], ['/ws', 'Wallet stats']]),
-    sec('👥 Group', [['/lb', 'Leaderboard (1h, 1 week, all…)'], ['/calls', 'Your calls'], ['/fc', 'First caller of a token'], ['/last', 'Last calls'], ['/pnl', 'PnL card'], ['/milestones', 'Multiplier posts'], ['/elb', 'Export leaderboard'], ['/meme', 'Random crypto meme']]),
+    sec('👥 Group', [['/lb', 'Leaderboard (1h, 1 week, all…)'], ['/calls', 'Your calls (or /calls @name)'], ['/callmap', 'Heatmap of the group\'s calls'], ['/fc', 'First caller of a token'], ['/last', 'Last calls'], ['/pnl', 'PnL card'], ['/milestones', 'Multiplier posts'], ['/elb', 'Export leaderboard'], ['/meme', 'Random crypto meme']]),
     sec('𝕏 X calls', [['/follow', 'Call tokens an X account posts'], ['/unfollow', 'Stop following'], ['/following', 'Followed accounts']]),
     sec('🔔 Alerts', [['/watch', 'Watch a token (moves of ±%)'], ['/target', 'Alert at 3x, 4x, -50%…'], ['/targets', 'Your alerts'], ['/untarget', 'Remove alerts'], ['/remindme', 'Reminder to you'], ['/remind', 'Reminder for the chat'], ['/listreminders', 'Your reminders']]),
     sec('🤖 AI tools', [['/tr', 'Translate (-fr, -es, -yo…)'], ['/tldr', 'Summarize text or a link'], ['/eli5', 'Explain simply']]),
@@ -90,8 +109,8 @@ export { formatPriceCard };
 
 // /calls: one summary block, then every call in a quote block (collapsed after a few lines).
 // calls: newest first, { mint, symbol, price_usd, mcap_usd, peak_price_usd, created_at }; prices: Map(mint -> { priceUsd }).
-export function buildMyCallsText(calls, prices, who, now = Date.now()) {
-  if (!calls.length) return 'You have no calls in this group yet. Post a token address that nobody has called.';
+export function buildMyCallsText(calls, prices, who, now = Date.now(), { mine = true } = {}) {
+  if (!calls.length) return mine ? 'You have no calls in this group yet. Post a token address that nobody has called.' : `${esc(String(who ?? 'They').replace(/^@/, ''))} has no calls in this group yet.`;
   const rows = calls.map((c) => {
     const entry = Number(c.price_usd) || 0;
     const nowP = prices.get(c.mint)?.priceUsd ?? null;
