@@ -13,7 +13,7 @@ import {
 } from './scan.js';
 import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getTokenMeta, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
-import { loadBubblemap, loadBubbleData } from './bubbleload.js';
+import { loadBubbleCaption, loadBubbleData } from './bubbleload.js';
 import { renderPng, renderRaw } from './bubblemap.js';
 import { getArt, getMeme, refillArt, clearOldCache, OWN_DIR, sniffMime } from './memeart.js';
 import { usdFromQuote, quoteUsd, fetchLaunchMarket } from './curvemarket.js';
@@ -248,30 +248,23 @@ async function showDetail(ctx, kind, mint, build) {
   return sent;
 }
 
-// The bubblemap: one picture of the biggest holders and which of them were funded by the same wallet.
+// Bubblemap: the holder-concentration summary as text, plus a button straight into the real, interactive bubblemaps.io graph.
 async function sendBubblemap(ctx, mint) {
   if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
   const now = Date.now();
   if (now - (lastDetailAt.get(ctx.from.id) ?? 0) < 1500) return; // ignore rapid repeat taps
   lastDetailAt.set(ctx.from.id, now);
-  let result = null;
-  try { result = await withTyping(ctx, async () => loadBubblemap(mint, await cachedCard(mint)), 'upload_photo'); }
+  let caption = null;
+  try { caption = await withTyping(ctx, async () => loadBubbleCaption(mint, await cachedCard(mint))); }
   catch (e) { console.error('bubblemap error:', e.message); }
   const origin = ctx.callbackQuery?.message?.message_id ?? ctx.message?.message_id;
   const reply = origin ? { reply_parameters: { message_id: origin, allow_sending_without_reply: true } } : {};
-  const site = new InlineKeyboard().url('🌐 Bubblemaps.io', bubbleUrl(mint)).text('🗑 Close', 'x');
-  // The real bubblemaps.io, with its own zoom/pan graph: inside Telegram in a private chat, as an external tab in a group (Telegram only allows web_app buttons in private chats).
-  if (!result) return ctx.reply('Could not build the bubblemap right now (holder data was not available). Try again in a moment.', { ...reply, reply_markup: site });
+  // The real bubblemaps.io, with its own zoom/pan graph: inside Telegram in a private chat, as a normal link in a group (Telegram only allows web_app popups in private chats).
   const kb = new InlineKeyboard();
-  if (isGroup(ctx)) kb.url('🫧 Interactive map', bubbleUrl(mint)); else kb.webApp('🫧 Interactive map', bubbleUrl(mint));
-  kb.row();
-  kb.text('👥 Top holders', `h:${mint}`).text('👨‍💻 Dev', `d:${mint}`).row().url('🌐 Bubblemaps.io', bubbleUrl(mint)).text('🗑 Close', 'x');
-  try {
-    return await ctx.replyWithPhoto(new InputFile(result.png, 'bubblemap.png'), { caption: result.caption, parse_mode: 'HTML', reply_markup: kb, ...reply });
-  } catch (e) {
-    console.error('bubblemap send error:', e.message);
-    return ctx.reply('Could not send the bubblemap image. Try again in a moment.', { ...reply, reply_markup: site });
-  }
+  if (isGroup(ctx)) kb.url('🫧 Open interactive map', bubbleUrl(mint)); else kb.webApp('🫧 Open interactive map', bubbleUrl(mint));
+  kb.row().text('👥 Top holders', `h:${mint}`).text('👨‍💻 Dev', `d:${mint}`).row().text('🗑 Close', 'x');
+  const text = caption ?? 'Holder data was not available for the summary. You can still open the interactive map below.';
+  return ctx.reply(text, { ...HTML, reply_markup: kb, ...reply });
 }
 
 async function buildHolders(mint) {
@@ -438,9 +431,7 @@ const withMint = (usage, fn) => async (ctx) => {
   if (!mint) return ctx.reply(`Usage: ${usage} <token address>\nOr reply to a message that has the address.`);
   return fn(ctx, mint);
 };
-bot.command('bm', withMint('/bm', (ctx, mint) => (!isGroup(ctx)
-  ? ctx.reply('Bubblemap: tap to open the interactive map.', { reply_markup: new InlineKeyboard().webApp('🫧 Open Bubblemap', bubbleUrl(mint)).row().text('🖼 Picture instead', `b:${mint}`) })
-  : sendBubblemap(ctx, mint))));
+bot.command('bm', withMint('/bm', (ctx, mint) => sendBubblemap(ctx, mint))); // short alias
 bot.command('bubblemap', withMint('/bubblemap', (ctx, mint) => sendBubblemap(ctx, mint)));
 bot.command('th', withMint('/th', (ctx, mint) => showDetail(ctx, 'h', mint, () => buildHolders(mint))));
 bot.command('dev', withMint('/dev', (ctx, mint) => showDetail(ctx, 'd', mint, () => buildDev(mint))));
