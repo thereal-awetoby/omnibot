@@ -79,7 +79,7 @@ test('follow answers: added, status list, post header', () => {
     { handle: 'new', polled_at: null },
   ];
   const t = buildFollowingText(rows, now);
-  assert.match(t, /@good<\/b>\n└ ✅ reading OK/); assert.match(t, /@bad<\/b>\n└ ⚠️ cannot read right now \(last worked/); assert.match(t, /@new<\/b>\n└ ⏳ not checked yet/);
+  assert.match(t, /@good<\/b>\n└ ✅ healthy/); assert.match(t, /@bad<\/b>\n└ ⚠️ cannot read right now \(last OK/); assert.match(t, /@new<\/b>\n└ ⏳ not checked yet/);
   assert.match(buildFollowingText([], now), /None yet/);
   assert.equal(buildXCallHeader('a_b', '123'), '𝕏 <a href="https://x.com/a_b/status/123">@a_b</a> posted a token');
   assert.match(buildHelpText(), /\/follow/);

@@ -41,7 +41,22 @@ export function ensureXTables() {
         handle TEXT PRIMARY KEY,
         checked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         ok BOOLEAN NOT NULL DEFAULT false,
-        error TEXT
+        error TEXT,
+        fail_count INT NOT NULL DEFAULT 0,
+        last_ok_at TIMESTAMPTZ
+      )`);
+      // Safe idempotent adds for existing tables
+      await query(`ALTER TABLE x_feed_status ADD COLUMN IF NOT EXISTS fail_count INT NOT NULL DEFAULT 0`).catch(() => {});
+      await query(`ALTER TABLE x_feed_status ADD COLUMN IF NOT EXISTS last_ok_at TIMESTAMPTZ`).catch(() => {});
+      // Worker heartbeat: single row the worker updates each round
+      await query(`CREATE TABLE IF NOT EXISTS x_worker_heartbeat (
+        id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        last_round_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        accounts_total INT NOT NULL DEFAULT 0,
+        accounts_active INT NOT NULL DEFAULT 0,
+        handles_checked INT NOT NULL DEFAULT 0,
+        round_ms INT,
+        version TEXT
       )`);
     })().catch((e) => { ready = null; throw e; });
   }
@@ -67,8 +82,11 @@ export async function removeXFollow(chatId, handle) {
 export async function listXFollows(chatId) {
   await ensureXTables();
   const { rows } = await query(
-    `SELECT f.handle, f.added_by_name, f.created_at, h.polled_at, h.ok_at, h.last_error, h.via, h.newest_tweet_at
-     FROM x_follows f LEFT JOIN x_handles h ON h.handle = f.handle WHERE f.chat_id = $1 ORDER BY f.created_at`, [chatId]);
+    `SELECT f.handle, f.added_by_name, f.created_at, h.polled_at, h.ok_at, h.last_error, h.via, h.newest_tweet_at,
+            s.fail_count, s.last_ok_at AS worker_last_ok_at, s.checked_at AS worker_checked_at, s.ok AS worker_ok, s.error AS worker_error
+     FROM x_follows f LEFT JOIN x_handles h ON h.handle = f.handle
+     LEFT JOIN x_feed_status s ON s.handle = f.handle
+     WHERE f.chat_id = $1 ORDER BY f.created_at`, [chatId]);
   return rows;
 }
 // Every followed account with the chats that follow it: [{ handle, polled_at, chats: [{ chat_id, last_tweet_id }] }]
@@ -97,4 +115,11 @@ export async function setXPoll({ handle, ok, error = null, via = null, newestId 
        newest_tweet_id = COALESCE($5, x_handles.newest_tweet_id), newest_tweet_at = COALESCE($6, x_handles.newest_tweet_at)`,
     [handle, Boolean(ok), ok ? null : String(error ?? 'unreadable').slice(0, 200), via, newestId ? String(newestId) : null, newestAt]
   );
+}
+
+// Worker heartbeat: the bot reads this to know if the worker is alive and how many X accounts are usable.
+export async function getWorkerHeartbeat() {
+  await ensureXTables();
+  const { rows } = await query('SELECT last_round_at, accounts_total, accounts_active, handles_checked, round_ms, version FROM x_worker_heartbeat WHERE id = 1');
+  return rows[0] ?? null;
 }
