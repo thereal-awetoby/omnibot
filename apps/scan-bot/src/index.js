@@ -3,7 +3,7 @@ import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
-  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, setCallMessage, getMilestoneSetting, setMilestoneSetting, findCallerByName, callerRecord, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, query, MAX_X_FOLLOWS,
+  recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, setCallMessage, getMilestoneSetting, setMilestoneSetting, findCallerByName, callerRecord, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, getWorkerHeartbeat, query, MAX_X_FOLLOWS,
   MAX_WATCHES,
 } from '@omnibot/shared';
 import {
@@ -1245,7 +1245,8 @@ bot.command(['unfollow', 'unx', 'xunfollow'], async (ctx) => {
 });
 bot.command(['following', 'xlist'], async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('This works in groups.');
-  return ctx.reply(buildFollowingText(await listXFollows(ctx.chat.id)), { ...HTML, reply_markup: KB_DEL });
+  const [rows, heartbeat] = await Promise.all([listXFollows(ctx.chat.id), getWorkerHeartbeat().catch(() => null)]);
+  return ctx.reply(buildFollowingText(rows, Date.now(), heartbeat), { ...HTML, reply_markup: KB_DEL });
 });
 
 // A token address found in a followed account's post: price it first (no price, no call: it may not be a token at all),
@@ -1295,9 +1296,13 @@ async function checkXFeeds() {
     const now = Date.now();
     const due = (await listAllXFollows())
       .filter((h) => (!h.polled_at || now - new Date(h.polled_at).getTime() >= X_EVERY_MS) && (xBackoff.get(h.handle)?.until ?? 0) < now)
-      .sort((a, b) => (new Date(a.polled_at ?? 0).getTime() - new Date(b.polled_at ?? 0).getTime()))
-      .slice(0, 4);
-    for (const h of due) { await pollHandle(h); await new Promise((r) => setTimeout(r, 1_500)); }
+      .sort((a, b) => (new Date(a.polled_at ?? 0).getTime() - new Date(b.polled_at ?? 0).getTime()));
+    // Poll all due handles concurrently — each is just a DB read + optional Telegram sends.
+    // Bounded to 6 at a time to avoid slamming Telegram with too many cards at once.
+    const MAX_CONCURRENT = 6;
+    for (let i = 0; i < due.length; i += MAX_CONCURRENT) {
+      await Promise.all(due.slice(i, i + MAX_CONCURRENT).map((h) => pollHandle(h).catch((e) => console.error(`x poll @${h.handle}:`, e.message))));
+    }
   } catch (e) { console.error('x check error:', e.message); }
   finally { checkingX = false; }
 }

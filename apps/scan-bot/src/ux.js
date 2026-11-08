@@ -152,23 +152,43 @@ export function explainXError(err) {
   const e = String(err ?? '').toLowerCase();
   if (e.includes('not running')) return 'the X reader is switched off';
   if (e.includes('not read this account yet')) return 'waiting for the X reader to check it';
-  if (e.includes('rate limited') || e.includes('timed out')) return 'X is limiting the reader, it will retry';
-  if (e.includes('locked') || e.includes('no usable') || e.includes('authentication')) return 'the reader\u2019s X login needs fresh cookies';
-  if (e.includes('no such x account')) return 'that X account does not exist';
+  if (e.includes('rate limited') || e.includes('timed out')) return 'X is rate-limiting, retrying';
+  if (e.includes('locked') || e.includes('no usable') || e.includes('authentication')) return 'needs fresh cookies';
+  if (e.includes('no such x account')) return 'account does not exist';
   return 'cannot read right now';
 }
-export function buildFollowingText(rows, now = Date.now()) {
+// Per-handle status indicator for /following, using worker columns when available
+function handleStatus(r, now) {
+  const polled = r.polled_at ? new Date(r.polled_at).getTime() : null;
+  const ok = r.ok_at ? new Date(r.ok_at).getTime() : null;
+  const wOk = r.worker_last_ok_at ? new Date(r.worker_last_ok_at).getTime() : null;
+  const lastOk = wOk ?? ok;
+  const error = r.worker_error ?? r.last_error;
+  const fails = r.fail_count ?? 0;
+  if (!polled && !r.worker_checked_at) return '⏳ not checked yet';
+  if (error) {
+    const reason = explainXError(error);
+    const okAgo = lastOk ? ` (last OK ${ago2(now - lastOk)} ago)` : '';
+    const count = fails > 1 ? ` · ${fails} fails` : '';
+    return `⚠️ ${reason}${okAgo}${count}`;
+  }
+  const checkedAt = r.worker_checked_at ? new Date(r.worker_checked_at).getTime() : polled;
+  return `✅ healthy · checked ${ago2(now - checkedAt)} ago`;
+}
+export function buildFollowingText(rows, now = Date.now(), heartbeat = null) {
   if (!rows.length) return '𝕏 <b>Followed accounts</b>\n\nNone yet. Add one with <code>/follow @handle</code>: any token address they post will be called in this group.';
   const lines = rows.map((r) => {
-    const polled = r.polled_at ? new Date(r.polled_at).getTime() : null;
-    const ok = r.ok_at ? new Date(r.ok_at).getTime() : null;
-    let st;
-    if (!polled) st = '⏳ not checked yet';
-    else if (r.last_error) st = `⚠️ ${explainXError(r.last_error)}${ok ? ` (last worked ${ago2(now - ok)} ago)` : ''}`;
-    else st = `✅ reading OK · checked ${ago2(now - polled)} ago`;
+    const st = handleStatus(r, now);
     const post = r.newest_tweet_at ? ` · latest post ${ago2(now - new Date(r.newest_tweet_at).getTime())} ago` : '';
     return `<b>@${esc(r.handle)}</b>\n└ ${st}${post}`;
   });
-  return `𝕏 <b>Followed accounts</b> · ${rows.length}\n<blockquote>${lines.join('\n')}</blockquote>\n<i>Stop one with /unfollow @handle.</i>`;
+  // Worker health footer
+  let footer = '';
+  if (heartbeat) {
+    const wAge = now - new Date(heartbeat.last_round_at).getTime();
+    const wStatus = wAge < 5 * 60_000 ? '🟢 online' : wAge < 15 * 60_000 ? '🟡 slow' : '🔴 offline';
+    footer = `\n\n<i>X reader: ${wStatus} · ${heartbeat.accounts_active ?? '?'}/${heartbeat.accounts_total ?? '?'} accounts active · last round ${ago2(wAge)} ago</i>`;
+  }
+  return `𝕏 <b>Followed accounts</b> · ${rows.length}\n<blockquote>${lines.join('\n')}</blockquote>\n<i>Stop one with /unfollow @handle.</i>${footer}`;
 }
 export const buildXCallHeader = (handle, tweetId) => `𝕏 <a href="https://x.com/${esc(handle)}/status/${esc(tweetId)}">@${esc(handle)}</a> posted a token`;

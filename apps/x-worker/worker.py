@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
@@ -21,6 +22,7 @@ PER_ACCOUNT_PAUSE = float(os.getenv("X_PAUSE_SECONDS", "4"))  # polite gap betwe
 FETCH_TIMEOUT = int(os.getenv("X_FETCH_TIMEOUT", "90"))
 TWEETS_PER_CHECK = 20
 KEEP_DAYS = 3
+WORKER_VERSION = "2"  # bumped when the heartbeat schema or behaviour changes
 
 
 def load_env():
@@ -79,18 +81,24 @@ def tweet_to_row(tw):
 
 
 def classify_error(e):
-    """A short, plain reason the Scan bot can show in /following. Never the raw X text."""
+    """A short, plain reason the Scan bot can show in /following. Never the raw X text.
+    Order matters: 'locked'/'326' is checked before 'suspended' because a locked worker account
+    message can contain 'suspend' — but the worker account is fixable while the target is not."""
     if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
         return "timed out (X slow or limiting)"
     m = f"{e.__class__.__name__} {e}".lower()
-    if "no such x account" in m or "not found" in m or "suspended" in m:
-        return "no such X account"
-    if "locked" in m or "326" in m or "suspend" in m:
+    # Worker's own X account locked or suspended — fixable with fresh cookies
+    if "locked" in m or "326" in m:
         return "account locked - need new cookies"
-    if "429" in m or "rate limit" in m or "too many" in m:
-        return "rate limited"
     if "no account available" in m or "noaccount" in m or "no active" in m:
         return "no usable X account - need new cookies"
+    # The TARGET account does not exist or was suspended — nothing to do
+    if "no such x account" in m or ("not found" in m and "account" in m) or "user not found" in m:
+        return "no such X account"
+    if "suspended" in m or "suspend" in m:
+        return "no such X account"
+    if "429" in m or "rate limit" in m or "too many" in m:
+        return "rate limited"
     if "401" in m or "403" in m or "authenticat" in m or "unauthor" in m or "forbidden" in m or "login" in m:
         return "authentication failed"
     return (str(e) or e.__class__.__name__)[:120]
@@ -103,6 +111,15 @@ async def active_accounts(api):
     except Exception:
         return None
     return sum(1 for a in info if (a.get("active") if isinstance(a, dict) else getattr(a, "active", False)))
+
+
+async def total_accounts(api):
+    """Total X accounts in the pool, active or not (None if unknown)."""
+    try:
+        info = await api.pool.accounts_info()
+    except Exception:
+        return None
+    return len(info)
 
 
 async def fetch_handle(api, handle, uid_cache):
@@ -130,6 +147,11 @@ def round_period(handles, accounts):
 
 
 async def run_round(api, db, uid_cache, sleep=asyncio.sleep):
+    """Fetch every followed handle, saving posts and status. Returns the number of handles processed.
+
+    Handles are fetched concurrently (bounded by the number of usable X accounts), with the stalest handles
+    checked first. Each handle still has a small pause after it finishes, so the X accounts are not hammered.
+    """
     handles = await db.handles()
     if not handles:
         return 0
@@ -139,25 +161,39 @@ async def run_round(api, db, uid_cache, sleep=asyncio.sleep):
         for h in handles:
             await db.status(h, False, "no usable X account - need new cookies")
         return len(handles)
-    ok_n = bad_n = 0
-    for h in handles:
-        try:
-            rows = await asyncio.wait_for(fetch_handle(api, h, uid_cache), FETCH_TIMEOUT)
-            await db.save(h, rows)
-            await db.status(h, True, None)
-            ok_n += 1
-            log.info("@%s: OK, %d posts saved", h, len(rows))
-        except Exception as e:  # one account failing never stops the others
-            msg = classify_error(e)
-            bad_n += 1
-            log.warning("@%s: FAILED - %s", h, msg)
+    # Prioritise handles that have not been checked recently (stalest first)
+    order = await db.handles_by_staleness()
+    if not order:
+        order = handles
+
+    # Concurrent fetches, bounded by the number of usable X accounts (or 3 if unknown)
+    concurrency = max(1, min(usable or 3, 3))
+    sem = asyncio.Semaphore(concurrency)
+    ok_n = 0
+    bad_n = 0
+
+    async def do_handle(h):
+        nonlocal ok_n, bad_n
+        async with sem:
             try:
-                await db.status(h, False, msg)
-            except Exception as e2:
-                log.error("could not save status: %s", e2)
-        await sleep(PER_ACCOUNT_PAUSE)
+                rows = await asyncio.wait_for(fetch_handle(api, h, uid_cache), FETCH_TIMEOUT)
+                await db.save(h, rows)
+                await db.status(h, True, None)
+                ok_n += 1
+                log.info("@%s: OK, %d posts saved", h, len(rows))
+            except Exception as e:  # one account failing never stops the others
+                msg = classify_error(e)
+                bad_n += 1
+                log.warning("@%s: FAILED - %s", h, msg)
+                try:
+                    await db.status(h, False, msg)
+                except Exception as e2:
+                    log.error("could not save status: %s", e2)
+            await sleep(PER_ACCOUNT_PAUSE)
+
+    await asyncio.gather(*(do_handle(h) for h in order))
     log.info("round done: %d ok, %d failed, X accounts in use: %s", ok_n, bad_n, "?" if usable is None else usable)
-    return len(handles)
+    return len(order)
 
 
 class PgDb:
@@ -181,11 +217,31 @@ class PgDb:
                 urls TEXT[] NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ, is_retweet BOOLEAN NOT NULL DEFAULT false,
                 seen_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (handle, tweet_id))""")
             await c.execute("""CREATE TABLE IF NOT EXISTS x_feed_status (handle TEXT PRIMARY KEY, checked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                ok BOOLEAN NOT NULL DEFAULT false, error TEXT)""")
+                ok BOOLEAN NOT NULL DEFAULT false, error TEXT, fail_count INT NOT NULL DEFAULT 0, last_ok_at TIMESTAMPTZ)""")
+            # Idempotent adds for existing tables
+            for col, dfn in [("fail_count", "INT NOT NULL DEFAULT 0"), ("last_ok_at", "TIMESTAMPTZ")]:
+                try:
+                    await c.execute(f"ALTER TABLE x_feed_status ADD COLUMN {col} {dfn}")
+                except Exception:
+                    pass  # already exists
+            await c.execute("""CREATE TABLE IF NOT EXISTS x_worker_heartbeat (
+                id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                last_round_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                accounts_total INT NOT NULL DEFAULT 0, accounts_active INT NOT NULL DEFAULT 0,
+                handles_checked INT NOT NULL DEFAULT 0, round_ms INT, version TEXT)""")
 
     async def handles(self):
         async with self.pool.acquire() as c:
             return [r["handle"] for r in await c.fetch("SELECT DISTINCT handle FROM x_follows ORDER BY handle")]
+
+    async def handles_by_staleness(self):
+        """Handles ordered by least recently successfully read (stalest first). Handles never read come first."""
+        async with self.pool.acquire() as c:
+            rows = await c.fetch(
+                """SELECT DISTINCT f.handle, s.last_ok_at
+                   FROM x_follows f LEFT JOIN x_feed_status s ON s.handle = f.handle
+                   ORDER BY s.last_ok_at ASC NULLS FIRST, f.handle""")
+            return [r["handle"] for r in rows]
 
     async def save(self, handle, rows):
         if not rows:
@@ -202,8 +258,21 @@ class PgDb:
     async def status(self, handle, ok, error):
         async with self.pool.acquire() as c:
             await c.execute(
-                """INSERT INTO x_feed_status (handle, checked_at, ok, error) VALUES ($1, now(), $2, $3)
-                   ON CONFLICT (handle) DO UPDATE SET checked_at = now(), ok = $2, error = $3""", handle, ok, error)
+                """INSERT INTO x_feed_status (handle, checked_at, ok, error, fail_count, last_ok_at)
+                   VALUES ($1, now(), $2, $3, CASE WHEN $2 THEN 0 ELSE 1 END, CASE WHEN $2 THEN now() ELSE NULL END)
+                   ON CONFLICT (handle) DO UPDATE SET checked_at = now(), ok = $2, error = $3,
+                     fail_count = CASE WHEN $2 THEN 0 ELSE x_feed_status.fail_count + 1 END,
+                     last_ok_at = CASE WHEN $2 THEN now() ELSE x_feed_status.last_ok_at END""",
+                handle, ok, error)
+
+    async def heartbeat(self, accounts_total, accounts_active, handles_checked, round_ms):
+        async with self.pool.acquire() as c:
+            await c.execute(
+                """INSERT INTO x_worker_heartbeat (id, last_round_at, accounts_total, accounts_active, handles_checked, round_ms, version)
+                   VALUES (1, now(), $1, $2, $3, $4, $5)
+                   ON CONFLICT (id) DO UPDATE SET last_round_at = now(), accounts_total = $1, accounts_active = $2,
+                     handles_checked = $3, round_ms = $4, version = $5""",
+                accounts_total or 0, accounts_active or 0, handles_checked, round_ms, WORKER_VERSION)
 
 
 async def main():
@@ -219,7 +288,7 @@ async def main():
     if not await api.pool.accounts_info():
         sys.exit("No X account added yet. Double-click add-account.bat first.")
     db = await PgDb.connect(url)
-    log.info("Omni X worker running. Press Ctrl+C to stop.")
+    log.info("Omni X worker running (v%s). Press Ctrl+C to stop.", WORKER_VERSION)
     uid_cache = {}
     loop = asyncio.get_event_loop()
     while True:
@@ -231,7 +300,14 @@ async def main():
                 log.info("Nobody is followed yet. Use /follow @name in a group.")
         except Exception as e:
             log.error("round failed: %s", e)
-        period = round_period(n, await active_accounts(api))
+        usable = await active_accounts(api)
+        tot = await total_accounts(api)
+        round_ms = int((loop.time() - started) * 1000)
+        try:
+            await db.heartbeat(tot, usable, n, round_ms)
+        except Exception as e:
+            log.error("heartbeat write failed: %s", e)
+        period = round_period(n, usable)
         await asyncio.sleep(max(3.0, period - (loop.time() - started)))
 
 

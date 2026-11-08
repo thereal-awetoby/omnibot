@@ -22,8 +22,10 @@ class FakeApi:
 class FakeDb:
     def __init__(self, handles): self._h, self.saved, self.stat = handles, {}, {}
     async def handles(self): return self._h
+    async def handles_by_staleness(self): return self._h  # same order for tests
     async def save(self, h, rows): self.saved[h] = rows
     async def status(self, h, ok, err): self.stat[h] = (ok, err)
+    async def heartbeat(self, *a): pass
 
 class T(unittest.TestCase):
     def test_row_conversion(self):
@@ -65,10 +67,28 @@ class T(unittest.TestCase):
         self.assertEqual(c(RuntimeError("no such X account")), "no such X account")
         self.assertEqual(c(RuntimeError("No account available for queue UserTweets")), "no usable X account - need new cookies")
         self.assertEqual(c(asyncio.TimeoutError()), "timed out (X slow or limiting)")
+    def test_locked_before_suspended(self):
+        """'Account locked (326)' must not be caught by the 'suspended' branch."""
+        c = worker.classify_error
+        self.assertEqual(c(RuntimeError("Account locked (326)")), "account locked - need new cookies")
+        # A suspended target account: should be "no such X account"
+        self.assertEqual(c(RuntimeError("User suspended")), "no such X account")
+        self.assertEqual(c(RuntimeError("Account suspended (64)")), "no such X account")
     def test_no_usable_account_is_reported_for_every_handle(self):
         api = FakeApi({"a": []}); api.pool = NS(accounts_info=lambda: _co([{"username": "t", "active": False}]))
         db = FakeDb(["a", "b"])
         asyncio.run(worker.run_round(api, db, {}, sleep=lambda _: _co(None)))
         self.assertEqual(db.stat["a"], (False, "no usable X account - need new cookies")); self.assertEqual(db.saved, {})
+    def test_concurrent_fetching_processes_all(self):
+        """With multiple handles, all should be fetched even with concurrency."""
+        api = FakeApi({"a": [tw(1, "x")], "b": [tw(2, "y")], "c": [tw(3, "z")]})
+        db = FakeDb(["a", "b", "c"])
+        async def nosleep(_): pass
+        n = asyncio.run(worker.run_round(api, db, {}, sleep=nosleep))
+        self.assertEqual(n, 3)
+        self.assertIn("a", db.saved)
+        self.assertIn("b", db.saved)
+        self.assertIn("c", db.saved)
+        self.assertTrue(all(ok for ok, _ in db.stat.values()))
 
 if __name__ == "__main__": unittest.main()

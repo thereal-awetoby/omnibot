@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { callMapRows, callColor, buildCallMapSvg, buildCallMapCaption } from './callmap.js';
-import { buildFcText, buildMyCallsText, callMsgLink } from './ux.js';
+import { buildFcText, buildMyCallsText, callMsgLink, buildFollowingText, explainXError } from './ux.js';
 
 const now = Date.UTC(2026, 10, 7, 15, 0);
 const mk = (symbol, entry, peak, nowP, mcap = 10_000, caller = '@trader') => ({ symbol, mint: symbol.padEnd(32, 'A'), price_usd: entry, peak_price_usd: peak, mcap_usd: mcap, caller_name: caller, created_at: new Date(now - 3_600_000), _now: nowP });
@@ -75,4 +75,76 @@ test('callMsgLink', () => {
 
 test('calls of another member: their name when empty', () => {
   assert.equal(buildMyCallsText([], new Map(), '@alpha', now, { mine: false }), 'alpha has no calls in this group yet.');
+});
+
+// ---- /following status tests ----
+test('explainXError: short messages for each class', () => {
+  assert.equal(explainXError('worker is not running'), 'the X reader is switched off');
+  assert.equal(explainXError('rate limited'), 'X is rate-limiting, retrying');
+  assert.equal(explainXError('timed out (X slow or limiting)'), 'X is rate-limiting, retrying');
+  assert.equal(explainXError('account locked - need new cookies'), 'needs fresh cookies');
+  assert.equal(explainXError('no usable X account - need new cookies'), 'needs fresh cookies');
+  assert.equal(explainXError('no such X account'), 'account does not exist');
+  assert.equal(explainXError('something weird'), 'cannot read right now');
+});
+
+test('buildFollowingText: empty list', () => {
+  assert.match(buildFollowingText([]), /None yet/);
+});
+
+test('buildFollowingText: healthy handle with worker columns', () => {
+  const rows = [{
+    handle: 'trader', added_by_name: 'bob', created_at: new Date(now - 86_400_000),
+    polled_at: new Date(now - 30_000), ok_at: new Date(now - 30_000), last_error: null,
+    via: 'x-worker', newest_tweet_at: new Date(now - 600_000),
+    fail_count: 0, worker_last_ok_at: new Date(now - 25_000), worker_checked_at: new Date(now - 25_000),
+    worker_ok: true, worker_error: null,
+  }];
+  const t = buildFollowingText(rows, now);
+  assert.match(t, /@trader/);
+  assert.match(t, /healthy/);
+  assert.doesNotMatch(t, /fails/);
+});
+
+test('buildFollowingText: failing handle shows fail count', () => {
+  const rows = [{
+    handle: 'broken', added_by_name: 'bob', created_at: new Date(now - 86_400_000),
+    polled_at: new Date(now - 30_000), ok_at: null, last_error: null,
+    via: null, newest_tweet_at: null,
+    fail_count: 5, worker_last_ok_at: new Date(now - 3_600_000), worker_checked_at: new Date(now - 30_000),
+    worker_ok: false, worker_error: 'rate limited',
+  }];
+  const t = buildFollowingText(rows, now);
+  assert.match(t, /@broken/);
+  assert.match(t, /rate-limiting/);
+  assert.match(t, /5 fails/);
+  assert.match(t, /last OK/);
+});
+
+test('buildFollowingText: heartbeat footer', () => {
+  const rows = [{
+    handle: 'alpha', added_by_name: null, created_at: new Date(now - 86_400_000),
+    polled_at: new Date(now - 60_000), ok_at: new Date(now - 60_000), last_error: null,
+    via: 'x-worker', newest_tweet_at: new Date(now - 600_000),
+    fail_count: 0, worker_last_ok_at: new Date(now - 55_000), worker_checked_at: new Date(now - 55_000),
+    worker_ok: true, worker_error: null,
+  }];
+  const hb = { last_round_at: new Date(now - 45_000), accounts_total: 3, accounts_active: 2, handles_checked: 5, round_ms: 12000 };
+  const t = buildFollowingText(rows, now, hb);
+  assert.match(t, /X reader: .+ online/);
+  assert.match(t, /2\/3 accounts active/);
+});
+
+test('buildFollowingText: worker offline in heartbeat', () => {
+  const rows = [{
+    handle: 'alpha', added_by_name: null, created_at: new Date(now - 86_400_000),
+    polled_at: new Date(now - 60_000), ok_at: new Date(now - 60_000), last_error: null,
+    via: 'x-worker', newest_tweet_at: null,
+    fail_count: 0, worker_last_ok_at: null, worker_checked_at: null,
+    worker_ok: null, worker_error: null,
+  }];
+  const hb = { last_round_at: new Date(now - 20 * 60_000), accounts_total: 1, accounts_active: 0, handles_checked: 0, round_ms: 0 };
+  const t = buildFollowingText(rows, now, hb);
+  assert.match(t, /offline/);
+  assert.match(t, /0\/1 accounts active/);
 });
