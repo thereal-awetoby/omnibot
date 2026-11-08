@@ -1116,8 +1116,10 @@ async function checkAlerts() {
     if (!rows.length) return;
     const prices = await fetchPairsByTokens(rows.map((r) => r.mint));
     for (const r of rows) {
-      const price = prices.get(r.mint)?.priceUsd;
-      if (!price || !shouldAlert(r.base_price_usd, price, r.alert_pct)) continue;
+      const pair = prices.get(r.mint);
+      const price = pair?.priceUsd;
+      // Skip dead tokens (near-zero liquidity = unreliable price) and non-alerts.
+      if (!price || (pair.liquidityUsd != null && pair.liquidityUsd < 500) || !shouldAlert(r.base_price_usd, price, r.alert_pct)) continue;
       try {
         await bot.api.sendMessage(r.telegram_id, buildAlertText(r, price), {
           ...HTML,

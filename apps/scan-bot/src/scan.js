@@ -159,7 +159,8 @@ function securityBlock(sec, intel, market) {
   else rows.push(row('LP', typeof lp === 'number' ? `${val(`${pctText(lp, lp % 1 ? 1 : 0)} locked/burned`)}${lp >= 90 ? ' ✅' : ''}` : NA));
 
   const dev = intel?.devPct;
-  rows.push(row('Dev', typeof dev === 'number' ? (dev === 0 ? `${val('holds 0%')}  (sold or moved)` : val(`holds ${pctText(dev)}`)) : NA));
+  const devLaunches = typeof intel?.launchCount === 'number' && intel.launchCount > 1 ? ` · ${intel.launchCount} launches` : '';
+  rows.push(row('Dev', typeof dev === 'number' ? (dev === 0 ? `${val('holds 0%')}  (sold or moved)${devLaunches}` : `${val(`holds ${pctText(dev)}`)}${devLaunches}`) : NA));
 
   const t10 = intel?.top10Pct;
   rows.push(row('Top 10', typeof t10 === 'number' ? `${val(pctText(t10))}  ·  largest ${pctText(intel.top1Pct)}` : NA));
@@ -169,6 +170,8 @@ function securityBlock(sec, intel, market) {
   if (top.length) rows.push(row('TH', top.map(thNum).join(' | ')));
 
   rows.push(row('Fresh', typeof intel?.fresh7dPct === 'number' ? `1D ${val(pctText(intel.fresh1dPct))} · 7D ${val(pctText(intel.fresh7dPct))}` : NA));
+  const ins = intel?.insiderNetworks;
+  if (ins > 0) rows.push(row('Insiders', `${val(`${ins} network${ins > 1 ? 's' : ''}`)} · ${intel.insiderWallets} wallet${intel.insiderWallets === 1 ? '' : 's'} · ${pctText(intel.insiderPct)} of supply`));
   const b = intel?.bundle;
   rows.push(row('Bundlers', !b ? NA : b.count === 0 ? 'none in top holders' : `${val(`${b.count} wallets`)} (${pctText(b.pct)}) · top holders`));
   const sn = intel?.snipers;
@@ -198,6 +201,7 @@ export function buildScanCard({ mint, market, security = null, intel = null, cal
     ...securityBlock(security, intel, market),
     '',
     buildSocialLine(market),
+    `🔎 <a href="https://dexscreener.com/solana/${mint}">DexScreener</a> · <a href="https://solscan.io/token/${mint}">Solscan</a> · <a href="https://rugcheck.xyz/tokens/${mint}">RugCheck</a>`,
   ];
   if (callLine) lines.push('', callLine);
   return lines.join('\n');
