@@ -1,9 +1,28 @@
 // Gathers everything beyond the basic market numbers, never throwing and never waiting forever.
 import { fetchRugCheck, fetchAth, describeAth, fetchHolderCount, fetchPumpCreated } from './sources.js';
-import { getSecurityRaw, withHolderStats, getDevHolding, getFreshWallets, getEarlyBuyers, getCurveCreator, getCurveState, getHolderCount } from './chain.js';
+import { getSecurityRaw, withHolderStats, getDevHolding, getFreshWallets, getEarlyBuyers, getCurveCreator, getCurveState, getHolderCount, getFunders } from './chain.js';
 import { findBundle, findSnipers } from './security.js';
+import { clusterByFunder } from './bubblemap.js';
 import { hedge } from './hedge.js';
 export { hedge };
+
+// How many of the biggest holders get a (cheap) shared-funder check on the main card. The full check (up to the
+// top 100, via the Bubblemap button) is far more thorough — this is just enough to flag an obvious cluster
+// without slowing the card down, so it is kept small and tightly time-boxed.
+const LINKED_CHECK_N = 8;
+const LINKED_TIMEOUT_MS = 2_500;
+
+// top: [{owner, pct}] (the card's own top holders). -> { groups, checked } or null when there is nothing to check
+// or the RPC did not answer in time. groups mirror clusterByFunder's shape: [{funder, owners, pct}].
+// getFundersImpl is injectable for tests; production calls leave it as chain.js's real getFunders.
+export async function findLinkedWallets(top, getFundersImpl = getFunders) {
+  const owners = (top ?? []).slice(0, LINKED_CHECK_N).map((h) => h.owner).filter(Boolean);
+  if (owners.length < 2) return null;
+  const funders = await within(getFundersImpl(owners, { deadlineMs: LINKED_TIMEOUT_MS }), LINKED_TIMEOUT_MS, new Map());
+  if (!funders.size) return null;
+  const groups = clusterByFunder(top.slice(0, LINKED_CHECK_N), funders);
+  return { groups, checked: [...funders.values()].filter((v) => v).length };
+}
 
 // Resolves to `fallback` if the promise is still pending after `ms`, or if it fails.
 export const within = (p, ms, fallback = null) => new Promise((resolve) => {
@@ -18,7 +37,8 @@ export function startIntel(mint) {
 }
 
 // Returns { security, intel } where intel = { holdersTotal, lpLockedPct, rugged, devPct, fresh1dPct, fresh7dPct,
-// walletsChecked, ath, bundle, top, top10Pct, top1Pct, creator, meta, detectedAt, linked } (any field may be null).
+// walletsChecked, ath, bundle, top, top10Pct, top1Pct, creator, meta, detectedAt, linked, linkedClusters }
+// (any field may be null).
 // Every step starts the moment the data it needs is ready (no waiting for unrelated lookups), and each one
 // has its own time limit, so a slow source shows n/a instead of holding up the whole card.
 export async function gatherIntel(mint, market, pre = startIntel(mint)) {
@@ -35,7 +55,11 @@ export async function gatherIntel(mint, market, pre = startIntel(mint)) {
   const earlyP = Promise.all([rawP, securityP, creatorP])
     .then(([raw, sec, creator]) => within(getEarlyBuyers(raw, sec?.top, creator), 3_000));
   const launchesP = creatorP.then((c) => c ? within(fetchPumpCreated(c).then((list) => list?.length ?? null), 3_500) : null);
-  const [security, rug, athRaw, devPct, fresh, earlyEntries, creator, curve, holderCount, launchCount] = await Promise.all([securityP, rugP, athP, devP, freshP, earlyP, creatorP, curveP, holdersP, launchesP]);
+  // Shared-funder check on the biggest few holders — a cheap preview of what the Bubblemap button finds in full.
+  const linkedP = Promise.all([securityP, rugP])
+    .then(([sec, rug]) => (typeof sec?.top10Pct === 'number' ? sec.top : rug?.top ?? []))
+    .then((top) => findLinkedWallets(top));
+  const [security, rug, athRaw, devPct, fresh, earlyEntries, creator, curve, holderCount, launchCount, linkedClusters] = await Promise.all([securityP, rugP, athP, devP, freshP, earlyP, creatorP, curveP, holdersP, launchesP, linkedP]);
   const bundle = findBundle(earlyEntries);
   const snipers = findSnipers(earlyEntries, bundle);
   // Holder concentration: our own RPC numbers first, RugCheck's list when the RPC is busy.
@@ -60,6 +84,8 @@ export async function gatherIntel(mint, market, pre = startIntel(mint)) {
     insiderPct: rug?.insiderPct ?? null,
     insiderNetworks: rug?.insiderNetworks ?? 0,
     insiderWallets: rug?.insiderWallets ?? 0,
+    // our own quick shared-funder check on the biggest holders (beyond RugCheck's own insider count)
+    linkedClusters,
     // dev track record
     launchCount,
     // for the detail views

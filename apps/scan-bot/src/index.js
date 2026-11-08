@@ -25,6 +25,7 @@ import { mkdir, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
+import { buildDashSearchJson, buildDashTrendingJson, buildDashWatchlistJson, buildDashTokenJson } from './dashboard.js';
 import { livePrices, parseMilestoneArg, buildMilestoneSettingText, buildMilestoneCaption } from './milestones.js';
 import { callMapRows, buildCallMapSvg, buildCallMapCaption } from './callmap.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince, fetchCandles, generateText, rugCheckStatus } from './sources.js';
@@ -71,14 +72,17 @@ async function render(ctx, text, kb, edit, extra = {}) {
   return ctx.reply(text, opts);
 }
 
-const homeKeyboard = () =>
-  new InlineKeyboard()
-    .text('🔥 Trending', 'trend').text('⭐ Watchlist', 'wl').row()
-    .url('Omni Trade', `https://t.me/${TRADE_USERNAME}`).url('Omni Launch', `https://t.me/${LAUNCH_USERNAME}`);
+// Dashboard Mini App: full-screen home/search/trending/watchlist. Telegram only allows webApp buttons in
+// private chats (same restriction as the Bubblemap button), so groups just skip it.
+const homeKeyboard = (group = false) => {
+  const kb = new InlineKeyboard().text('🔥 Trending', 'trend').text('⭐ Watchlist', 'wl').row();
+  if (MINIAPP_URL && !group) kb.webApp('📊 Open dashboard', `${MINIAPP_URL}/app`).row();
+  return kb.url('Omni Trade', `https://t.me/${TRADE_USERNAME}`).url('Omni Launch', `https://t.me/${LAUNCH_USERNAME}`);
+};
 
 const showHome = (ctx) => ctx.reply(
   'Omni Scan Bot\n\nResearch only: no wallet, no trading here.\nPaste a token address to see its card, or tap below.',
-  { reply_markup: homeKeyboard() }
+  { reply_markup: homeKeyboard(isGroup(ctx)) }
 );
 
 // One token's market data: DexScreener first, pump.fun as a fallback for very new tokens.
@@ -127,6 +131,29 @@ async function loadMapData(mint) {
   const loaded = await loadBubbleData(mint, card);
   return loaded ? buildMapPayload({ symbol: card.market?.symbol ?? null, name: card.market?.name ?? null, market: card.market ?? null, loaded }) : null;
 }
+
+// The full dashboard Mini App (Home/search/trending, Watchlist, Token view): live data for the routes
+// in miniapp.js, shaped into dashboard JSON by the pure helpers in dashboard.js.
+const dash = {
+  botToken: process.env.SCAN_BOT_TOKEN,
+  search: async (q) => buildDashSearchJson(await searchTokens(q)),
+  trending: async () => buildDashTrendingJson(await fetchTrending(10)),
+  getToken: async (mint) => buildDashTokenJson(mint, await cachedCard(mint)),
+  getWatchlist: async (telegramId) => {
+    const rows = await listWatches(telegramId);
+    if (!rows.length) return [];
+    let prices = new Map();
+    try { prices = await fetchPairsByTokens(rows.map((r) => r.mint)); } catch (e) { console.error('dashboard watchlist prices error:', e.message); }
+    return buildDashWatchlistJson(rows, prices);
+  },
+  addWatch: async (telegramId, mint, customPct, username = null) => {
+    // The Mini App talks straight to this server, bypassing the bot middleware that otherwise keeps the
+    // users row up to date — watchlist.telegram_id is a foreign key to it, so make sure it exists first.
+    await upsertUser({ id: telegramId, username }).catch((e) => console.error('dashboard user save error:', e.message));
+    return (await addWatchFull(telegramId, mint, { customPct })).status;
+  },
+  removeWatch: (telegramId, mint) => removeWatch(telegramId, mint),
+};
 
 const cardKeyboard = (mint, watched, group = false) =>
   bubbleButton(new InlineKeyboard()
@@ -380,17 +407,23 @@ async function showWatchlist(ctx, { edit = false } = {}) {
   return render(ctx, buildWatchlistText(rows, prices), kb, edit);
 }
 
-async function doWatch(ctx, mint, { edit = false, customPct = null } = {}) {
+// Shared by /watch and the dashboard Mini App's "Add to watchlist" button: adds (or updates) a watch and
+// the best-effort curve/volume tracking that powers the graduation and volume-spike alerts.
+async function addWatchFull(telegramId, mint, { customPct = null } = {}) {
   const market = await getMarket(mint);
-  if (!market?.priceUsd) return ctx.reply(`${NO_MARKET} I cannot watch it until it has a price.`);
-  const r = await addWatch({ telegramId: ctx.from.id, mint, symbol: market.symbol, priceUsd: market.priceUsd });
+  if (!market?.priceUsd) return { status: 'no-price' };
+  const r = await addWatch({ telegramId, mint, symbol: market.symbol, priceUsd: market.priceUsd });
+  if (r === 'full') return { status: 'full', market };
+  if (customPct) await setWatchAlertPct(telegramId, mint, customPct);
+  if (r === 'added' && market.dex && /pump\.fun curve/i.test(market.dex)) setWatchOnCurve(telegramId, mint, true).catch(() => {});
+  if (r === 'added' && market.volume?.h1 > 0) setVolBaseline(telegramId, mint, market.volume.h1).catch(() => {});
+  return { status: r, market };
+}
+
+async function doWatch(ctx, mint, { edit = false, customPct = null } = {}) {
+  const { status: r, market } = await addWatchFull(ctx.from.id, mint, { customPct });
+  if (r === 'no-price') return ctx.reply(`${NO_MARKET} I cannot watch it until it has a price.`);
   if (r === 'full') return ctx.reply(`Your watchlist is full (${MAX_WATCHES} tokens). Remove one with /unwatch first.`);
-  // Apply per-token threshold if provided (only when the watch was just added or already existed)
-  if (customPct && r !== 'full') await setWatchAlertPct(ctx.from.id, mint, customPct);
-  // Track curve tokens for graduation alerts (best effort)
-  if (r === 'added' && market.dex && /pump\.fun curve/i.test(market.dex)) setWatchOnCurve(ctx.from.id, mint, true).catch(() => {});
-  // Store initial volume baseline for spike detection
-  if (r === 'added' && market.volume?.h1 > 0) setVolBaseline(ctx.from.id, mint, market.volume.h1).catch(() => {});
   const pctLabel = customPct ? ` at ±${customPct}%` : '';
   await ctx.answerCallbackQuery?.({ text: r === 'added' ? 'Added to watchlist' : 'Already on your watchlist' }).catch(() => {});
   if (!edit) await ctx.reply(r === 'added' ? `⭐ Watching ${market.symbol ? '$' + esc(market.symbol) : short(mint)}${pctLabel}. I will message you on big moves.` : `Already on your watchlist.${customPct ? ` Threshold updated to ±${customPct}%.` : ''}`, HTML);
@@ -405,6 +438,11 @@ async function doUnwatch(ctx, mint, { edit = false } = {}) {
 }
 
 bot.command('start', showHome);
+bot.command(['dashboard', 'app'], (ctx) => {
+  if (!MINIAPP_URL) return ctx.reply('The dashboard is not turned on for this bot yet.');
+  if (isGroup(ctx)) return ctx.reply('Open the dashboard in a private chat with me — Telegram only allows full-screen apps there.');
+  return ctx.reply('📊 Your Omni Scan dashboard: search, trending tokens and your watchlist in one place.', { reply_markup: new InlineKeyboard().webApp('Open dashboard', `${MINIAPP_URL}/app`) });
+});
 bot.command('help', (ctx) => ctx.reply(buildHelpText(), { ...HTML, reply_markup: new InlineKeyboard().text('🗑', 'x') }));
 bot.command('token', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
@@ -1412,7 +1450,7 @@ bot.start({
     console.log(me.can_read_all_group_messages
       ? 'Groups: I can read every message (Group Privacy is off).'
       : 'Groups: Group Privacy is ON, so I only see /commands in groups. Turn it off in BotFather, then remove me from the group and add me again.');
-    if (MINIAPP_URL) startMiniApp({ port: Number(process.env.MINIAPP_PORT) || 3000, loadData: loadMapData });
+    if (MINIAPP_URL) startMiniApp({ port: Number(process.env.MINIAPP_PORT) || 3000, loadData: loadMapData, dash });
     else console.log('Bubblemap mini app: off (set MINIAPP_URL to turn it on). The picture version is used.');
     console.log(`RPC endpoints: ${rpcStats().endpoints.map((e) => e.host).join(', ')}`);
     console.log(`Lore AI: ${[process.env.ANTHROPIC_API_KEY ? 'Claude' : null, process.env.GEMINI_API_KEY ? 'Gemini' : null].filter(Boolean).join(' + ') || 'off (shows the token description and news only)'}`);
@@ -1431,6 +1469,7 @@ bot.start({
       { command: 's', description: 'Search for a token' },
       { command: 'i', description: 'Get top coins' },
       { command: 'trending', description: 'View trending tokens' },
+      { command: 'dashboard', description: 'Full-screen app: search, trending, watchlist' },
       { command: 'watch', description: 'Your watchlist / watch a token' },
       { command: 'leaderboard', description: 'Group leaderboard (1h, 1 week, all...)' },
       { command: 'calls', description: 'Your calls in this group' },

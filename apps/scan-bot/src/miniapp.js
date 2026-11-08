@@ -1,8 +1,26 @@
-// The interactive Bubblemap: a small web server inside the Scan bot. Telegram opens its page inside the app.
-// Routes: /map?mint=... (the page), /api/map?mint=... (the data), /health.
+// The interactive Bubblemap, and the dashboard Mini App: one small web server inside the Scan bot.
+// Telegram opens these pages inside the app. Routes: /map (bubblemap), /app (dashboard),
+// /api/map, /api/dash/* (data), /health.
 import http from 'node:http';
+import { DASH_PAGE } from './dashboard.js';
+import { verifyInitData } from './telegramAuth.js';
 
 const ADDR_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+// Reads a request body (JSON only, capped at 10KB) for the dashboard's POST routes.
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > 10_000) { reject(new Error('body too large')); req.destroy(); return; }
+      data += chunk;
+    });
+    req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch { reject(new Error('bad json')); } });
+    req.on('error', reject);
+  });
+}
 
 // loaded: { built, groups, funders, layout, checked, total, curve } from bubbleload.js. Pure: shapes the JSON the page draws.
 export function buildMapPayload({ symbol = null, name = null, market = null, loaded }) {
@@ -39,7 +57,10 @@ export function buildMapPayload({ symbol = null, name = null, market = null, loa
 }
 
 // loadData(mint) -> payload (or null). Answers are cached for a minute; each IP gets 30 data requests a minute.
-export function startMiniApp({ port, loadData, log = console }) {
+// dash (optional): the dashboard Mini App. { botToken, search(q), trending(), getWatchlist(telegramId),
+// addWatch(telegramId, mint, pct), removeWatch(telegramId, mint), getToken(mint) } — all return dashboard-shaped
+// JSON already (see dashboard.js's buildDash*Json helpers). Omitted: /app and /api/dash/* answer 404.
+export function startMiniApp({ port, loadData, log = console, dash = null }) {
   const cache = new Map();
   const hits = new Map();
   const limited = (ip) => {
@@ -54,6 +75,13 @@ export function startMiniApp({ port, loadData, log = console }) {
     res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
     res.end(body);
   };
+  const sendJson = (res, code, obj) => send(res, code, 'application/json', JSON.stringify(obj));
+  // The watchlist write routes need to know who is calling: verify the initData Telegram handed the page,
+  // which the dashboard's JS forwards on every call as the X-Init-Data header.
+  const authUser = (req) => {
+    const r = verifyInitData(req.headers['x-init-data'], dash.botToken);
+    return r.ok ? r.user : null;
+  };
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://x');
@@ -62,24 +90,63 @@ export function startMiniApp({ port, loadData, log = console }) {
       if (url.pathname === '/map') return send(res, 200, 'text/html; charset=utf-8', MAP_PAGE);
       if (url.pathname === '/api/map') {
         const mint = url.searchParams.get('mint') ?? '';
-        if (!ADDR_RE.test(mint)) return send(res, 400, 'application/json', '{"error":"bad address"}');
-        if (limited(ip)) return send(res, 429, 'application/json', '{"error":"slow down"}');
+        if (!ADDR_RE.test(mint)) return sendJson(res, 400, { error: 'bad address' });
+        if (limited(ip)) return sendJson(res, 429, { error: 'slow down' });
         const hit = cache.get(mint);
         if (hit && Date.now() - hit.at < 60_000) return send(res, 200, 'application/json', hit.body);
         const data = await loadData(mint);
-        if (!data) return send(res, 404, 'application/json', '{"error":"no data"}');
+        if (!data) return sendJson(res, 404, { error: 'no data' });
         const body = JSON.stringify(data);
         if (cache.size > 100) cache.delete(cache.keys().next().value);
         cache.set(mint, { at: Date.now(), body });
         return send(res, 200, 'application/json', body);
       }
+
+      if (!dash) return send(res, 404, 'text/plain', 'not found');
+
+      if (url.pathname === '/app') return send(res, 200, 'text/html; charset=utf-8', DASH_PAGE);
+      if (limited(ip)) return sendJson(res, 429, { error: 'slow down' });
+
+      if (url.pathname === '/api/dash/search') {
+        const q = (url.searchParams.get('q') ?? '').trim();
+        if (!q) return sendJson(res, 200, { results: [] });
+        return sendJson(res, 200, { results: await dash.search(q) });
+      }
+      if (url.pathname === '/api/dash/trending') return sendJson(res, 200, { results: await dash.trending() });
+      if (url.pathname === '/api/dash/token') {
+        const mint = url.searchParams.get('mint') ?? '';
+        if (!ADDR_RE.test(mint)) return sendJson(res, 400, { error: 'bad address' });
+        return sendJson(res, 200, await dash.getToken(mint));
+      }
+      if (url.pathname === '/api/dash/watchlist' && req.method === 'GET') {
+        const user = authUser(req);
+        if (!user) return sendJson(res, 401, { error: 'sign in through Telegram to see your watchlist' });
+        return sendJson(res, 200, { results: await dash.getWatchlist(user.id) });
+      }
+      if (url.pathname === '/api/dash/watch' && req.method === 'POST') {
+        const user = authUser(req);
+        if (!user) return sendJson(res, 401, { error: 'sign in through Telegram to use your watchlist' });
+        const body = await readJsonBody(req);
+        if (!ADDR_RE.test(body.mint ?? '')) return sendJson(res, 400, { error: 'bad address' });
+        const pct = Number(body.pct);
+        const r = await dash.addWatch(user.id, body.mint, Number.isFinite(pct) && pct >= 1 && pct <= 1000 ? pct : null, user.username);
+        return sendJson(res, 200, { ok: true, status: r });
+      }
+      if (url.pathname === '/api/dash/unwatch' && req.method === 'POST') {
+        const user = authUser(req);
+        if (!user) return sendJson(res, 401, { error: 'sign in through Telegram to use your watchlist' });
+        const body = await readJsonBody(req);
+        if (!ADDR_RE.test(body.mint ?? '')) return sendJson(res, 400, { error: 'bad address' });
+        await dash.removeWatch(user.id, body.mint);
+        return sendJson(res, 200, { ok: true });
+      }
       return send(res, 404, 'text/plain', 'not found');
     } catch (e) {
       log.error('miniapp error:', e.message);
-      return send(res, 500, 'application/json', '{"error":"failed"}');
+      return sendJson(res, 500, { error: 'failed' });
     }
   });
-  server.listen(port, () => log.log(`Bubblemap mini app listening on port ${port}`));
+  server.listen(port, () => log.log(`Mini app listening on port ${port}${dash ? ' (bubblemap + dashboard)' : ' (bubblemap only)'}`));
   return server;
 }
 

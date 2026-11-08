@@ -275,6 +275,20 @@ test('insiders row shown when insider networks detected', () => {
   assert.doesNotMatch(noInsiders, /Insiders/);
 });
 
+test('related-wallets row shown when the shared-funder check finds a cluster', () => {
+  const linkedClusters = { groups: [{ funder: 'F1', owners: ['a', 'b'], pct: 6.1 }, { funder: 'F2', owners: ['c'], pct: 2.2 }], checked: 8 };
+  const card = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, linkedClusters }, now: NOW });
+  assert.match(card, /<code>Related  <\/code><b>2 groups<\/b> · 3 wallets · 8\.3%/);
+  // No row when there are no groups (nothing shared a funder, or the check didn't run)
+  const none = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, linkedClusters: { groups: [], checked: 8 } }, now: NOW });
+  assert.doesNotMatch(none, /Related/);
+  const notChecked = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, linkedClusters: null }, now: NOW });
+  assert.doesNotMatch(notChecked, /Related/);
+  // Singular "group" for exactly one cluster
+  const single = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, linkedClusters: { groups: [{ funder: 'F1', owners: ['a', 'b'], pct: 5 }], checked: 5 } }, now: NOW });
+  assert.match(single, /<b>1 group<\/b> · 2 wallets/);
+});
+
 test('dev row shows launch count when available', () => {
   const card = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, launchCount: 45 }, now: NOW });
   assert.match(card, /<code>Dev      <\/code><b>holds 0%<\/b>  \(sold or moved\) · 45 launches/);
