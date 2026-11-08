@@ -171,6 +171,8 @@ function securityBlock(sec, intel, market) {
   rows.push(row('Fresh', typeof intel?.fresh7dPct === 'number' ? `1D ${val(pctText(intel.fresh1dPct))} · 7D ${val(pctText(intel.fresh7dPct))}` : NA));
   const b = intel?.bundle;
   rows.push(row('Bundlers', !b ? NA : b.count === 0 ? 'none in top holders' : `${val(`${b.count} wallets`)} (${pctText(b.pct)}) · top holders`));
+  const sn = intel?.snipers;
+  if (sn && sn.count > 0) rows.push(row('Snipers', `${val(`${sn.count} wallets`)} (${pctText(sn.pct)}) · bought in first ~2s`));
   if (market) rows.push(row('DEX Paid', market.hasProfile ? `${val('yes')} ✅` : 'no'));
   rows.push(row('Holders', typeof intel?.holdersTotal === 'number' ? val(Math.round(intel.holdersTotal).toLocaleString('en-US')) : NA));
   return ['<b>🛡 Security</b>', ...tree(rows)];

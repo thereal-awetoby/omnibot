@@ -57,6 +57,23 @@ export function findBundle(entries, window = 1) {
   return { count: group.length, pct: Math.round(group.reduce((a, e) => a + e.pct, 0) * 10) / 10, slot: first };
 }
 
+// Snipers: wallets that bought within the first few blocks after launch but are NOT bundled.
+// A wider window than findBundle (default 5 slots ≈ 2 seconds on Solana).
+// Returns { count, pct, wallets: [{ owner, pct, slot }] }, or null when there is too little data.
+export function findSnipers(entries, bundle, { window = 5 } = {}) {
+  const known = (entries ?? []).filter((e) => Number.isFinite(e?.firstSlot));
+  if (known.length < 2) return null;
+  const first = Math.min(...known.map((e) => e.firstSlot));
+  const bundleSlot = bundle?.slot ?? first;
+  // Snipers = bought within the window but NOT in the bundle's block(s)
+  const snipers = known.filter((e) => e.firstSlot - first <= window && e.firstSlot - bundleSlot > 1);
+  return {
+    count: snipers.length,
+    pct: Math.round(snipers.reduce((a, e) => a + e.pct, 0) * 10) / 10,
+    wallets: snipers.map((e) => ({ owner: e.owner, pct: e.pct, slot: e.firstSlot })),
+  };
+}
+
 // ---------- pump.fun bonding curve ----------
 // The curve account holds: virtual token reserves @8, virtual SOL @16, real token @24, real SOL @32 (u64 each),
 // supply @40, "complete" flag @48. Real SOL is what buyers actually put in: that is the curve's liquidity.

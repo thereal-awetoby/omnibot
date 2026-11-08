@@ -49,7 +49,7 @@ export function buildCallMapSvg(rows, { mode = 'now', periodLabel = '7D', groupN
     const w = n.x1 - n.x0, h = n.y1 - n.y0, r = n.data;
     const symbol = plain(r.symbol) || String(r.mint).slice(0, 4);
     const x = mode === 'ath' ? r.athX : r.nowX;
-    const sub = x == null ? 'n/a' : mode === 'ath' ? fmtX(r.athX) : pctOf(r.nowX);
+    const sub = x == null ? (r.peak_price_usd > 0 ? 'dead' : 'n/a') : mode === 'ath' ? fmtX(r.athX) : pctOf(r.nowX);
     const cx = n.x0 + w / 2, cy = n.y0 + top + h / 2;
     const fs = Math.max(8, Math.min(44, Math.min(w / (symbol.length * 0.8 + 1), h / 2.6)));
     const showSym = w > 26 && h > 16, showSub = showSym && h > 36 && w > 44, showWho = showSub && h > 90 && w > 110;
