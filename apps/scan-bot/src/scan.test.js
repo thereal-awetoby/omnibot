@@ -169,8 +169,8 @@ test('full card: compact rows, facts only, escaped text', () => {
 });
 
 test('the card never contains risk wording, ratings, loading text or the old clutter', () => {
-  const card = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, insiderPct: 40, insiderNetworks: 3, insiderWallets: 9 }, now: NOW });
-  for (const bad of [/risk/i, /MEDIUM|HIGH|LOW/, /Not advice/, /Running safety|loading|⏳/i, /Insider/, /linked group/, /MCap\/Liq/, /Moves/, /DexScreener/, /🟡|⚠️/]) {
+  const card = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, insiderPct: 0, insiderNetworks: 0, insiderWallets: 0 }, now: NOW });
+  for (const bad of [/risk/i, /MEDIUM|HIGH|LOW/, /Not advice/, /Running safety|loading|⏳/i, /linked group/, /MCap\/Liq/, /Moves/, /🟡|⚠️/]) {
     assert.doesNotMatch(card, bad, String(bad));
   }
 });
@@ -228,6 +228,34 @@ test('snipers row shown when snipers detected', () => {
   // No snipers row when null
   const nullSnipers = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, snipers: null }, now: NOW });
   assert.doesNotMatch(nullSnipers, /Snipers/);
+});
+
+test('insiders row shown when insider networks detected', () => {
+  const withInsiders = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, insiderPct: 12.5, insiderNetworks: 3, insiderWallets: 9 }, now: NOW });
+  assert.match(withInsiders, /<code>Insiders <\/code><b>3 networks<\/b> · 9 wallets · 12\.5% of supply/);
+  // Single network uses singular
+  const single = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, insiderPct: 5, insiderNetworks: 1, insiderWallets: 2 }, now: NOW });
+  assert.match(single, /<b>1 network<\/b> · 2 wallets/);
+  // No insiders row when networks = 0
+  const noInsiders = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, insiderPct: 0, insiderNetworks: 0, insiderWallets: 0 }, now: NOW });
+  assert.doesNotMatch(noInsiders, /Insiders/);
+});
+
+test('dev row shows launch count when available', () => {
+  const card = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, launchCount: 45 }, now: NOW });
+  assert.match(card, /<code>Dev      <\/code><b>holds 0%<\/b>  \(sold or moved\) · 45 launches/);
+  // No launch count shown when only 1 or null
+  const single = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, launchCount: 1 }, now: NOW });
+  assert.doesNotMatch(single, /launches/);
+  const noCount = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, launchCount: null }, now: NOW });
+  assert.doesNotMatch(noCount, /launches/);
+});
+
+test('card has quick links row at the bottom', () => {
+  const card = buildScanCard({ mint: MINT, market, security, intel: fullIntel, now: NOW });
+  assert.match(card, /🔎 <a href="https:\/\/dexscreener\.com\/solana\/So1111/);
+  assert.match(card, /Solscan<\/a>/);
+  assert.match(card, /RugCheck<\/a>/);
 });
 
 test('scan card: a pump.fun curve token shows the curve liquidity and fill instead of n/a', () => {

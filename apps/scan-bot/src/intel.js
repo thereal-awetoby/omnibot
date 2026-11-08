@@ -1,5 +1,5 @@
 // Gathers everything beyond the basic market numbers, never throwing and never waiting forever.
-import { fetchRugCheck, fetchAth, describeAth, fetchHolderCount } from './sources.js';
+import { fetchRugCheck, fetchAth, describeAth, fetchHolderCount, fetchPumpCreated } from './sources.js';
 import { getSecurityRaw, withHolderStats, getDevHolding, getFreshWallets, getEarlyBuyers, getCurveCreator, getCurveState, getHolderCount } from './chain.js';
 import { findBundle, findSnipers } from './security.js';
 import { hedge } from './hedge.js';
@@ -34,7 +34,8 @@ export async function gatherIntel(mint, market, pre = startIntel(mint)) {
   const freshP = securityP.then((sec) => within(getFreshWallets(sec?.top), 3_000));
   const earlyP = Promise.all([rawP, securityP, creatorP])
     .then(([raw, sec, creator]) => within(getEarlyBuyers(raw, sec?.top, creator), 3_000));
-  const [security, rug, athRaw, devPct, fresh, earlyEntries, creator, curve, holderCount] = await Promise.all([securityP, rugP, athP, devP, freshP, earlyP, creatorP, curveP, holdersP]);
+  const launchesP = creatorP.then((c) => c ? within(fetchPumpCreated(c).then((list) => list?.length ?? null), 3_500) : null);
+  const [security, rug, athRaw, devPct, fresh, earlyEntries, creator, curve, holderCount, launchCount] = await Promise.all([securityP, rugP, athP, devP, freshP, earlyP, creatorP, curveP, holdersP, launchesP]);
   const bundle = findBundle(earlyEntries);
   const snipers = findSnipers(earlyEntries, bundle);
   // Holder concentration: our own RPC numbers first, RugCheck's list when the RPC is busy.
@@ -55,6 +56,12 @@ export async function gatherIntel(mint, market, pre = startIntel(mint)) {
     ath: describeAth(athRaw, market),
     bundle,
     snipers,
+    // insider network summary (from RugCheck)
+    insiderPct: rug?.insiderPct ?? null,
+    insiderNetworks: rug?.insiderNetworks ?? 0,
+    insiderWallets: rug?.insiderWallets ?? 0,
+    // dev track record
+    launchCount,
     // for the detail views
     creator,
     rugCreator: rug?.creator ?? null,

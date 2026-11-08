@@ -49,14 +49,18 @@ export async function setAlertPct(telegramId, pct) {
   await query('UPDATE watchlist SET alert_pct = $2 WHERE telegram_id = $1', [telegramId, pct]);
 }
 
-// Everything, for the background checker.
+// Everything, for the background checker. Skips tokens alerted in the last 10 minutes (cooldown).
+const ALERT_COOLDOWN_MS = 10 * 60_000;
 export async function listAllWatches() {
-  const { rows } = await query('SELECT telegram_id, mint, symbol, base_price_usd, alert_pct FROM watchlist');
+  const { rows } = await query(
+    `SELECT telegram_id, mint, symbol, base_price_usd, alert_pct
+     FROM watchlist WHERE last_alert_at IS NULL OR last_alert_at < now() - interval '10 minutes'`
+  );
   return rows;
 }
 
 export async function updateWatchBase(telegramId, mint, priceUsd) {
-  await query('UPDATE watchlist SET base_price_usd = $3 WHERE telegram_id = $1 AND mint = $2', [telegramId, mint, priceUsd]);
+  await query('UPDATE watchlist SET base_price_usd = $3, last_alert_at = now() WHERE telegram_id = $1 AND mint = $2', [telegramId, mint, priceUsd]);
 }
 
 // Used when a user blocks the bot: stop checking for them.
