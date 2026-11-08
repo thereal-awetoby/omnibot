@@ -61,6 +61,8 @@ const RUG_TTL = 120_000;
 let rugFailStreak = 0;
 let rugDownUntil = 0;
 export const resetRugBreaker = () => { rugFailStreak = 0; rugDownUntil = 0; };
+// For the operator /status view: is RugCheck currently being skipped, and for how much longer.
+export const rugCheckStatus = (now = Date.now()) => ({ down: now < rugDownUntil, downForMs: Math.max(0, rugDownUntil - now), failStreak: rugFailStreak });
 
 export async function fetchRugCheck(mint, fetchImpl = fetch) {
   const hit = rugCache.get(mint);

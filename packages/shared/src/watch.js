@@ -49,11 +49,16 @@ export async function setAlertPct(telegramId, pct) {
   await query('UPDATE watchlist SET alert_pct = $2 WHERE telegram_id = $1', [telegramId, pct]);
 }
 
+// Set alert threshold for a single token on a user's watchlist.
+export async function setWatchAlertPct(telegramId, mint, pct) {
+  await query('UPDATE watchlist SET alert_pct = $2 WHERE telegram_id = $1 AND mint = $3', [telegramId, pct, mint]);
+}
+
 // Everything, for the background checker. Skips tokens alerted in the last 10 minutes (cooldown).
 const ALERT_COOLDOWN_MS = 10 * 60_000;
 export async function listAllWatches() {
   const { rows } = await query(
-    `SELECT telegram_id, mint, symbol, base_price_usd, alert_pct
+    `SELECT telegram_id, mint, symbol, base_price_usd, alert_pct, on_curve, curve_alerted, vol_baseline
      FROM watchlist WHERE last_alert_at IS NULL OR last_alert_at < now() - interval '10 minutes'`
   );
   return rows;
@@ -63,7 +68,28 @@ export async function updateWatchBase(telegramId, mint, priceUsd) {
   await query('UPDATE watchlist SET base_price_usd = $3, last_alert_at = now() WHERE telegram_id = $1 AND mint = $2', [telegramId, mint, priceUsd]);
 }
 
+// Mark a token as being on the bonding curve when first watched (best effort).
+export async function setWatchOnCurve(telegramId, mint, onCurve) {
+  await query('UPDATE watchlist SET on_curve = $3 WHERE telegram_id = $1 AND mint = $2', [telegramId, mint, onCurve]);
+}
+
+// Mark that a curve graduation alert has been sent for this watch.
+export async function markCurveAlerted(telegramId, mint) {
+  await query('UPDATE watchlist SET curve_alerted = TRUE, on_curve = FALSE WHERE telegram_id = $1 AND mint = $2', [telegramId, mint]);
+}
+
+// Store the volume baseline (h1) for volume spike comparison.
+export async function setVolBaseline(telegramId, mint, vol) {
+  await query('UPDATE watchlist SET vol_baseline = $3 WHERE telegram_id = $1 AND mint = $2', [telegramId, mint, vol]);
+}
+
 // Used when a user blocks the bot: stop checking for them.
 export async function removeAllWatches(telegramId) {
   await query('DELETE FROM watchlist WHERE telegram_id = $1', [telegramId]);
+}
+
+// Total rows being watched right now, for the operator /status view.
+export async function countAllWatches() {
+  const { rows } = await query('SELECT count(*)::int AS n FROM watchlist');
+  return rows[0]?.n ?? 0;
 }

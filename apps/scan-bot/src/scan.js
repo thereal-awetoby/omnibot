@@ -358,15 +358,18 @@ export function buildTrendingText(tokens) {
 
 // rows: watchlist rows; prices: Map(mint -> market). Shows change since added.
 export function buildWatchlistText(rows, prices) {
-  if (!rows.length) return 'Your watchlist is empty. Open a token and tap ⭐ Watch, or use /watch <address>.';
-  const alertPct = rows[0].alert_pct;
+  if (!rows.length) return 'Your watchlist is empty. Open a token and tap ⭐ Watch, or use /watch <address>.\nTip: /watch <address> 30 sets a custom alert size just for that token.';
+  const allSame = rows.every((r) => r.alert_pct === rows[0].alert_pct);
   const lines = ['<b>⭐ Watchlist</b>', ''];
   for (const r of rows) {
     const m = prices.get(r.mint);
     const name = r.symbol ? `$${esc(r.symbol)}` : `<code>${r.mint.slice(0, 4)}…${r.mint.slice(-4)}</code>`;
-    lines.push(m?.priceUsd ? `${name}  ${formatPrice(m.priceUsd)}  ·  since added ${formatChange(changePct(r.added_price_usd, m.priceUsd))}` : `${name}  price n/a`);
+    const pctTag = allSame ? '' : `  ·  ±${r.alert_pct}%`;
+    lines.push(m?.priceUsd ? `${name}  ${formatPrice(m.priceUsd)}  ·  since added ${formatChange(changePct(r.added_price_usd, m.priceUsd))}${pctTag}` : `${name}  price n/a${pctTag}`);
   }
-  lines.push('', `Alerts fire when a token moves ±${alertPct}% from its last alert price. Change it with /alertpct 30.`);
+  lines.push('', allSame
+    ? `Alerts fire when a token moves ±${rows[0].alert_pct}% from its last alert price. Change it with /alertpct 30, or per token with /watch <address> 30.`
+    : 'Alerts fire when a token moves ± its own % from its last alert price. Change one with /watch <address> 30, or all at once with /alertpct 30.');
   return lines.join('\n');
 }
 
@@ -374,4 +377,16 @@ export function buildAlertText(row, price) {
   const c = changePct(row.base_price_usd, price);
   const name = row.symbol ? `$${esc(row.symbol)}` : `<code>${row.mint.slice(0, 4)}…${row.mint.slice(-4)}</code>`;
   return `🔔 <b>${name}</b> moved ${formatChange(c)}\n${formatPrice(row.base_price_usd)} → ${formatPrice(price)}\n<code>${row.mint}</code>`;
+}
+
+const watchName = (row) => (row.symbol ? `$${esc(row.symbol)}` : `<code>${row.mint.slice(0, 4)}…${row.mint.slice(-4)}</code>`);
+
+// A watched token left the pump.fun bonding curve for a real DEX.
+export function buildCurveGraduationText(row, dex) {
+  return `🎓 <b>${watchName(row)}</b> graduated from the bonding curve!\nNow trading on ${esc(dex)}.\n<code>${row.mint}</code>`;
+}
+
+// A watched token's 1h volume jumped well above its own baseline.
+export function buildVolumeSpikeText(row, h1Vol, baseline) {
+  return `📊 <b>${watchName(row)}</b> volume spike!\n1H volume ${formatUsd(h1Vol)} (${Math.round(h1Vol / baseline)}x normal)\n<code>${row.mint}</code>`;
 }
