@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deployerFromTx, pumpCreateSigners, parseAssetImage, imageFromMetadata, parseAssetNames, createdMintsFromEnhanced, fundingFromTx, createdMintsFromTx, mergeLaunches, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink, usdShort } from './detail.js';
+import { deployerFromTx, pumpCreateSigners, parseAssetImage, imageFromMetadata, parseAssetNames, createdMintsFromEnhanced, fundingFromTx, createdMintsFromTx, mergeLaunches, rugRateStats, buildDevText, valueHoldings, buildHoldersText, buildLoreText, isAddr, walletLink, usdShort } from './detail.js';
 
 const DEV = 'DevWa11etDevWa11etDevWa11etDevWa11etDevW1';
 const M1 = 'So11111111111111111111111111111111111111112';
@@ -36,13 +36,36 @@ test('createdMintsFromTx ignores failed transactions, other payers and non-mint 
 
 test('mergeLaunches dedupes, flags the current token, fills from market data, sorts newest first', () => {
   const launches = [{ mint: M1, createdAt: 1000, symbol: 'old' }, { mint: M2, createdAt: 5000 }, { mint: 'CUR', createdAt: 9000 }, { mint: M2, createdAt: 5000 }];
-  const markets = new Map([[M1, { symbol: 'AAA', marketCapUsd: 250_000 }]]);
+  const markets = new Map([[M1, { symbol: 'AAA', marketCapUsd: 250_000, liquidityUsd: 40_000 }]]);
   const out = mergeLaunches(launches, markets, 'CUR');
   assert.deepEqual(out.map((l) => l.mint), ['CUR', M2, M1]);
   assert.deepEqual(out.map((l) => l.current), [true, false, false]);
   assert.equal(out[2].symbol, 'AAA');
   assert.equal(out[2].marketCapUsd, 250_000);
   assert.equal(out[1].marketCapUsd, null);
+  // dead: no DexScreener listing, or liquidity under $500
+  assert.equal(out[2].dead, false); // has a market with real liquidity
+  assert.equal(out[1].dead, true); // no market entry at all
+});
+
+test('mergeLaunches flags thin-liquidity listings as dead too', () => {
+  const markets = new Map([[M1, { symbol: 'AAA', marketCapUsd: 100, liquidityUsd: 10 }], [M2, { symbol: 'BBB', marketCapUsd: 500_000, liquidityUsd: 40_000 }]]);
+  const out = mergeLaunches([{ mint: M1 }, { mint: M2 }], markets, 'CUR');
+  assert.equal(out.find((l) => l.mint === M1).dead, true);
+  assert.equal(out.find((l) => l.mint === M2).dead, false);
+});
+
+test('rugRateStats: rug rate from past launches, excluding the current token', () => {
+  const launches = [
+    { mint: 'CUR', current: true, dead: true },
+    { mint: M1, current: false, dead: true },
+    { mint: M2, current: false, dead: false },
+  ];
+  assert.deepEqual(rugRateStats(launches), { total: 2, dead: 1, pct: 50 });
+  // Not enough history to say anything meaningful (fewer than 2 past launches)
+  assert.equal(rugRateStats([{ mint: 'CUR', current: true, dead: false }]), null);
+  assert.equal(rugRateStats([]), null);
+  assert.equal(rugRateStats(null), null);
 });
 
 test('buildDevText: wallet, deploys/day, recent and top launches, copyable address', () => {
@@ -54,7 +77,7 @@ test('buildDevText: wallet, deploys/day, recent and top launches, copyable addre
   ];
   const t = buildDevText({ market: { symbol: 'BDOG' }, creator: DEV, devPct: 0, solBalance: 12.345, launches, source: 'pump', now: NOW });
   assert.match(t, /^👨‍💻 <a href="https:\/\/solscan\.io\/account\/DevWa11et[^"]*">DevW…evW1<\/a>\n/);
-  assert.match(t, /├ Deploys\/day: <b>0\.3<\/b>\n├ Balance: ◎ 12\.3 SOL\n└ Holds <b>0%<\/b> of \$BDOG/);
+  assert.match(t, /├ Deploys\/day: <b>0\.3<\/b>\n├ Balance: ◎ 12\.3 SOL\n├ Holds <b>0%<\/b> of \$BDOG\n└ Past launches dead: <b>0\/2<\/b> \(0%\)/);
   assert.match(t, /🔄 <b>Recent launches<\/b> \[3\]/);
   assert.match(t, /<b>BDOG<\/b> @ \$18\.69K  ◀ this token/);
   assert.match(t, /<b>ACAT&lt;<\/b> @ \$2\.90K/);
@@ -69,6 +92,30 @@ test('buildDevText: wallet, deploys/day, recent and top launches, copyable addre
   assert.match(big, /Recent launches<\/b> \[50\+\]/);
   assert.match(big, /Deploys\/day: <b>1\.0<\/b>/);
   assert.equal((big.match(/<b>T\d+<\/b>/g) ?? []).length, 10); // 5 recent + 5 top
+});
+
+test('buildDevText: shows past-launch rug rate when there is enough history', () => {
+  const launches = mergeLaunches(
+    [{ mint: 'CUR', createdAt: NOW }, { mint: M1, createdAt: NOW - 86_400_000 }, { mint: M2, createdAt: NOW - 2 * 86_400_000 }],
+    new Map([[M2, { symbol: 'OK', marketCapUsd: 5_000, liquidityUsd: 10_000 }]]), // M1 has no market entry -> dead
+    'CUR',
+  );
+  const t = buildDevText({ market: { symbol: 'X' }, creator: DEV, launches, source: 'rpc', scannedTx: 5, now: NOW });
+  assert.match(t, /Past launches dead: <b>1\/2<\/b> \(50%\)/);
+  assert.doesNotMatch(t, /⚠️/); // below the 70% warning threshold
+  assert.match(t, /💀/); // the dead launch is flagged in the list too
+
+  const mostlyDead = mergeLaunches(
+    [{ mint: 'CUR', createdAt: NOW }, { mint: M1, createdAt: NOW - 86_400_000 }, { mint: M2, createdAt: NOW - 2 * 86_400_000 }],
+    new Map(), // nothing has a market -> both past launches dead
+    'CUR',
+  );
+  const t2 = buildDevText({ market: { symbol: 'X' }, creator: DEV, launches: mostlyDead, source: 'rpc', scannedTx: 5, now: NOW });
+  assert.match(t2, /Past launches dead: <b>2\/2<\/b> \(100%\) ⚠️/);
+
+  // Only one past launch: not enough history to show a rate
+  const thin = mergeLaunches([{ mint: 'CUR', createdAt: NOW }, { mint: M1, createdAt: NOW - 86_400_000 }], new Map(), 'CUR');
+  assert.doesNotMatch(buildDevText({ market: { symbol: 'X' }, creator: DEV, launches: thin, source: 'rpc', scannedTx: 5, now: NOW }), /Past launches dead/);
 });
 
 test('valueHoldings values only real pairs, skips the current token and shows the top three', () => {

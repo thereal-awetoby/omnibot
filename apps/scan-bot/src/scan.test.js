@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseMintInput, changePct, formatChange, shouldAlert, parseAlertPct, buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText,
+  parseMintInput, changePct, formatChange, shouldAlert, parseAlertPct, buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText, buildCurveGraduationText, buildVolumeSpikeText,
   formatPriceCard, formatCount, shortPct, formatDuration, safeUrl, buildSocialLine, buildCallLine, buildLeaderboard, buildLeaderboardText, buildUserCallsText, parsePeriod, buildGroupBoard, buildGroupBoardText, extractMint, multiple,
 } from './scan.js';
 
@@ -49,6 +49,40 @@ test('trending, watchlist and alert texts', () => {
   assert.match(w, /±25%/);
   assert.match(buildWatchlistText([], new Map()), /empty/);
   assert.match(buildAlertText(rows[0], 1.3), /moved 🟢 \+30\.0%/);
+});
+
+test('buildWatchlistText shows per-token % only when thresholds differ', () => {
+  const same = [
+    { mint: 'A'.repeat(32), symbol: 'AAA', added_price_usd: 1, base_price_usd: 1, alert_pct: 25 },
+    { mint: 'B'.repeat(32), symbol: 'BBB', added_price_usd: 1, base_price_usd: 1, alert_pct: 25 },
+  ];
+  const t1 = buildWatchlistText(same, new Map());
+  assert.doesNotMatch(t1, /\$AAA[^\n]*±/); // no per-row tag when every watch shares the same %
+  assert.match(t1, /moves ±25% from its last alert price/);
+
+  const mixed = [
+    { mint: 'A'.repeat(32), symbol: 'AAA', added_price_usd: 1, base_price_usd: 1, alert_pct: 25 },
+    { mint: 'B'.repeat(32), symbol: 'BBB', added_price_usd: 1, base_price_usd: 1, alert_pct: 50 },
+  ];
+  const t2 = buildWatchlistText(mixed, new Map());
+  assert.match(t2, /\$AAA[^\n]*±25%/);
+  assert.match(t2, /\$BBB[^\n]*±50%/);
+  assert.match(t2, /Change one with \/watch/);
+});
+
+test('buildCurveGraduationText and buildVolumeSpikeText', () => {
+  const row = { mint: MINT, symbol: 'ERC' };
+  const g = buildCurveGraduationText(row, 'Raydium');
+  assert.match(g, /🎓 <b>\$ERC<\/b> graduated from the bonding curve!/);
+  assert.match(g, /Now trading on Raydium\./);
+  assert.match(g, new RegExp(`<code>${MINT}</code>`));
+
+  const noSymbol = buildCurveGraduationText({ mint: MINT }, 'PumpSwap');
+  assert.match(noSymbol, /<b><code>So11…1112<\/code><\/b> graduated/);
+
+  const v = buildVolumeSpikeText(row, 50_000, 5_000);
+  assert.match(v, /📊 <b>\$ERC<\/b> volume spike!/);
+  assert.match(v, /1H volume \$50\.00K \(10x normal\)/);
 });
 
 const NOW = 1_700_000_000_000;

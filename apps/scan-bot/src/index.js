@@ -2,13 +2,13 @@ import dns from 'node:dns';
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
-  addWatch, removeWatch, isWatching, listWatches, setAlertPct, listAllWatches, updateWatchBase, removeAllWatches,
+  addWatch, removeWatch, isWatching, listWatches, setAlertPct, setWatchAlertPct, listAllWatches, updateWatchBase, removeAllWatches, markCurveAlerted, setVolBaseline, setWatchOnCurve, countAllWatches,
   recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, setCallMessage, getMilestoneSetting, setMilestoneSetting, findCallerByName, callerRecord, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, getWorkerHeartbeat, query, MAX_X_FOLLOWS,
   MAX_WATCHES,
 } from '@omnibot/shared';
 import {
   parseMintInput, extractMint, looksLikeMint, parseAlertPct, shouldAlert,
-  buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText,
+  buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText, buildCurveGraduationText, buildVolumeSpikeText,
   multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, parsePeriod, buildGroupBoard, buildGroupBoardText, buildUserCallsText, buildSocialLine, formatPriceCard, formatCount, shortPct,
 } from './scan.js';
 import { startIntel, gatherIntel, within, hedge } from './intel.js';
@@ -20,14 +20,14 @@ import { usdFromQuote, quoteUsd, fetchLaunchMarket } from './curvemarket.js';
 import { buildCandleSvg, defaultTf, parseTf, TFS } from './chartimg.js';
 import { shrinkArt, cardToJpeg, rawToJpeg, hasSharp } from './imgfast.js';
 import { normHandle, extractMints, pickNew, xCallerId, fetchTweets, loadXFeed } from './xfeed.js';
-import { buildFollowAddedText, buildFollowingText, buildXCallHeader, buildMyCallsText, buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, fmtX, callMsgLink } from './ux.js';
+import { buildFollowAddedText, buildFollowingText, buildXCallHeader, buildMyCallsText, buildFcText, buildLastText, buildTargetSetText, buildTargetsText, buildTargetHitText, buildReminderSetText, buildRemindersText, buildReminderFiredText, buildConvertText, buildEpochText, buildIdText, buildHelpText, buildStatusText, fmtX, callMsgLink } from './ux.js';
 import { mkdir, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
 import { livePrices, parseMilestoneArg, buildMilestoneSettingText, buildMilestoneCaption } from './milestones.js';
 import { callMapRows, buildCallMapSvg, buildCallMapCaption } from './callmap.js';
-import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince, fetchCandles, generateText } from './sources.js';
+import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince, fetchCandles, generateText, rugCheckStatus } from './sources.js';
 import { formatDuration } from './scan.js';
 import { parseTargets, targetLabel, targetHit, parseDelay, analyzeCloses, buildTaText, TA_FRAMES, fetchCloses, isPublicUrl, stripHtml, parseTranslate, normPeriod, fetchTopCoins, buildHeatmapSvg, buildMoversText, fetchPolymarket, buildPolymarketText, parseAmount, parseEpoch, csvCell } from './extras.js';
 import { buildHoldersText, buildDevText, buildLoreText, valueHoldings, mergeLaunches, isAddr } from './detail.js';
@@ -380,13 +380,20 @@ async function showWatchlist(ctx, { edit = false } = {}) {
   return render(ctx, buildWatchlistText(rows, prices), kb, edit);
 }
 
-async function doWatch(ctx, mint, { edit = false } = {}) {
+async function doWatch(ctx, mint, { edit = false, customPct = null } = {}) {
   const market = await getMarket(mint);
-  if (!market?.priceUsd) return ctx.reply('No price found for that token yet, so I cannot watch it.');
+  if (!market?.priceUsd) return ctx.reply(`${NO_MARKET} I cannot watch it until it has a price.`);
   const r = await addWatch({ telegramId: ctx.from.id, mint, symbol: market.symbol, priceUsd: market.priceUsd });
   if (r === 'full') return ctx.reply(`Your watchlist is full (${MAX_WATCHES} tokens). Remove one with /unwatch first.`);
+  // Apply per-token threshold if provided (only when the watch was just added or already existed)
+  if (customPct && r !== 'full') await setWatchAlertPct(ctx.from.id, mint, customPct);
+  // Track curve tokens for graduation alerts (best effort)
+  if (r === 'added' && market.dex && /pump\.fun curve/i.test(market.dex)) setWatchOnCurve(ctx.from.id, mint, true).catch(() => {});
+  // Store initial volume baseline for spike detection
+  if (r === 'added' && market.volume?.h1 > 0) setVolBaseline(ctx.from.id, mint, market.volume.h1).catch(() => {});
+  const pctLabel = customPct ? ` at ±${customPct}%` : '';
   await ctx.answerCallbackQuery?.({ text: r === 'added' ? 'Added to watchlist' : 'Already on your watchlist' }).catch(() => {});
-  if (!edit) await ctx.reply(r === 'added' ? `⭐ Watching ${market.symbol ? '$' + esc(market.symbol) : short(mint)}. I will message you on big moves.` : 'Already on your watchlist.', HTML);
+  if (!edit) await ctx.reply(r === 'added' ? `⭐ Watching ${market.symbol ? '$' + esc(market.symbol) : short(mint)}${pctLabel}. I will message you on big moves.` : `Already on your watchlist.${customPct ? ` Threshold updated to ±${customPct}%.` : ''}`, HTML);
   else await showToken(ctx, mint, { edit: true });
 }
 
@@ -439,14 +446,15 @@ bot.command('th', withMint('/th', (ctx, mint) => showDetail(ctx, 'h', mint, () =
 bot.command('dev', withMint('/dev', (ctx, mint) => showDetail(ctx, 'd', mint, () => buildDev(mint))));
 bot.command('nar', withMint('/nar', (ctx, mint) => showDetail(ctx, 'l', mint, () => buildLore(mint, ctx.from.id))));
 bot.command('lore', withMint('/lore', (ctx, mint) => showDetail(ctx, 'l', mint, () => buildLore(mint, ctx.from.id))));
+const NO_MARKET = 'No market data found for that token yet. It may be brand new, already dead, or not a Solana token — double check the address with /token.';
 bot.command('soc', withMint('/soc', async (ctx, mint) => {
   const m = await withTyping(ctx, () => getMarket(mint));
-  if (!m) return ctx.reply('No market data found for that token yet.');
+  if (!m) return ctx.reply(NO_MARKET);
   return ctx.reply(`${m.symbol ? '$' + esc(m.symbol) : short(mint)}\n${buildSocialLine(m)}`, HTML);
 }));
 bot.command('dp', withMint('/dp', async (ctx, mint) => {
   const [m, paid] = await withTyping(ctx, () => Promise.all([getMarket(mint), fetchDexPaid(mint)]));
-  if (!m) return ctx.reply('No market data found for that token yet.');
+  if (!m) return ctx.reply(NO_MARKET);
   const sym = m.symbol ? '$' + esc(m.symbol) : short(mint);
   const yes = Boolean(paid) || Boolean(m.hasProfile);
   const ago = paid?.paidAt ? formatDuration(Date.now() - paid.paidAt) : null;
@@ -469,23 +477,26 @@ bot.command('s', async (ctx) => {
   let list;
   try { list = await withTyping(ctx, () => searchTokens(q)); }
   catch (e) { console.error('search error:', e.message); return ctx.reply('Search is not working right now. Try again in a minute.'); }
-  if (!list.length) return ctx.reply('No Solana token found for that name.');
+  if (!list.length) return ctx.reply(`No Solana token found for "${esc(q)}". Try a shorter or different name, or paste the token address directly.`, HTML);
   const kb = new InlineKeyboard();
   list.forEach((t, i) => { kb.text(`${t.symbol ? '$' + t.symbol : short(t.mint)}${t.marketCapUsd ? ' · ' + formatUsd(t.marketCapUsd) : ''}`, `t:${t.mint}`); if (i % 2 === 1) kb.row(); });
   return ctx.reply(`Results for "${esc(q)}": tap one for its card.`, { ...HTML, reply_markup: kb });
 });
 bot.command('p', withMint('/p', async (ctx, mint) => {
   const m = await withTyping(ctx, () => getMarket(mint));
-  if (!m?.priceUsd) return ctx.reply('No price found for that token yet.');
+  if (!m?.priceUsd) return ctx.reply(NO_MARKET);
   const d = m.change?.h24 ?? m.change24h;
   return ctx.reply(`${m.symbol ? '$' + esc(m.symbol) : short(mint)}  <b>${formatPriceCard(m.priceUsd)}</b>${d != null ? `  (${shortPct(d)} 24h)` : ''}`, HTML);
 }));
 bot.command('watch', async (ctx) => {
   const arg = ctx.match.trim();
   if (!arg) return showWatchlist(ctx);
-  const mint = parseMintInput(arg);
-  if (!mint) return ctx.reply('Usage: /watch <token address>');
-  return doWatch(ctx, mint);
+  // /watch <address> 30 — optional per-token threshold
+  const parts = arg.split(/\s+/);
+  const mint = parseMintInput(parts[0]);
+  if (!mint) return ctx.reply('Usage: /watch <token address> [alert %]\nExample: /watch So111… 30');
+  const customPct = parts[1] ? parseAlertPct(parts[1]) : null;
+  return doWatch(ctx, mint, { customPct });
 });
 bot.command('unwatch', async (ctx) => {
   const mint = parseMintInput(ctx.match.trim());
@@ -871,7 +882,7 @@ bot.command('v', async (ctx) => {
     if (!mint) return ctx.reply('I could not find that token.');
   }
   const m = await getMarket(mint);
-  if (!m?.priceUsd) return ctx.reply('No price found for that token yet.');
+  if (!m?.priceUsd) return ctx.reply(NO_MARKET);
   const tk = m.symbol ? `$${m.symbol}` : short(mint);
   if (amt.kind === 'amount') return ctx.reply(buildConvertText({ label: `${formatCount(amt.n)} ${tk}`, value: formatUsd(amt.n * m.priceUsd), price: formatPriceCard(m.priceUsd), mcap: formatUsd(m.marketCapUsd) }), { ...HTML, reply_markup: KB_DEL });
   if (!m.marketCapUsd) return ctx.reply('No market cap for that token, so I cannot work out a share of the supply.');
@@ -901,7 +912,7 @@ bot.command(['target', 'alertx'], async (ctx) => {
   const mults = rest.length ? parseTargets(rest.join(' ')) : [2, 3, 5];
   if (!mults) return ctx.reply('I did not understand those targets. Examples: 3x  4.5x  +50%  -30%');
   const m = await withTyping(ctx, () => getMarket(mint));
-  if (!m?.priceUsd) return ctx.reply('No price found for that token yet.');
+  if (!m?.priceUsd) return ctx.reply(NO_MARKET);
   const added = await addTargets({ telegramId: ctx.from.id, mint, symbol: m.symbol, basePrice: m.priceUsd, mults });
   return ctx.reply(buildTargetSetText({
     symbol: m.symbol ? `$${m.symbol}` : short(mint), nowLabel: m.marketCapUsd ? formatUsd(m.marketCapUsd) : formatPriceCard(m.priceUsd),
@@ -1108,6 +1119,7 @@ bot.on('message:text', async (ctx, next) => {
 
 // ---- background price alerts: one check every minute ----
 let checking = false;
+const VOL_SPIKE_MULT = 5; // h1 volume > 5x baseline = spike alert
 async function checkAlerts() {
   if (checking) return;
   checking = true;
@@ -1118,19 +1130,49 @@ async function checkAlerts() {
     for (const r of rows) {
       const pair = prices.get(r.mint);
       const price = pair?.priceUsd;
-      // Skip dead tokens (near-zero liquidity = unreliable price) and non-alerts.
-      if (!price || (pair.liquidityUsd != null && pair.liquidityUsd < 500) || !shouldAlert(r.base_price_usd, price, r.alert_pct)) continue;
-      try {
-        await bot.api.sendMessage(r.telegram_id, buildAlertText(r, price), {
-          ...HTML,
-          reply_markup: new InlineKeyboard().text('Open card', `t:${r.mint}`).url('⚡ Buy on Omni Trade', tradeLink(r.mint)),
-        });
-        await updateWatchBase(r.telegram_id, r.mint, price); // next alert measures from here
-      } catch (e) {
-        if (e.error_code === 403) await removeAllWatches(r.telegram_id); // user blocked the bot
-        else console.error('alert send error:', e.message);
+      if (!price || (pair.liquidityUsd != null && pair.liquidityUsd < 500)) continue;
+
+      const alerts = [];
+
+      // 1) Price movement alert
+      if (shouldAlert(r.base_price_usd, price, r.alert_pct)) {
+        alerts.push(buildAlertText(r, price));
       }
-      await new Promise((res) => setTimeout(res, 50)); // stay well under Telegram's send limits
+
+      // 2) Bonding curve graduation alert
+      if (r.on_curve && !r.curve_alerted && pair.dex && !/pump\.fun curve/i.test(pair.dex)) {
+        alerts.push(buildCurveGraduationText(r, pair.dex));
+        markCurveAlerted(r.telegram_id, r.mint).catch(() => {});
+      }
+
+      // 3) Volume spike alert
+      if (r.vol_baseline > 0 && pair.volume?.h1 > 0 && pair.volume.h1 >= r.vol_baseline * VOL_SPIKE_MULT) {
+        alerts.push(buildVolumeSpikeText(r, pair.volume.h1, r.vol_baseline));
+        // Update baseline so we don't re-alert next cycle
+        setVolBaseline(r.telegram_id, r.mint, pair.volume.h1).catch(() => {});
+      } else if (pair.volume?.h1 > 0 && !r.vol_baseline) {
+        // Seed baseline for existing watches that don't have one
+        setVolBaseline(r.telegram_id, r.mint, pair.volume.h1).catch(() => {});
+      }
+
+      if (!alerts.length) continue;
+
+      for (const text of alerts) {
+        try {
+          await bot.api.sendMessage(r.telegram_id, text, {
+            ...HTML,
+            reply_markup: new InlineKeyboard().text('Open card', `t:${r.mint}`).url('⚡ Buy on Omni Trade', tradeLink(r.mint)),
+          });
+        } catch (e) {
+          if (e.error_code === 403) { await removeAllWatches(r.telegram_id); break; }
+          else console.error('alert send error:', e.message);
+        }
+        await new Promise((res) => setTimeout(res, 50)); // stay well under Telegram's send limits
+      }
+      // Update price base if a price alert fired
+      if (shouldAlert(r.base_price_usd, price, r.alert_pct)) {
+        await updateWatchBase(r.telegram_id, r.mint, price);
+      }
     }
   } catch (e) {
     console.error('alert check error:', e.message);
@@ -1320,6 +1362,23 @@ async function moveGroupData(oldId, newId, why) {
 }
 bot.on('message:migrate_to_chat_id', (ctx) => moveGroupData(ctx.chat.id, ctx.message.migrate_to_chat_id, 'Telegram upgrade'));
 bot.on('message:migrate_from_chat_id', (ctx) => moveGroupData(ctx.message.migrate_from_chat_id, ctx.chat.id, 'Telegram upgrade'));
+// Owner tool: /status shows system health — DB, RPC endpoints, RugCheck, X reader worker, uptime.
+function isAdmin(ctx) {
+  const ids = (process.env.ADMIN_IDS ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+  return ids.includes(String(ctx.from?.id));
+}
+bot.command('status', async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply(`Only the bot owner can use this. Add your Telegram ID (${ctx.from?.id}) to ADMIN_IDS in the .env file and restart the bot.`);
+  const t0 = Date.now();
+  let db = { ok: false, error: 'not checked' };
+  try { await query('SELECT 1'); db = { ok: true, ms: Date.now() - t0 }; } catch (e) { db = { ok: false, error: e.message }; }
+  const [worker, watchCount] = await Promise.all([
+    getWorkerHeartbeat().catch(() => null),
+    countAllWatches().catch(() => null),
+  ]);
+  const text = buildStatusText({ rpc: rpcStats(), worker, rug: rugCheckStatus(), db, uptimeSec: process.uptime(), watchCount });
+  return ctx.reply(text, HTML);
+});
 // Owner tool: /movecalls lists the chats that have saved calls; /movecalls <old chat id> (sent in the group) brings them here.
 bot.command('movecalls', async (ctx) => {
   try { return await runMoveCalls(ctx); } catch (e) { console.error('movecalls error:', e.message); return ctx.reply(`⚠️ I cannot reach the database right now (${String(e.message).slice(0, 80)}). Nothing was changed. Check the internet connection of the computer running the bot, then try again.`); }

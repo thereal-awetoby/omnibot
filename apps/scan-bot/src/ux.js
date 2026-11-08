@@ -100,7 +100,7 @@ export function buildHelpText() {
     sec('🕵️ Wallets', [['/tt', 'Top traders of a token'], ['/tw', 'Top wallets of a token'], ['/ws', 'Wallet stats']]),
     sec('👥 Group', [['/lb', 'Leaderboard (1h, 1 week, all…)'], ['/calls', 'Your calls (or /calls @name)'], ['/callmap', 'Heatmap of the group\'s calls'], ['/fc', 'First caller of a token'], ['/last', 'Last calls'], ['/pnl', 'PnL card'], ['/milestones', 'Multiplier posts'], ['/elb', 'Export leaderboard'], ['/meme', 'Random crypto meme']]),
     sec('𝕏 X calls', [['/follow', 'Call tokens an X account posts'], ['/unfollow', 'Stop following'], ['/following', 'Followed accounts']]),
-    sec('🔔 Alerts', [['/watch', 'Watch a token (moves of ±%)'], ['/target', 'Alert at 3x, 4x, -50%…'], ['/targets', 'Your alerts'], ['/untarget', 'Remove alerts'], ['/remindme', 'Reminder to you'], ['/remind', 'Reminder for the chat'], ['/listreminders', 'Your reminders']]),
+    sec('🔔 Alerts', [['/watch', 'Watch a token (moves of ±%, or /watch <addr> 30 for a custom %)'], ['/target', 'Alert at 3x, 4x, -50%…'], ['/targets', 'Your alerts'], ['/untarget', 'Remove alerts'], ['/remindme', 'Reminder to you'], ['/remind', 'Reminder for the chat'], ['/listreminders', 'Your reminders']]),
     sec('🤖 AI tools', [['/tr', 'Translate (-fr, -es, -yo…)'], ['/tldr', 'Summarize text or a link'], ['/eli5', 'Explain simply']]),
     sec('🧰 Utilities', [['/userid', 'Your ID'], ['/chatid', 'Chat ID'], ['/epoch', 'Unix time'], ['/flip', 'Flip a coin'], ['/trade', 'Omni Trade'], ['/launch', 'Omni Launch']]),
   ].join('\n\n');
@@ -175,6 +175,38 @@ function handleStatus(r, now) {
   const checkedAt = r.worker_checked_at ? new Date(r.worker_checked_at).getTime() : polled;
   return `✅ healthy · checked ${ago2(now - checkedAt)} ago`;
 }
+// ---- operator health: /status ----
+// rpc: rpcStats() result; worker: getWorkerHeartbeat() row or null; rug: rugCheckStatus() result; db: { ok, ms } or { ok: false, error }.
+export function buildStatusText({ rpc, worker, rug, db, uptimeSec, watchCount = null }, now = Date.now()) {
+  const lines = ['⚙️ <b>Omni Scan — status</b>', ''];
+
+  lines.push('<b>Database</b>', pre([['Status', db.ok ? `✅ connected (${db.ms}ms)` : `🔴 unreachable — ${esc(String(db.error ?? 'unknown error').slice(0, 60))}`]]), '');
+
+  const rpcRows = rpc.endpoints.map((e) => [e.host, `${e.calls} calls${e.limited ? ` · ${e.limited} rate-limited` : ''}`]);
+  lines.push('<b>Solana RPC</b>', pre(rpcRows.length ? rpcRows : [['Endpoints', 'none configured']]), '');
+
+  const rugLine = rug.down ? `🔴 skipping it for ${ago2(rug.downForMs)} more (${rug.failStreak} failed in a row)` : '🟢 reachable';
+  lines.push('<b>RugCheck</b>', pre([['Status', rugLine]]), '');
+
+  if (worker) {
+    const wAge = now - new Date(worker.last_round_at).getTime();
+    const wStatus = wAge < 5 * 60_000 ? '🟢 online' : wAge < 15 * 60_000 ? '🟡 slow' : '🔴 offline';
+    lines.push('<b>X reader</b>', pre([
+      ['Status', wStatus],
+      ['Accounts', `${worker.accounts_active ?? '?'}/${worker.accounts_total ?? '?'} active`],
+      ['Last round', `${ago2(wAge)} ago${worker.round_ms ? ` (${(worker.round_ms / 1000).toFixed(1)}s)` : ''}`],
+    ]), '');
+  } else {
+    lines.push('<b>X reader</b>', pre([['Status', '⚪ no heartbeat recorded yet']]), '');
+  }
+
+  const upRows = [['Uptime', formatDuration(uptimeSec * 1000) ?? '<1m']];
+  if (watchCount != null) upRows.push(['Active watches', String(watchCount)]);
+  lines.push('<b>Bot process</b>', pre(upRows));
+
+  return lines.join('\n');
+}
+
 export function buildFollowingText(rows, now = Date.now(), heartbeat = null) {
   if (!rows.length) return '𝕏 <b>Followed accounts</b>\n\nNone yet. Add one with <code>/follow @handle</code>: any token address they post will be called in this group.';
   const lines = rows.map((r) => {

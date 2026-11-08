@@ -146,10 +146,21 @@ export function mergeLaunches(launches, markets, currentMint) {
         symbol: m?.symbol ?? l.symbol ?? null,
         createdAt: l.createdAt ?? m?.createdAt ?? null,
         marketCapUsd: m?.marketCapUsd ?? null,
+        // No DexScreener listing, or liquidity under $500: the token has no real market left (a rug/dead launch).
+        dead: !m || !(m.liquidityUsd >= 500),
         current: l.mint === currentMint,
       };
     })
     .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+}
+
+// launches: result of mergeLaunches. How many of this wallet's PAST launches (excluding the current token) are
+// now dead (no liquid market), as a rough "rug rate". null when there is not enough history to say anything.
+export function rugRateStats(launches) {
+  const past = (launches ?? []).filter((l) => !l.current);
+  if (past.length < 2) return null;
+  const dead = past.filter((l) => l.dead).length;
+  return { total: past.length, dead, pct: Math.round((dead / past.length) * 100) };
 }
 
 // Compact dollars for lists: $14.8K, $377, $0.12
@@ -162,7 +173,8 @@ export function usdShort(n) {
 const launchLine = (l, now) => {
   const age = (l.createdAt ? formatDuration(now - l.createdAt) ?? '' : '').padEnd(4);
   const label = l.symbol ? esc(l.symbol) : short(l.mint);
-  return `<code>${age}</code> <b>${label}</b> @ ${l.marketCapUsd != null ? usdShort(l.marketCapUsd) : 'n/a'}${l.current ? '  ◀ this token' : ''}`;
+  const dead = l.dead && !l.current ? ' 💀' : '';
+  return `<code>${age}</code> <b>${label}</b> @ ${l.marketCapUsd != null ? usdShort(l.marketCapUsd) : 'n/a'}${dead}${l.current ? '  ◀ this token' : ''}`;
 };
 
 // launches: result of mergeLaunches (or null when they could not be loaded).
@@ -182,6 +194,8 @@ export function buildDevText({ market, creator, creatorFees = null, funding = nu
   if (typeof solBalance === 'number') facts.push(`Balance: ◎ ${solBalance.toFixed(solBalance >= 10 ? 1 : 2)} SOL`);
   if (creatorFees && creatorFees !== creator) facts.push(`Fee wallet: ${walletLink(creatorFees)}`);
   if (typeof devPct === 'number') facts.push(`Holds <b>${devPct.toFixed(devPct % 1 ? 1 : 0)}%</b> of ${market?.symbol ? `$${esc(market.symbol)}` : 'this token'}`);
+  const rug = rugRateStats(launches);
+  if (rug) facts.push(`Past launches dead: <b>${rug.dead}/${rug.total}</b> (${rug.pct}%)${rug.pct >= 70 ? ' ⚠️' : ''}`);
   facts.forEach((f, i) => head.push(`${i === facts.length - 1 ? '└' : '├'} ${f}`));
   const lines = [...head, ''];
 

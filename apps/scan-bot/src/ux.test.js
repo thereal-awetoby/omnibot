@@ -85,6 +85,36 @@ test('follow answers: added, status list, post header', () => {
   assert.match(buildHelpText(), /\/follow/);
 });
 
+import { buildStatusText } from './ux.js';
+test('/status: healthy system, worker online, RugCheck reachable', () => {
+  const rpc = { calls: 120, retries: 2, endpoints: [{ host: 'mainnet.helius-rpc.com', calls: 100, limited: 0 }, { host: 'api.mainnet-beta.solana.com', calls: 20, limited: 3 }] };
+  const worker = { last_round_at: new Date(now - 60_000), accounts_active: 4, accounts_total: 5, round_ms: 8200 };
+  const db = { ok: true, ms: 12 };
+  const t = buildStatusText({ rpc, worker, rug: { down: false, downForMs: 0, failStreak: 0 }, db, uptimeSec: 3 * 3600, watchCount: 42 }, now);
+  assert.match(t, /Database<\/b>[\s\S]*✅ connected \(12ms\)/);
+  assert.match(t, /mainnet\.helius-rpc\.com\s+100 calls/);
+  assert.match(t, /api\.mainnet-beta\.solana\.com\s+20 calls · 3 rate-limited/);
+  assert.match(t, /RugCheck<\/b>[\s\S]*🟢 reachable/);
+  assert.match(t, /X reader<\/b>[\s\S]*🟢 online/);
+  assert.match(t, /4\/5 active/);
+  assert.match(t, /Active watches\s+42/);
+});
+
+test('/status: down database, tripped RugCheck breaker, offline worker, no heartbeat', () => {
+  const rpc = { calls: 0, retries: 0, endpoints: [] };
+  const db = { ok: false, error: 'connection refused' };
+  const t1 = buildStatusText({ rpc, worker: null, rug: { down: true, downForMs: 65_000, failStreak: 3 }, db, uptimeSec: 30 });
+  assert.match(t1, /🔴 unreachable — connection refused/);
+  assert.match(t1, /Endpoints\s+none configured/);
+  assert.match(t1, /🔴 skipping it for 1m more \(3 failed in a row\)/);
+  assert.match(t1, /no heartbeat recorded yet/);
+  assert.doesNotMatch(t1, /Active watches/); // omitted when watchCount is not given
+
+  const offlineWorker = { last_round_at: new Date(now - 20 * 60_000), accounts_active: 0, accounts_total: 5 };
+  const t2 = buildStatusText({ rpc, worker: offlineWorker, rug: { down: false, downForMs: 0, failStreak: 0 }, db: { ok: true, ms: 5 }, uptimeSec: 60 }, now);
+  assert.match(t2, /X reader<\/b>[\s\S]*🔴 offline/);
+});
+
 import { explainXError } from './ux.js';
 test('/following explains the X reader state in plain words', () => {
   assert.match(explainXError('x-worker: worker is not running'), /switched off/);
