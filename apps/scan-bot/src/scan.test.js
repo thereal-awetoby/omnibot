@@ -219,6 +219,17 @@ test('bundlers row: none, unknown and counted', () => {
   assert.match(unknown, /<code>Bundlers <\/code><i>n\/a<\/i>/);
 });
 
+test('snipers row shown when snipers detected', () => {
+  const withSnipers = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, snipers: { count: 4, pct: 12.3, wallets: [] } }, now: NOW });
+  assert.match(withSnipers, /<code>Snipers  <\/code><b>4 wallets<\/b> \(12\.3%\) · bought in first ~2s/);
+  // No snipers row when count is 0
+  const noSnipers = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, snipers: { count: 0, pct: 0, wallets: [] } }, now: NOW });
+  assert.doesNotMatch(noSnipers, /Snipers/);
+  // No snipers row when null
+  const nullSnipers = buildScanCard({ mint: MINT, market, security, intel: { ...fullIntel, snipers: null }, now: NOW });
+  assert.doesNotMatch(nullSnipers, /Snipers/);
+});
+
 test('scan card: a pump.fun curve token shows the curve liquidity and fill instead of n/a', () => {
   const market = { symbol: 'ERC', name: 'European Relief Collective', priceUsd: 0.0000143, marketCapUsd: 14_300, liquidityUsd: null, dex: 'pump.fun curve', change: {}, volume: {} };
   const intel = { curve: { complete: false, progressPct: 74.4, liquidityUsd: 3795 }, holdersTotal: 95 };

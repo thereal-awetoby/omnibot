@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeHolderStats, computeFresh, findBundle, parseCurveReserves, curveStats } from './security.js';
+import { computeHolderStats, computeFresh, findBundle, findSnipers, parseCurveReserves, curveStats } from './security.js';
 
 const acc = (address, amount) => ({ address, amount: String(amount) });
 
@@ -47,6 +47,22 @@ test('findBundle groups holders who first got the token in the same block as the
   assert.equal(findBundle([e('a', 3, null), e('b', 2, undefined)]), null);
   assert.equal(findBundle(null), null);
   assert.deepEqual(findBundle([e('a', 1, 10), e('b', 1, 12)], 2), { count: 2, pct: 2, slot: 10 }); // wider window
+});
+
+test('findSnipers identifies wallets buying just after launch but not in the bundle', () => {
+  const e = (owner, pct, firstSlot) => ({ owner, pct, firstSlot });
+  const entries = [e('a', 3, 100), e('b', 2.5, 100), e('c', 1.2, 103), e('d', 4, 105), e('e', 1, 500)];
+  const bundle = findBundle(entries); // a and b are bundled at slot 100
+  const sn = findSnipers(entries, bundle);
+  assert.equal(sn.count, 2); // c (slot 103) and d (slot 105) are snipers
+  assert.equal(sn.pct, 5.2); // 1.2 + 4.0
+  assert.deepEqual(sn.wallets.map((w) => w.owner), ['c', 'd']);
+  // No snipers when everyone is in the bundle
+  const sn2 = findSnipers([e('a', 3, 100), e('b', 2, 100)], findBundle([e('a', 3, 100), e('b', 2, 100)]));
+  assert.equal(sn2.count, 0);
+  // null when too few entries
+  assert.equal(findSnipers([e('a', 3, 100)], null), null);
+  assert.equal(findSnipers(null, null), null);
 });
 
 test('curve reserves: liquidity is the real SOL in the curve, progress from tokens left', () => {

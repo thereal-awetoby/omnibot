@@ -720,7 +720,7 @@ async function callMapPhoto(chat, secs, mode) {
   const label = CM_PERIODS.find(([, s]) => s === secs)?.[0] ?? '7D';
   const calls = await listChatCalls(chat.id, { seconds: secs, limit: 400 });
   if (!calls.length) return { empty: `🗺 <b>Call map</b> · ${label}\n\nNo calls in this group in that time. Post a token address to make one.` };
-  const rows = callMapRows(calls, await pricesFor(calls.map((c) => c.mint)));
+  const rows = callMapRows(calls, await livePrices(calls.map((c) => c.mint), { fetchPairs: fetchPairsByTokens, quoteUsd, launchMarket: (m) => within(fetchLaunchMarket(m), 4_000, null), maxFallback: 25 }).catch((e) => { console.error('callmap prices:', e.message); return new Map(); }));
   for (const r of rows) if (r.nowX > 1 && r.nowX > r.athX - 1e-9 && r.nowX * r.price_usd > (Number(r.peak_price_usd) || 0) * 1.0001) setCallPeak(chat.id, r.mint, r.nowX * r.price_usd).catch(() => {});
   const png = await renderPng(buildCallMapSvg(rows, { mode, periodLabel: label, groupName: chat.title }), 1280, { fast: true });
   const { buf, name } = await cardToJpeg(png, 88);
