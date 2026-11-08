@@ -172,6 +172,13 @@ function securityBlock(sec, intel, market) {
   rows.push(row('Fresh', typeof intel?.fresh7dPct === 'number' ? `1D ${val(pctText(intel.fresh1dPct))} · 7D ${val(pctText(intel.fresh7dPct))}` : NA));
   const ins = intel?.insiderNetworks;
   if (ins > 0) rows.push(row('Insiders', `${val(`${ins} network${ins > 1 ? 's' : ''}`)} · ${intel.insiderWallets} wallet${intel.insiderWallets === 1 ? '' : 's'} · ${pctText(intel.insiderPct)} of supply`));
+  // Our own quick shared-funder check on the biggest holders — a signal beyond RugCheck's own insider count.
+  const lc = intel?.linkedClusters;
+  if (lc?.groups?.length) {
+    const wallets = lc.groups.reduce((a, g) => a + g.owners.length, 0);
+    const pct = lc.groups.reduce((a, g) => a + g.pct, 0);
+    rows.push(row('Related', `${val(`${lc.groups.length} group${lc.groups.length > 1 ? 's' : ''}`)} · ${wallets} wallets · ${pctText(pct)}`));
+  }
   const b = intel?.bundle;
   rows.push(row('Bundlers', !b ? NA : b.count === 0 ? 'none in top holders' : `${val(`${b.count} wallets`)} (${pctText(b.pct)}) · top holders`));
   const sn = intel?.snipers;

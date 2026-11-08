@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { buildMapPayload, startMiniApp, MAP_PAGE } from './miniapp.js';
+import { DASH_PAGE } from './dashboard.js';
 
 const A = 'So11111111111111111111111111111111111111112';
 const loaded = {
@@ -58,5 +60,95 @@ test('mini app server: page, data, bad address, cache, errors', async () => {
   assert.equal(loads, 1); // the second answer came from the cache
   assert.equal((await get('/api/map?mint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v')).status, 404);
   assert.equal((await get('/nothing')).status, 404);
+  server.close();
+});
+
+// A validly-signed initData string, built the same way Telegram's client does.
+const BOT_TOKEN = '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11';
+function signInitData(user, now = Date.now()) {
+  const fields = { auth_date: String(Math.floor(now / 1000) - 10), user: JSON.stringify(user) };
+  const secret = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+  const pairs = Object.entries(fields).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const checkString = pairs.map(([k, v]) => `${k}=${v}`).join('\n');
+  const hash = crypto.createHmac('sha256', secret).update(checkString).digest('hex');
+  return new URLSearchParams({ ...fields, hash }).toString();
+}
+
+test('mini app server: without a dash option, /app and /api/dash/* answer 404 (bubblemap keeps working alone)', async () => {
+  const server = startMiniApp({ port: 0, loadData: async () => null, log: { log() {}, error() {} } });
+  await new Promise((r) => server.once('listening', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const get = (p) => new Promise((resolve, reject) => http.get(base + p, (res) => { let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode, body: b })); }).on('error', reject));
+  assert.equal((await get('/app')).status, 404);
+  assert.equal((await get('/api/dash/trending')).status, 404);
+  server.close();
+});
+
+test('dashboard routes: search, trending, token, and auth-gated watchlist read/write', async () => {
+  const watch = new Map(); // telegramId -> Set(mint)
+  const dash = {
+    botToken: BOT_TOKEN,
+    search: async (q) => [{ mint: A, symbol: q.toUpperCase() }],
+    trending: async () => [{ mint: A, symbol: 'TREND' }],
+    getToken: async (mint) => ({ mint, found: mint === A }),
+    getWatchlist: async (telegramId) => [...(watch.get(telegramId) ?? [])].map((mint) => ({ mint })),
+    addWatch: async (telegramId, mint) => { if (!watch.has(telegramId)) watch.set(telegramId, new Set()); watch.get(telegramId).add(mint); return 'added'; },
+    removeWatch: async (telegramId, mint) => { watch.get(telegramId)?.delete(mint); },
+  };
+  const server = startMiniApp({ port: 0, loadData: async () => null, log: { log() {}, error() {} }, dash });
+  await new Promise((r) => server.once('listening', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const req = (method, p, { headers = {}, body } = {}) => new Promise((resolve, reject) => {
+    const r = http.request(base + p, { method, headers }, (res) => { let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode, body: b ? JSON.parse(b) : null })); });
+    r.on('error', reject);
+    if (body) r.write(JSON.stringify(body));
+    r.end();
+  });
+  const get = (p, headers) => req('GET', p, { headers });
+
+  // /app serves HTML, not JSON, so it's read with its own raw helper rather than `get` (which parses JSON).
+  const rawPage = await new Promise((resolve, reject) => {
+    http.get(base + '/app', (res) => {
+      let b = '';
+      res.on('data', (c) => (b += c));
+      res.on('end', () => resolve({ status: res.statusCode, body: b }));
+    }).on('error', reject);
+  });
+  assert.equal(rawPage.status, 200);
+  assert.equal(rawPage.body, DASH_PAGE);
+
+  assert.deepEqual((await get('/api/dash/search?q=dog')).body, { results: [{ mint: A, symbol: 'DOG' }] });
+  assert.deepEqual((await get('/api/dash/search')).body, { results: [] }); // empty query short-circuits
+  assert.deepEqual((await get('/api/dash/trending')).body, { results: [{ mint: A, symbol: 'TREND' }] });
+  assert.deepEqual((await get('/api/dash/token?mint=' + A)).body, { mint: A, found: true });
+  assert.equal((await get('/api/dash/token?mint=nope')).status, 400);
+
+  // watchlist reads/writes require a valid initData header
+  const noAuth = await get('/api/dash/watchlist');
+  assert.equal(noAuth.status, 401);
+  assert.match(noAuth.body.error, /sign in/);
+
+  const initData = signInitData({ id: 777, username: 'ann' });
+  const emptyList = await get('/api/dash/watchlist', { 'X-Init-Data': initData });
+  assert.deepEqual(emptyList.body, { results: [] });
+
+  const added = await req('POST', '/api/dash/watch', { headers: { 'X-Init-Data': initData, 'content-type': 'application/json' }, body: { mint: A } });
+  assert.deepEqual(added.body, { ok: true, status: 'added' });
+
+  const afterAdd = await get('/api/dash/watchlist', { 'X-Init-Data': initData });
+  assert.deepEqual(afterAdd.body, { results: [{ mint: A }] });
+
+  // a bad address is rejected before reaching addWatch
+  const badAddr = await req('POST', '/api/dash/watch', { headers: { 'X-Init-Data': initData, 'content-type': 'application/json' }, body: { mint: 'nope' } });
+  assert.equal(badAddr.status, 400);
+
+  const removed = await req('POST', '/api/dash/unwatch', { headers: { 'X-Init-Data': initData, 'content-type': 'application/json' }, body: { mint: A } });
+  assert.deepEqual(removed.body, { ok: true });
+  assert.deepEqual((await get('/api/dash/watchlist', { 'X-Init-Data': initData })).body, { results: [] });
+
+  // a tampered initData is rejected the same as a missing one
+  const tampered = initData.replace(/user=[^&]+/, 'user=' + encodeURIComponent(JSON.stringify({ id: 999 })));
+  assert.equal((await get('/api/dash/watchlist', { 'X-Init-Data': tampered })).status, 401);
+
   server.close();
 });

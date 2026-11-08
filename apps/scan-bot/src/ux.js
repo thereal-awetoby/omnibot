@@ -102,7 +102,7 @@ export function buildHelpText() {
     sec('𝕏 X calls', [['/follow', 'Call tokens an X account posts'], ['/unfollow', 'Stop following'], ['/following', 'Followed accounts']]),
     sec('🔔 Alerts', [['/watch', 'Watch a token (moves of ±%, or /watch <addr> 30 for a custom %)'], ['/target', 'Alert at 3x, 4x, -50%…'], ['/targets', 'Your alerts'], ['/untarget', 'Remove alerts'], ['/remindme', 'Reminder to you'], ['/remind', 'Reminder for the chat'], ['/listreminders', 'Your reminders']]),
     sec('🤖 AI tools', [['/tr', 'Translate (-fr, -es, -yo…)'], ['/tldr', 'Summarize text or a link'], ['/eli5', 'Explain simply']]),
-    sec('🧰 Utilities', [['/userid', 'Your ID'], ['/chatid', 'Chat ID'], ['/epoch', 'Unix time'], ['/flip', 'Flip a coin'], ['/trade', 'Omni Trade'], ['/launch', 'Omni Launch']]),
+    sec('🧰 Utilities', [['/userid', 'Your ID'], ['/chatid', 'Chat ID'], ['/epoch', 'Unix time'], ['/flip', 'Flip a coin'], ['/trade', 'Omni Trade'], ['/launch', 'Omni Launch'], ['/dashboard', 'Full-screen app: search, trending, watchlist']]),
   ].join('\n\n');
 }
 export { formatPriceCard };
