@@ -5,12 +5,17 @@ import {
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, setWatchAlertPct, listAllWatches, updateWatchBase, removeAllWatches, markCurveAlerted, setVolBaseline, setWatchOnCurve, countAllWatches,
   recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, setCallMessage, getMilestoneSetting, setMilestoneSetting, findCallerByName, callerRecord, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, getWorkerHeartbeat, query, MAX_X_FOLLOWS,
   MAX_WATCHES,
+  ensurePaperAccount, getPaperAccount, getStrategy, updateStrategy, listEnabledStrategies, listStrategiesByIds, hasOpenPosition, openPosition, listOpenPositions, listClosedPositions, closePosition,
 } from '@omnibot/shared';
 import {
   parseMintInput, extractMint, looksLikeMint, parseAlertPct, shouldAlert,
   buildScanCard, buildTrendingText, buildWatchlistText, buildAlertText, buildCurveGraduationText, buildVolumeSpikeText,
   multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, parsePeriod, buildGroupBoard, buildGroupBoardText, buildUserCallsText, buildSocialLine, formatPriceCard, formatCount, shortPct,
 } from './scan.js';
+import {
+  matchesStrategy, hasRoom, sizeForTrade, MIN_TRADE_USD, pnlPct, shouldClose,
+  buildAccountText, buildStrategyText, buildPositionsText, buildHistoryText, buildOpenNotice, buildCloseNotice,
+} from './paper.js';
 import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getTokenMeta, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
 import { loadBubbleCaption, loadBubbleData } from './bubbleload.js';
@@ -175,9 +180,24 @@ async function callFor(ctx, mint, market, record) {
       chatId: ctx.chat.id, mint, symbol: market.symbol, callerId: ctx.from.id, callerName: callerName(ctx.from),
       priceUsd: market.priceUsd, mcapUsd: market.marketCapUsd, msgId: ctx.message?.message_id ?? null,
     });
+    if (r.first) tryPaperBuy({ mint, symbol: market.symbol, priceUsd: market.priceUsd, mcapUsd: market.marketCapUsd }).catch((e) => console.error('paper buy error:', e.message));
     return r.call;
   }
   return getFirstCall(ctx.chat.id, mint);
+}
+
+// Paper trading: a new, first-anywhere call just appeared. Open a paper position for every user whose strategy matches.
+// Fire-and-forget from the caller's point of view — never slows down or fails a real call/card.
+async function tryPaperBuy({ mint, symbol, priceUsd, mcapUsd }) {
+  const strategies = await listEnabledStrategies();
+  for (const s of strategies) {
+    if (!matchesStrategy(s, { mcapUsd }) || !hasRoom(s)) continue;
+    if (await hasOpenPosition(s.telegram_id, mint)) continue; // already holding this one
+    const size = sizeForTrade(s, Number(s.balance_usd));
+    if (size < MIN_TRADE_USD) continue; // balance too low to bother
+    await openPosition({ telegramId: s.telegram_id, mint, symbol, entryPriceUsd: priceUsd, entryMcapUsd: mcapUsd, sizeUsd: size });
+    bot.api.sendMessage(s.telegram_id, buildOpenNotice({ symbol, mint, sizeUsd: size, mcapUsd }), HTML).catch(() => {}); // user may have blocked the bot
+  }
 }
 
 // Keeps Telegram's "typing…" going while we work, instead of posting a "loading" message.
@@ -1121,6 +1141,70 @@ bot.command(['tldr', 'sum'], async (ctx) => {
   }
   return runAi(ctx, { system: AI_SYS, prompt: `Summarize in 3 to 5 short bullet-style sentences (use plain lines starting with a dash):\n\n${text.slice(0, 12_000)}` });
 });
+// ---- Paper trading (personal, DM-only): a virtual balance and one rule-based strategy per user ----
+const paperEdit = new Map(); // telegram_id -> field name awaiting a typed value
+const STRATEGY_PROMPT = {
+  min_mcap_usd: 'Minimum market cap in $ to paper-buy (e.g. 10000), or "any" for no minimum.',
+  max_mcap_usd: 'Maximum market cap in $ to paper-buy (e.g. 100000), or "any" for no maximum.',
+  alloc_pct: 'Size per trade, as % of your paper balance (e.g. 5).',
+  tp_pct: 'Take-profit, as % gain (e.g. 100 closes a trade at +100%, a 2x).',
+  sl_pct: 'Stop-loss, as % loss (e.g. 40 closes a trade at -40%).',
+  max_open: 'Max number of paper positions open at once (e.g. 3).',
+};
+const strategyKb = (s) => new InlineKeyboard()
+  .text(s.enabled ? '⚪ Turn off' : '🟢 Turn on', 'pe:tog').row()
+  .text('Min MC', 'pe:min_mcap_usd').text('Max MC', 'pe:max_mcap_usd').row()
+  .text('Size %', 'pe:alloc_pct').text('Take-profit %', 'pe:tp_pct').text('Stop-loss %', 'pe:sl_pct').row()
+  .text('Max open', 'pe:max_open').row()
+  .text('🗑 Close', 'x');
+
+async function showStrategy(ctx) {
+  await ensurePaperAccount(ctx.from.id);
+  const s = await getStrategy(ctx.from.id);
+  return ctx.reply(buildStrategyText(s), { ...HTML, reply_markup: strategyKb(s) });
+}
+
+bot.command('paper', async (ctx) => {
+  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  await ensurePaperAccount(ctx.from.id);
+  const [account, strategy, open] = await Promise.all([getPaperAccount(ctx.from.id), getStrategy(ctx.from.id), listOpenPositions(ctx.from.id)]);
+  const investedUsd = open.reduce((a, p) => a + Number(p.size_usd), 0);
+  return ctx.reply(buildAccountText({ account, strategy, openCount: open.length, investedUsd }), {
+    ...HTML, reply_markup: new InlineKeyboard().text('⚙️ Strategy', 'pe:show').text('📈 Positions', 'pe:pos').row().text('📜 History', 'pe:hist'),
+  });
+});
+bot.command('strategy', async (ctx) => { if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.'); return showStrategy(ctx); });
+bot.command('positions', async (ctx) => {
+  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  const rows = await listOpenPositions(ctx.from.id);
+  const prices = rows.length ? await callPrices(rows.map((r) => r.mint)) : new Map();
+  return ctx.reply(buildPositionsText(rows, prices), HTML);
+});
+bot.command('paperhistory', async (ctx) => {
+  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  return ctx.reply(buildHistoryText(await listClosedPositions(ctx.from.id)), HTML);
+});
+
+bot.callbackQuery('pe:show', async (ctx) => { await ctx.answerCallbackQuery(); return showStrategy(ctx); });
+bot.callbackQuery('pe:pos', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const rows = await listOpenPositions(ctx.from.id);
+  const prices = rows.length ? await callPrices(rows.map((r) => r.mint)) : new Map();
+  return ctx.reply(buildPositionsText(rows, prices), HTML);
+});
+bot.callbackQuery('pe:hist', async (ctx) => { await ctx.answerCallbackQuery(); return ctx.reply(buildHistoryText(await listClosedPositions(ctx.from.id)), HTML); });
+bot.callbackQuery('pe:tog', async (ctx) => {
+  const s = await getStrategy(ctx.from.id);
+  const updated = await updateStrategy(ctx.from.id, { enabled: !s.enabled });
+  await ctx.answerCallbackQuery({ text: updated.enabled ? 'Strategy on' : 'Strategy off' });
+  return ctx.editMessageText(buildStrategyText(updated), { ...HTML, reply_markup: strategyKb(updated) }).catch(() => {});
+});
+bot.callbackQuery(/^pe:(min_mcap_usd|max_mcap_usd|alloc_pct|tp_pct|sl_pct|max_open)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  paperEdit.set(ctx.from.id, ctx.match[1]);
+  return ctx.reply(STRATEGY_PROMPT[ctx.match[1]]);
+});
+
 bot.command('trade', (ctx) => ctx.reply(`https://t.me/${TRADE_USERNAME}`));
 bot.command('launch', (ctx) => ctx.reply(`https://t.me/${LAUNCH_USERNAME}`));
 bot.command('scan', showTrending);
@@ -1141,6 +1225,19 @@ bot.callbackQuery(new RegExp(`^uw:${MINT}$`), (ctx) => doUnwatch(ctx, ctx.match[
 bot.on('message:text', async (ctx, next) => {
   const text = ctx.message.text;
   if (text.startsWith('/')) return next();
+  if (!isGroup(ctx) && paperEdit.has(ctx.from.id)) {
+    const field = paperEdit.get(ctx.from.id);
+    paperEdit.delete(ctx.from.id);
+    const raw = text.trim().toLowerCase();
+    if ((field === 'min_mcap_usd' || field === 'max_mcap_usd') && (raw === 'any' || raw === 'none')) {
+      const s = await updateStrategy(ctx.from.id, { [field]: null });
+      return ctx.reply(buildStrategyText(s), { ...HTML, reply_markup: strategyKb(s) });
+    }
+    const n = Number(raw.replace(/[,$%]/g, ''));
+    if (!Number.isFinite(n) || n < 0) return ctx.reply('That is not a number I can use. Try again: ' + STRATEGY_PROMPT[field]);
+    const s = await updateStrategy(ctx.from.id, { [field]: field === 'max_open' ? Math.max(1, Math.round(n)) : n });
+    return ctx.reply(buildStrategyText(s), { ...HTML, reply_markup: strategyKb(s) });
+  }
   if (isGroup(ctx)) {
     const mint = extractMint(text);
     if (!mint) return;
@@ -1275,6 +1372,39 @@ async function checkCalls() {
   }
 }
 
+// Paper trading: checks every open position's current price against its owner's take-profit / stop-loss and closes it, crediting the balance back.
+let checkingPaper = false;
+async function checkPaperPositions() {
+  if (checkingPaper) return;
+  checkingPaper = true;
+  try {
+    const rows = await listOpenPositions();
+    if (!rows.length) return;
+    const [prices, strategies] = await Promise.all([callPrices(rows.map((r) => r.mint)), listStrategiesByIds(rows.map((r) => r.telegram_id))]);
+    let closed = 0;
+    for (const r of rows) {
+      const strategy = strategies.get(String(r.telegram_id));
+      if (!strategy) continue; // shouldn't happen: every account gets a strategy row on creation
+      const price = prices.get(r.mint)?.priceUsd ?? null;
+      const pct = pnlPct(Number(r.entry_price_usd), price);
+      const reason = shouldClose(strategy, pct);
+      if (!reason) continue;
+      const sizeUsd = Number(r.size_usd);
+      const payoutUsd = Math.max(0, sizeUsd * (1 + pct / 100));
+      const pnlUsd = payoutUsd - sizeUsd;
+      const telegramId = await closePosition(r.id, { exitPriceUsd: price, exitMcapUsd: prices.get(r.mint)?.marketCapUsd ?? null, reason, payoutUsd, pnlUsd, pnlPct: pct });
+      if (!telegramId) continue; // already closed elsewhere
+      closed++;
+      bot.api.sendMessage(telegramId, buildCloseNotice({ symbol: r.symbol, mint: r.mint, reason, pnlUsd, pnlPct: pct }), HTML).catch(() => {});
+    }
+    if (closed) console.log(`paper check: ${rows.length} open, ${closed} closed`);
+  } catch (e) {
+    console.error('paper check error:', e.message);
+  } finally {
+    checkingPaper = false;
+  }
+}
+
 // /milestones: show or change this group's multiplier posts (admins change, everyone can look).
 bot.command(['milestones', 'multipliers', 'mx'], async (ctx) => {
   if (!isGroup(ctx)) return ctx.reply('Multiplier posts are for groups: when a call in the group reaches 2x, 5x, 10x… I post a card there.');
@@ -1340,6 +1470,7 @@ async function xCall(chatId, handle, tweet, mint) {
   await upsertUser({ id: xCallerId(handle), username: handle }); // calls.caller_id must point at a users row
   const r = await recordFirstCall({ chatId, mint, symbol: m.symbol, callerId: xCallerId(handle), callerName: `@${handle}`, priceUsd: m.priceUsd, mcapUsd: m.marketCapUsd, sourceUrl: `https://x.com/${handle}/status/${tweet.id}` });
   if (!r.first) return; // someone already called it in this group
+  tryPaperBuy({ mint, symbol: m.symbol, priceUsd: m.priceUsd, mcapUsd: m.marketCapUsd }).catch((e) => console.error('paper buy error:', e.message));
   const text = `${buildXCallHeader(handle, tweet.id)}\n\n${buildScanCard({ mint, market: m, security: card.security, intel: card.intel, callLine: buildCallLine(r.call, m.priceUsd), watched: false })}`;
   const url = m.headerUrl || m.imageUrl || null;
   const sent = await bot.api.sendMessage(chatId, text, { ...HTML, reply_markup: cardKeyboard(mint, false, true), ...(url ? { link_preview_options: { url, show_above_text: true, prefer_large_media: true } } : {}) });
@@ -1465,6 +1596,9 @@ bot.start({
       { command: 'dp', description: 'Check DEX Paid status' },
       { command: 'p', description: 'Simple price query' },
       { command: 'bm', description: 'View the bubblemap' },
+      { command: 'paper', description: 'Paper trading: balance & positions' },
+      { command: 'strategy', description: 'Paper trading: edit your rules' },
+      { command: 'positions', description: 'Paper trading: open positions' },
       { command: 'c', description: 'Open a chart' },
       { command: 's', description: 'Search for a token' },
       { command: 'i', description: 'Get top coins' },
@@ -1515,6 +1649,7 @@ bot.start({
     clearOldCache().finally(() => refillArt());
     setInterval(checkAlerts, 60_000);
     setInterval(checkCalls, 90_000);
+    setInterval(checkPaperPositions, 60_000);
     setInterval(checkTargets, 45_000);
     setInterval(checkReminders, 20_000);
     ensureXTables().then(() => setInterval(checkXFeeds, 10_000)).catch((e) => console.error('x tables error:', e.message));
