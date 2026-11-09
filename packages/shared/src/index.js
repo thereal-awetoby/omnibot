@@ -8,3 +8,4 @@ export * from './targets.js';
 export * from './xfollow.js';
 export * from './chatmove.js';
 export * from './launch.js';
+export * from './paper.js';
