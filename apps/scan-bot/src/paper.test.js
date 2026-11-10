@@ -5,6 +5,7 @@ import {
   partialTpHit, partialCloseSize, buildSparkline,
   buildPositionLine, buildPositionsText, buildHistoryText, buildOpenNotice, buildCloseNotice, buildStrategyText,
   buildAgentCallNotice, buildMilestoneNotice, buildStatsText, buildPartialCloseNotice, buildWhyText,
+  buildPositionCard, positionKeyboard,
 } from './paper.js';
 
 test('matchesStrategy', () => {
@@ -201,4 +202,36 @@ test('buildWhyText shows the fuller reasoning, or says plainly there is none', (
     buildWhyText({ mint: 'x', symbol: 'DOG', open_mode: 'agent', decision_reason: 'Strong volume', decision_detail: 'Volume tripled and narrative is building.' }),
     /Strong volume.*Volume tripled and narrative is building\./s,
   );
+});
+
+// ---------- Position cards (/pos) ----------
+
+test('buildPositionCard shows entry, live PnL and value', () => {
+  const c = buildPositionCard(
+    { id: 7, symbol: 'DOG', mint: 'Mint111', entry_price_usd: 0.001, size_usd: 50, opened_at: new Date(Date.now() - 5 * 60000).toISOString() },
+    0.0015,
+  );
+  assert.match(c, /DOG/);
+  assert.match(c, /Mint111/);
+  assert.match(c, /\+50\.00%/);
+  assert.match(c, /\+\$25\.00/);
+  assert.match(c, /Value: \$75\.00/);
+  assert.match(c, /no real money/);
+});
+
+test('buildPositionCard falls back to entry price when no live price', () => {
+  const c = buildPositionCard(
+    { id: 7, symbol: null, mint: 'Mint111', entry_price_usd: 0.002, size_usd: 10, opened_at: new Date().toISOString() },
+    null,
+  );
+  assert.match(c, /Token/);
+  assert.match(c, /0\.00%/);
+});
+
+test('positionKeyboard has refresh/share and 25/50/100 close buttons', () => {
+  const kb = positionKeyboard(42);
+  const flat = kb.inline_keyboard.flat();
+  assert.deepEqual(flat.map((b) => b.callback_data), [
+    'pp:refresh:42', 'pp:share:42', 'pp:close:42:25', 'pp:close:42:50', 'pp:close:42:100',
+  ]);
 });

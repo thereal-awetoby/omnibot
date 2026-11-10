@@ -18,6 +18,7 @@ import {
   partialTpHit, partialCloseSize,
   buildAccountText, buildStrategyText, buildPositionsText, buildHistoryText, buildOpenNotice, buildCloseNotice,
   buildAgentCallNotice, buildMilestoneNotice, buildStatsText, buildPartialCloseNotice, buildWhyText,
+  buildPositionCard, positionKeyboard,
 } from './paper.js';
 import { decideWithAgent } from './agent.js';
 import { buildPaperPnlSvg, buildPaperPnlCaption } from './pnlcard.js';
@@ -1377,6 +1378,62 @@ bot.command('strategy', async (ctx) => {
   if (!paperAccessAllowed(ctx.from.id)) return ctx.reply(PAPER_RESTRICTED_MSG);
   return showStrategy(ctx);
 });
+// Better position view: one card per open position, with Refresh / Share PnL / partial-close buttons.
+bot.command('pos', async (ctx) => {
+  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  const open = await listOpenPositions(ctx.from.id);
+  if (!open.length) return ctx.reply('No open paper positions.');
+  const prices = await callPrices(open.map((p) => p.mint)).catch(() => new Map());
+  for (const p of open) {
+    const price = prices.get(p.mint)?.priceUsd;
+    await ctx.reply(buildPositionCard(p, price), { ...HTML, reply_markup: positionKeyboard(p.id) });
+  }
+});
+
+bot.callbackQuery(/^pp:(refresh|share|close):(\d+)(?::(\d+))?$/, async (ctx) => {
+  const [, action, idStr, pctStr] = ctx.match;
+  const id = Number(idStr);
+  // getPaperPosition is owner-scoped: nobody can refresh/share/close someone else's position from an old card.
+  const pos = await getPaperPosition(ctx.from.id, id);
+  if (!pos || pos.status !== 'open') return ctx.answerCallbackQuery({ text: 'Position not found or already closed' });
+
+  if (action === 'refresh') {
+    const prices = await callPrices([pos.mint]).catch(() => new Map());
+    const price = prices.get(pos.mint)?.priceUsd;
+    await ctx.editMessageText(buildPositionCard(pos, price), { ...HTML, reply_markup: positionKeyboard(id) }).catch(() => {});
+    return ctx.answerCallbackQuery({ text: 'Refreshed' });
+  }
+
+  if (action === 'share') {
+    const r = await buildAndSharePaperCard(ctx.from.id, id);
+    return ctx.answerCallbackQuery({ text: r.ok ? 'PnL card sent' : 'Could not build that card right now' });
+  }
+
+  // close: 100% is a full manual close; 25%/50% peel off a slice via the same partial-close accounting the
+  // partial-TP tier uses (which also means a manual partial consumes that one-time partial slot).
+  const pctClose = Number(pctStr) || 100;
+  const prices = await callPrices([pos.mint]).catch(() => new Map());
+  const price = prices.get(pos.mint)?.priceUsd ?? null;
+  const pnl = pnlPct(Number(pos.entry_price_usd), price);
+  if (pnl == null) return ctx.answerCallbackQuery({ text: 'No price available right now — try again shortly' });
+  const sizeUsd = Number(pos.size_usd);
+  let ownerId = null, closeUsd = 0;
+  if (pctClose >= 100) {
+    closeUsd = sizeUsd;
+    const payoutUsd = Math.max(0, sizeUsd * (1 + pnl / 100));
+    ownerId = await closePosition(id, { exitPriceUsd: price, exitMcapUsd: prices.get(pos.mint)?.marketCapUsd ?? null, reason: 'manual', payoutUsd, pnlUsd: payoutUsd - sizeUsd, pnlPct: pnl });
+  } else {
+    closeUsd = Math.floor(sizeUsd * (pctClose / 100) * 100) / 100;
+    if (closeUsd <= 0) return ctx.answerCallbackQuery({ text: 'That slice is too small to close' });
+    const payoutUsd = Math.max(0, closeUsd * (1 + pnl / 100));
+    ownerId = await closePartialPosition(id, { portionSizeUsd: closeUsd, payoutUsd, pnlUsd: payoutUsd - closeUsd });
+  }
+  if (!ownerId) return ctx.answerCallbackQuery({ text: 'Position not found or already closed' });
+  snapshotEquity(ownerId).catch((e) => console.error('equity snapshot error:', e.message));
+  await ctx.editMessageText(`Closed ${pctClose}% of ${pos.symbol || 'position'} (~$${closeUsd.toFixed(2)})`, HTML).catch(() => {});
+  return ctx.answerCallbackQuery({ text: `Closed ${pctClose}%` });
+});
+
 bot.command('positions', async (ctx) => {
   if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
   const rows = await listOpenPositions(ctx.from.id);

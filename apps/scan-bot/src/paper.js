@@ -156,6 +156,45 @@ export function buildPositionLine({ mint, symbol, entry_price_usd, size_usd, ope
   return `${pct > 0 ? '🟢' : pct < 0 ? '🔴' : '⚪'} ${sym} · ${formatUsd(Number(size_usd))} · ${pctTxt} · ${age}m ago${why}`;
 }
 
+// Trojan-style position card for a single open paper position
+export function buildPositionCard({ id, symbol, mint, entry_price_usd, size_usd, opened_at }, currentPriceUsd) {
+  const entry = Number(entry_price_usd);
+  const size = Number(size_usd);
+  const now = Number(currentPriceUsd) || entry;
+  const pct = pnlPct(entry, now) ?? 0;
+  const pnlUsd = size * (pct / 100);
+  const value = size + pnlUsd;
+  const sign = pct >= 0 ? '+' : '';
+  const color = pct >= 0 ? '🟢' : '🔴';
+  const age = Math.max(1, Math.round((Date.now() - new Date(opened_at).getTime()) / 60000));
+
+  return (
+    `📈 <b>${esc(symbol || 'Token')}</b> ${color}\n` +
+    `<code>${mint}</code>\n\n` +
+    `Entry: $${entry.toFixed(6)} · Size: $${size.toFixed(2)}\n` +
+    `Now: $${now.toFixed(6)}\n` +
+    `PnL: <b>${sign}${pct.toFixed(2)}%</b> (${sign}$${pnlUsd.toFixed(2)})\n` +
+    `Value: $${value.toFixed(2)} · ${age}m ago\n\n` +
+    `<i>Paper position · no real money</i>`
+  );
+}
+
+export function positionKeyboard(id) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '🔄 Refresh', callback_data: `pp:refresh:${id}` },
+        { text: '📤 Share PnL', callback_data: `pp:share:${id}` },
+      ],
+      [
+        { text: '25%', callback_data: `pp:close:${id}:25` },
+        { text: '50%', callback_data: `pp:close:${id}:50` },
+        { text: '100%', callback_data: `pp:close:${id}:100` },
+      ],
+    ],
+  };
+}
+
 export function buildPositionsText(rows, prices) {
   if (rows.length === 0) return 'No open paper positions. They open automatically once your strategy is on and a call matches.';
   return '📈 <b>Open paper positions</b>\n\n' + rows.map((r) => buildPositionLine(r, prices.get(r.mint)?.priceUsd ?? null)).join('\n');
