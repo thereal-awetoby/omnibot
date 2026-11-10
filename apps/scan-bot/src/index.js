@@ -1442,6 +1442,34 @@ bot.command('paperreset', async (ctx) => {
   return ctx.reply('Your paper account has been reset.');
 });
 
+// Auto-enable agent mode for the owner on first use (no manual strategy needed). Runs once at startup;
+// a no-op unless OWNER_TELEGRAM_ID is set. Note: tp_pct/sl_pct are intentionally left at their schema
+// defaults (100/40) — those columns are NOT NULL, so the supplied patch's null values would have failed
+// the whole strategy UPDATE and silently applied nothing.
+const OWNER_TELEGRAM_ID = process.env.OWNER_TELEGRAM_ID;
+async function ensureOwnerAgentMode() {
+  if (!OWNER_TELEGRAM_ID) return;
+  try {
+    const existing = await getStrategy(OWNER_TELEGRAM_ID);
+    if (!existing || existing.mode !== 'agent' || !existing.enabled) {
+      await upsertUser({ id: OWNER_TELEGRAM_ID, username: null }); // paper tables FK to users — make sure the row exists
+      await ensurePaperAccount(OWNER_TELEGRAM_ID);
+      await updateStrategy(OWNER_TELEGRAM_ID, {
+        enabled: true,
+        mode: 'agent',
+        agent_prompt: 'You are an autonomous meme coin paper trader. Look at new calls and decide whether to buy, call, or skip based on narrative, momentum, and risk. Prefer low market cap tokens under 30k. Use small sizes. Be selective. No real money.',
+        min_mcap_usd: null,
+        max_mcap_usd: null,
+        alloc_pct: 5,
+        max_open: 5,
+      });
+      console.log('Owner agent mode auto-enabled');
+    }
+  } catch (e) {
+    console.error('ensureOwnerAgentMode error:', e.message);
+  }
+}
+
 bot.callbackQuery('pe:show', async (ctx) => { await ctx.answerCallbackQuery(); return showStrategy(ctx); });
 bot.callbackQuery('pe:pos', async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -1910,7 +1938,8 @@ async function runMoveCalls(ctx) {
 
 bot.catch((err) => console.error('bot error:', err.error?.message ?? err.message));
 bot.start({
-  onStart: (me) => {
+  onStart: async (me) => {
+    await ensureOwnerAgentMode();
     console.log(`Omni Scan Bot running as @${me.username}`);
     console.log(me.can_read_all_group_messages
       ? 'Groups: I can read every message (Group Privacy is off).'
