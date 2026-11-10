@@ -1,4 +1,5 @@
 import dns from 'node:dns';
+import { createServer } from 'node:http';
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import {
   upsertUser, fetchPairsByTokens, fetchTrending, fetchTokenMarket, esc, formatUsd,
@@ -1994,6 +1995,25 @@ async function runMoveCalls(ctx) {
 }
 
 bot.catch((err) => console.error('bot error:', err.error?.message ?? err.message));
+
+// Tiny health server so Render free Web Service doesn't time out / sleep without inbound traffic:
+// answers /health and / with a plain 'ok' and 404s everything else. The Mini App server (when
+// MINIAPP_URL is set) is separate on MINIAPP_PORT; this one only exists to satisfy $PORT checks.
+const health = createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok');
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+health.on('error', (e) => console.error('health server error:', e.message));
+const HEALTH_PORT = process.env.PORT || 10000;
+health.listen(HEALTH_PORT, '0.0.0.0', () => {
+  console.log(`Health server listening on port ${HEALTH_PORT}`);
+});
+
 bot.start({
   onStart: async (me) => {
     await ensureOwnerAgentMode();
