@@ -92,13 +92,17 @@ test('buildPaperJson: equity = cash + open positions at current value, unrealize
   assert.equal(j.realizedUsd, 20);
   assert.equal(j.investedUsd, 100);
   assert.equal(j.equityUsd, 400 + 100 + 25); // cash + size + unrealized (25 gain on the priced one, 0 on the other)
-  assert.deepEqual(j.strategy, { enabled: true, minMcapUsd: 5000, maxMcapUsd: null, allocPct: 5, tpPct: 100, slPct: 40, maxOpen: 3 });
+  assert.deepEqual(j.strategy, {
+    enabled: true, minMcapUsd: 5000, maxMcapUsd: null, allocPct: 5, tpPct: 100, slPct: 40, maxOpen: 3,
+    mode: 'rules', agentPrompt: null, maxPositionUsd: null, dailyLossLimitPct: null,
+  });
   assert.equal(j.positions.length, 2);
   assert.equal(j.positions[0].pnlUsd, 25);
   assert.equal(j.positions[0].pnlPct, 50);
+  assert.equal(j.positions[0].openMode, 'rules');
   assert.equal(j.positions[1].pnlUsd, 0);
   assert.equal(j.positions[1].pnlPct, null); // no price: can't say a percent
-  assert.deepEqual(j.history, [{ id: 9, mint: MINT, symbol: 'OLD', pnlUsd: -10, pnlPct: -40, reason: 'sl', closedAt: 't0' }]);
+  assert.deepEqual(j.history, [{ id: 9, mint: MINT, symbol: 'OLD', pnlUsd: -10, pnlPct: -40, reason: 'sl', closedAt: 't0', openMode: 'rules', decisionReason: null }]);
 });
 
 test('buildPaperJson: brand-new account, no strategy row, nothing open or closed', () => {

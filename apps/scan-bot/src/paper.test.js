@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  matchesStrategy, hasRoom, sizeForTrade, pnlPct, shouldClose,
-  buildPositionLine, buildPositionsText, buildHistoryText, buildOpenNotice, buildCloseNotice,
+  matchesStrategy, hasRoom, sizeForTrade, capSize, withinDailyLimit, pnlPct, shouldClose,
+  buildPositionLine, buildPositionsText, buildHistoryText, buildOpenNotice, buildCloseNotice, buildStrategyText,
 } from './paper.js';
 
 test('matchesStrategy', () => {
@@ -62,7 +62,41 @@ test('buildHistoryText', () => {
 
 test('open/close notices', () => {
   assert.match(buildOpenNotice({ symbol: 'DOG', mint: 'x', sizeUsd: 25, mcapUsd: 12000 }), /\$DOG/);
+  assert.match(buildOpenNotice({ symbol: 'DOG', mint: 'x', sizeUsd: 25, mcapUsd: 12000 }), /matched your strategy/);
   const c = buildCloseNotice({ symbol: 'DOG', mint: 'x', reason: 'tp', pnlUsd: 25, pnlPct: 100 });
   assert.match(c, /take-profit/);
   assert.match(c, /\+\$25\.00/);
+});
+
+// ---------- Phase 3: Agent Mode ----------
+
+test('capSize caps per-trade size at max_position_usd, never above the balance', () => {
+  assert.equal(capSize({ alloc_pct: 5, max_position_usd: null }, 500), 25); // falls back to alloc_pct like sizeForTrade
+  assert.equal(capSize({ alloc_pct: 50, max_position_usd: 20 }, 500), 20); // $250 alloc, but capped at $20
+  assert.equal(capSize({ alloc_pct: 100, max_position_usd: null }, 10), 10); // never above balance
+  assert.equal(capSize({ alloc_pct: 5, max_position_usd: 100 }, 500, 30), 100); // agent's own sizePct (30%=$150) still gets capped
+  assert.equal(capSize({ alloc_pct: 5, max_position_usd: 100 }, 500, 2), 10); // agent's sizePct under the cap passes through
+});
+
+test('withinDailyLimit: no limit set never blocks, a hit limit does', () => {
+  assert.equal(withinDailyLimit({ daily_loss_limit_pct: null }, -1000, 500), true);
+  assert.equal(withinDailyLimit({ daily_loss_limit_pct: 20 }, -50, 500), true); // -10% of equity, under the 20% stop
+  assert.equal(withinDailyLimit({ daily_loss_limit_pct: 20 }, -100, 500), false); // -20% hits the stop
+  assert.equal(withinDailyLimit({ daily_loss_limit_pct: 20 }, 50, 500), true); // a winning day never trips it
+  assert.equal(withinDailyLimit({ daily_loss_limit_pct: 20 }, -50, 0), true); // no equity to measure against: don't block
+});
+
+test('buildStrategyText shows the mode and, outside Rules mode, the instructions', () => {
+  const rules = { enabled: true, mode: 'rules', min_mcap_usd: null, max_mcap_usd: null, alloc_pct: 5, tp_pct: 100, sl_pct: 40, max_open: 3, max_position_usd: null, daily_loss_limit_pct: null };
+  const t = buildStrategyText(rules);
+  assert.match(t, /Mode: <b>📏 Rules<\/b>/);
+  assert.doesNotMatch(t, /Instructions:/);
+
+  const agent = { ...rules, mode: 'agent', agent_prompt: 'Only narrative plays.' };
+  const a = buildStrategyText(agent);
+  assert.match(a, /Mode: <b>🤖 Agent<\/b>/);
+  assert.match(a, /Instructions: Only narrative plays\./);
+
+  const noPrompt = { ...rules, mode: 'hybrid', agent_prompt: null };
+  assert.match(buildStrategyText(noPrompt), /none set — the AI will use its own judgment/);
 });
