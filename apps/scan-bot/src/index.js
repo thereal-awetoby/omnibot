@@ -6,6 +6,7 @@ import {
   recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, setCallMessage, getMilestoneSetting, setMilestoneSetting, findCallerByName, callerRecord, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, getWorkerHeartbeat, query, MAX_X_FOLLOWS,
   MAX_WATCHES,
   ensurePaperAccount, getPaperAccount, getStrategy, updateStrategy, listEnabledStrategies, listStrategiesByIds, hasOpenPosition, openPosition, listOpenPositions, listClosedPositions, closePosition, getPaperPosition, getRealizedPnlToday, setPositionMessage, setPositionMilestone,
+  closePartialPosition, resetPaperAccount, recordEquitySnapshot, listEquitySnapshots,
 } from '@omnibot/shared';
 import {
   parseMintInput, extractMint, looksLikeMint, parseAlertPct, shouldAlert,
@@ -13,9 +14,10 @@ import {
   multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, parsePeriod, buildGroupBoard, buildGroupBoardText, buildUserCallsText, buildSocialLine, formatPriceCard, formatCount, shortPct,
 } from './scan.js';
 import {
-  matchesStrategy, hasRoom, capSize, withinDailyLimit, MIN_TRADE_USD, pnlPct, shouldClose,
+  matchesStrategy, matchesSourceFilter, hasRoom, capSize, withinDailyLimit, MIN_TRADE_USD, pnlPct, shouldClose,
+  partialTpHit, partialCloseSize,
   buildAccountText, buildStrategyText, buildPositionsText, buildHistoryText, buildOpenNotice, buildCloseNotice,
-  buildAgentCallNotice, buildMilestoneNotice, buildStatsText,
+  buildAgentCallNotice, buildMilestoneNotice, buildStatsText, buildPartialCloseNotice, buildWhyText,
 } from './paper.js';
 import { decideWithAgent } from './agent.js';
 import { buildPaperPnlSvg, buildPaperPnlCaption } from './pnlcard.js';
@@ -155,20 +157,22 @@ const dash = {
     return buildDashWatchlistJson(rows, prices);
   },
   getPaper: async (telegramId) => {
+    if (!paperAccessAllowed(telegramId)) return { restricted: true };
     await ensurePaperAccount(telegramId);
-    const [account, strategy, positions, history] = await Promise.all([
-      getPaperAccount(telegramId), getStrategy(telegramId), listOpenPositions(telegramId), listClosedPositions(telegramId, { limit: 20 }),
+    const [account, strategy, positions, history, equityHistory] = await Promise.all([
+      getPaperAccount(telegramId), getStrategy(telegramId), listOpenPositions(telegramId), listClosedPositions(telegramId, { limit: 20 }), listEquitySnapshots(telegramId, { limit: 100 }),
     ]);
     let prices = new Map();
     if (positions.length) { try { prices = await callPrices(positions.map((p) => p.mint)); } catch (e) { console.error('dashboard paper prices error:', e.message); } }
-    return buildPaperJson({ account, strategy, positions, prices, history });
+    return buildPaperJson({ account, strategy, positions, prices, history, equityHistory: equityHistory.map((e) => ({ equityUsd: Number(e.equity_usd), recordedAt: e.recorded_at })) });
   },
   updatePaperStrategy: async (telegramId, patch) => {
+    if (!paperAccessAllowed(telegramId)) return { restricted: true };
     await ensurePaperAccount(telegramId);
     await updateStrategy(telegramId, cleanStrategyPatch(patch));
     return dash.getPaper(telegramId);
   },
-  sharePaperCard: (telegramId, id) => buildAndSharePaperCard(telegramId, id),
+  sharePaperCard: (telegramId, id) => (paperAccessAllowed(telegramId) ? buildAndSharePaperCard(telegramId, id) : { ok: false, error: 'restricted' }),
   addWatch: async (telegramId, mint, customPct, username = null) => {
     // The Mini App talks straight to this server, bypassing the bot middleware that otherwise keeps the
     // users row up to date — watchlist.telegram_id is a foreign key to it, so make sure it exists first.
@@ -198,7 +202,7 @@ async function callFor(ctx, mint, market, record) {
       chatId: ctx.chat.id, mint, symbol: market.symbol, callerId: ctx.from.id, callerName: callerName(ctx.from),
       priceUsd: market.priceUsd, mcapUsd: market.marketCapUsd, msgId: ctx.message?.message_id ?? null,
     });
-    if (r.first) tryPaperBuy({ mint, symbol: market.symbol, priceUsd: market.priceUsd, mcapUsd: market.marketCapUsd, source: 'group call' }).catch((e) => console.error('paper buy error:', e.message));
+    if (r.first) tryPaperBuy({ mint, symbol: market.symbol, priceUsd: market.priceUsd, mcapUsd: market.marketCapUsd, source: 'group call', sourceId: String(ctx.chat.id) }).catch((e) => console.error('paper buy error:', e.message));
     return r.call;
   }
   return getFirstCall(ctx.chat.id, mint);
@@ -214,6 +218,18 @@ function agentAllowed(id) {
   list.push(now); agentUse.set(id, list);
   return true;
 }
+
+// Public access controls: reuses the same ADMIN_IDS convention already used elsewhere in this file (e.g.
+// /pnlbg) rather than inventing a new env var. PAPER_PUBLIC=1 opens paper trading to everyone regardless of
+// ADMIN_IDS. Otherwise, if ADMIN_IDS is set, only those Telegram IDs may use it; if ADMIN_IDS is unset, paper
+// trading stays open to everyone (fail-open, so an existing install is never locked out by this feature alone).
+function paperAccessAllowed(telegramId) {
+  if (process.env.PAPER_PUBLIC === '1') return true;
+  const ids = (process.env.ADMIN_IDS ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+  if (!ids.length) return true;
+  return ids.includes(String(telegramId));
+}
+const PAPER_RESTRICTED_MSG = 'Paper trading on this bot is currently limited to its operator.';
 
 // Phase 5: a one-time-per-day heads-up when the daily loss stop trips, instead of silently doing nothing on
 // every signal — transparency (plan section 7) applies to being paused, not just to why a trade was taken.
@@ -238,16 +254,18 @@ function notifyDailyStopOnce(telegramId) {
 // Phase 4: the agent's decision can be 'call' — flag the token to the user with no paper trade, no capital risked.
 // Phase 5: the daily-loss stop and the per-trade size cap (capSize) are hard limits that now apply in EVERY
 // mode, not just Agent/Hybrid — "hard risk limits always apply" (plan section 7) covers rule-based trades too.
-async function tryPaperBuy({ mint, symbol, priceUsd, mcapUsd, source = null }) {
+async function tryPaperBuy({ mint, symbol, priceUsd, mcapUsd, source = null, sourceId = null }) {
   const strategies = await listEnabledStrategies();
   for (const s of strategies) {
+    if (!paperAccessAllowed(s.telegram_id)) continue; // public access controls: operator-only installs stay operator-only
     if (!hasRoom(s)) continue;
     if (await hasOpenPosition(s.telegram_id, mint)) continue; // already holding this one
+    if (!matchesSourceFilter(s, sourceId)) continue; // source filter: hard, applies in every mode
     const mode = s.mode ?? 'rules';
     const todayPnl = await getRealizedPnlToday(s.telegram_id).catch(() => 0);
     if (!withinDailyLimit(s, todayPnl, Number(s.balance_usd))) { notifyDailyStopOnce(s.telegram_id); continue; }
 
-    let decisionReason = null, sizePct = null;
+    let decisionReason = null, decisionDetail = null, sizePct = null;
     if (mode === 'rules') {
       if (!matchesStrategy(s, { mcapUsd })) continue;
     } else {
@@ -257,17 +275,17 @@ async function tryPaperBuy({ mint, symbol, priceUsd, mcapUsd, source = null }) {
         instructions: s.agent_prompt, strategy: s, call: { mint, symbol, mcapUsd, source },
         apiKey: process.env.GEMINI_API_KEY,
         generateTextImpl: (args) => generateText({ ...args, models: process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : null }),
-      }).catch((e) => { console.error('agent decide error:', e.message); return { decision: 'skip', sizePct: null, reason: null }; });
+      }).catch((e) => { console.error('agent decide error:', e.message); return { decision: 'skip', sizePct: null, reason: null, detail: null }; });
       if (decision.decision === 'skip') continue;
       if (decision.decision === 'call') { // a heads-up only — no paper trade, no capital at risk
         bot.api.sendMessage(s.telegram_id, buildAgentCallNotice({ symbol, mint, mcapUsd, reason: decision.reason, source }), HTML).catch(() => {});
         continue;
       }
-      decisionReason = decision.reason; sizePct = decision.sizePct;
+      decisionReason = decision.reason; decisionDetail = decision.detail ?? null; sizePct = decision.sizePct;
     }
     const size = capSize(s, Number(s.balance_usd), sizePct); // hard per-trade cap in every mode (section 7)
     if (size < MIN_TRADE_USD) continue; // balance too low to bother
-    const id = await openPosition({ telegramId: s.telegram_id, mint, symbol, entryPriceUsd: priceUsd, entryMcapUsd: mcapUsd, sizeUsd: size, openMode: mode, decisionReason, source });
+    const id = await openPosition({ telegramId: s.telegram_id, mint, symbol, entryPriceUsd: priceUsd, entryMcapUsd: mcapUsd, sizeUsd: size, openMode: mode, decisionReason, decisionDetail, source });
     const sent = await bot.api.sendMessage(s.telegram_id, buildOpenNotice({ symbol, mint, sizeUsd: size, mcapUsd, openMode: mode, decisionReason, source }), HTML).catch(() => null); // user may have blocked the bot
     if (sent?.message_id) setPositionMessage(id, sent.message_id).catch(() => {}); // lets milestone/exit replies thread under this call
   }
@@ -1219,18 +1237,28 @@ const STRATEGY_PROMPT = {
   max_position_usd: 'Hard cap per trade in $, on top of Size % (e.g. 50), or "any" for no extra cap.',
   daily_loss_limit_pct: 'Stop opening new trades for the rest of the day once realized losses hit this % of your equity (e.g. 20), or "any" for no daily stop.',
   agent_prompt: 'Type the instructions you want the AI agent to follow (e.g. "Only tokens under 20k mcap from these accounts, use your judgment on momentum"), or "clear" to remove them.',
+  source_filter: 'Only paper-buy calls from these sources: a comma-separated list of group chat IDs and/or X handles (e.g. "-100123456,elonmusk"), or "clear" for any source.',
+  alloc_usd: 'Fixed $ amount per trade (used instead of Size %), e.g. 25. Type "clear" to go back to % sizing.',
+  partial_tp_pct: 'Take a partial profit once a trade is up this % (e.g. 50), or "clear" to turn off partial take-profit.',
+  partial_tp_close_pct: 'What % of the position to close at that partial take-profit tier (e.g. 50 for half), or "clear".',
 };
 // Phase 3: Agent Mode. Rules = the original v1 behavior. Agent = the AI decides every buy/skip, market-cap
 // range ignored. Hybrid = market-cap range is a hard filter, the AI decides among what passes it.
 const MODE_NEXT = { rules: 'hybrid', hybrid: 'agent', agent: 'rules' };
 const MODE_BTN_LABEL = { rules: '📏 Mode: Rules', hybrid: '🤝 Mode: Hybrid', agent: '🤖 Mode: Agent' };
+const SIZE_MODE_NEXT = { pct: 'fixed', fixed: 'pct' };
 const strategyKb = (s) => {
   const mode = s.mode ?? 'rules';
+  const sizeMode = s.size_mode ?? 'pct';
   const kb = new InlineKeyboard()
     .text(s.enabled ? '⚪ Turn off' : '🟢 Turn on', 'pe:tog').text(MODE_BTN_LABEL[mode] ?? mode, 'pe:mode').row()
     .text('Min MC', 'pe:min_mcap_usd').text('Max MC', 'pe:max_mcap_usd').row()
-    .text('Size %', 'pe:alloc_pct').text('Take-profit %', 'pe:tp_pct').text('Stop-loss %', 'pe:sl_pct').row()
-    .text('Max open', 'pe:max_open').text('Max $/trade', 'pe:max_position_usd').text('Daily stop %', 'pe:daily_loss_limit_pct').row();
+    .text(sizeMode === 'fixed' ? '💲 Fixed $' : 'Size %', sizeMode === 'fixed' ? 'pe:alloc_usd' : 'pe:alloc_pct')
+    .text(sizeMode === 'fixed' ? '% Switch to %' : '💲 Switch to $', 'pe:sizemode')
+    .text('Take-profit %', 'pe:tp_pct').row()
+    .text('Stop-loss %', 'pe:sl_pct').text('Max open', 'pe:max_open').text('Max $/trade', 'pe:max_position_usd').row()
+    .text('Daily stop %', 'pe:daily_loss_limit_pct').text('Sources', 'pe:source_filter').row()
+    .text('Partial TP %', 'pe:partial_tp_pct').text('Partial close %', 'pe:partial_tp_close_pct').row();
   if (mode !== 'rules') kb.text('🤖 Edit instructions', 'pe:agent_prompt').row();
   return kb.text('🗑 Close', 'x');
 };
@@ -1260,6 +1288,12 @@ function cleanStrategyPatch(body) {
   if (typeof body?.agentPrompt === 'string' || body?.agentPrompt === null) out.agent_prompt = body.agentPrompt ? String(body.agentPrompt).slice(0, 2000) : null;
   if (n(body?.maxPositionUsd) !== undefined) out.max_position_usd = clamp(n(body.maxPositionUsd), 0, 1e9);
   if (n(body?.dailyLossLimitPct) !== undefined) out.daily_loss_limit_pct = clamp(n(body.dailyLossLimitPct), 1, 100);
+  // Post-plan polish: source filter, fixed-$ sizing, a single partial take-profit tier.
+  if (typeof body?.sourceFilter === 'string' || body?.sourceFilter === null) out.source_filter = body.sourceFilter ? String(body.sourceFilter).slice(0, 500) : null;
+  if (typeof body?.sizeMode === 'string' && ['pct', 'fixed'].includes(body.sizeMode)) out.size_mode = body.sizeMode;
+  if (n(body?.allocUsd) !== undefined) out.alloc_usd = clamp(n(body.allocUsd), 0, 1e9);
+  if (n(body?.partialTpPct) !== undefined) out.partial_tp_pct = clamp(n(body.partialTpPct), 1, 100_000);
+  if (n(body?.partialTpClosePct) !== undefined) out.partial_tp_close_pct = clamp(n(body.partialTpClosePct), 1, 100);
   return out;
 }
 
@@ -1328,14 +1362,21 @@ const historyKeyboard = (rows) => {
 
 bot.command('paper', async (ctx) => {
   if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  if (!paperAccessAllowed(ctx.from.id)) return ctx.reply(PAPER_RESTRICTED_MSG);
   await ensurePaperAccount(ctx.from.id);
-  const [account, strategy, open] = await Promise.all([getPaperAccount(ctx.from.id), getStrategy(ctx.from.id), listOpenPositions(ctx.from.id)]);
+  const [account, strategy, open, equityHistory] = await Promise.all([
+    getPaperAccount(ctx.from.id), getStrategy(ctx.from.id), listOpenPositions(ctx.from.id), listEquitySnapshots(ctx.from.id, { limit: 30 }),
+  ]);
   const investedUsd = open.reduce((a, p) => a + Number(p.size_usd), 0);
-  return ctx.reply(buildAccountText({ account, strategy, openCount: open.length, investedUsd }), {
+  return ctx.reply(buildAccountText({ account, strategy, openCount: open.length, investedUsd, equityHistory: equityHistory.map((e) => Number(e.equity_usd)) }), {
     ...HTML, reply_markup: new InlineKeyboard().text('⚙️ Strategy', 'pe:show').text('📈 Positions', 'pe:pos').row().text('📜 History', 'pe:hist'),
   });
 });
-bot.command('strategy', async (ctx) => { if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.'); return showStrategy(ctx); });
+bot.command('strategy', async (ctx) => {
+  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  if (!paperAccessAllowed(ctx.from.id)) return ctx.reply(PAPER_RESTRICTED_MSG);
+  return showStrategy(ctx);
+});
 bot.command('positions', async (ctx) => {
   if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
   const rows = await listOpenPositions(ctx.from.id);
@@ -1352,9 +1393,53 @@ bot.command('paperhistory', async (ctx) => {
 // numbers cover the whole record, not just the recent handful the inline-buttons can share.
 bot.command('paperstats', async (ctx) => {
   if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
-  await ensurePaperAccount(ctx.from.id);
-  const rows = await listClosedPositions(ctx.from.id, { limit: 500 });
-  return ctx.reply(buildStatsText(rows), HTML);
+  const [rows, equityHistory] = await Promise.all([listClosedPositions(ctx.from.id, { limit: 500 }), listEquitySnapshots(ctx.from.id, { limit: 50 })]);
+  return ctx.reply(buildStatsText(rows, equityHistory.map((e) => Number(e.equity_usd))), HTML);
+});
+// /paperwhy <id>: the agent's fuller reasoning for one trade (deeper logging) — kept out of the main
+// open/close notices so those stay uncluttered, available on request for review.
+bot.command('paperwhy', async (ctx) => {
+  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  const id = Number((ctx.match ?? '').trim());
+  if (!Number.isFinite(id)) return ctx.reply('Usage: /paperwhy <trade id> — the id shown in /positions or /paperhistory.');
+  const p = await getPaperPosition(ctx.from.id, id);
+  return ctx.reply(buildWhyText(p), HTML);
+});
+// Self-service controls over one's own account — these act on the caller's own account, never anyone else's.
+bot.command('paperpause', async (ctx) => {
+  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  const s = await updateStrategy(ctx.from.id, { enabled: false });
+  return ctx.reply(buildStrategyText(s), { ...HTML, reply_markup: strategyKb(s) });
+});
+bot.command('paperresume', async (ctx) => {
+  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  if (!paperAccessAllowed(ctx.from.id)) return ctx.reply(PAPER_RESTRICTED_MSG);
+  const s = await updateStrategy(ctx.from.id, { enabled: true });
+  return ctx.reply(buildStrategyText(s), { ...HTML, reply_markup: strategyKb(s) });
+});
+bot.command('paperclose', async (ctx) => {
+  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  const id = Number((ctx.match ?? '').trim());
+  if (!Number.isFinite(id)) return ctx.reply('Usage: /paperclose <trade id> — closes that open position right now, at the current price.');
+  const p = await getPaperPosition(ctx.from.id, id);
+  if (!p || p.status !== 'open') return ctx.reply('No open position with that id.');
+  const price = (await callPrices([p.mint])).get(p.mint)?.priceUsd ?? null;
+  const pct = pnlPct(Number(p.entry_price_usd), price);
+  if (pct == null) return ctx.reply('No price available for that token right now — try again shortly.');
+  const sizeUsd = Number(p.size_usd);
+  const payoutUsd = Math.max(0, sizeUsd * (1 + pct / 100));
+  const pnlUsd = payoutUsd - sizeUsd;
+  const telegramId = await closePosition(id, { exitPriceUsd: price, exitMcapUsd: null, reason: 'manual', payoutUsd, pnlUsd, pnlPct: pct });
+  if (!telegramId) return ctx.reply('That position is already closed.');
+  snapshotEquity(telegramId).catch((e) => console.error('equity snapshot error:', e.message));
+  return ctx.reply(buildCloseNotice({ symbol: p.symbol, mint: p.mint, reason: 'manual', pnlUsd, pnlPct: pct }), HTML);
+});
+bot.command('paperreset', async (ctx) => {
+  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  const arg = (ctx.match ?? '').trim().toLowerCase();
+  if (arg !== 'confirm') return ctx.reply('This wipes your open positions, equity history, and balance back to the starting amount. This cannot be undone.\nTo confirm: /paperreset confirm');
+  await resetPaperAccount(ctx.from.id);
+  return ctx.reply('Your paper account has been reset.');
 });
 
 bot.callbackQuery('pe:show', async (ctx) => { await ctx.answerCallbackQuery(); return showStrategy(ctx); });
@@ -1387,7 +1472,14 @@ bot.callbackQuery('pe:mode', async (ctx) => {
   await ctx.answerCallbackQuery({ text: `Mode: ${next}` });
   return ctx.editMessageText(buildStrategyText(updated), { ...HTML, reply_markup: strategyKb(updated) }).catch(() => {});
 });
-bot.callbackQuery(/^pe:(min_mcap_usd|max_mcap_usd|alloc_pct|tp_pct|sl_pct|max_open|max_position_usd|daily_loss_limit_pct|agent_prompt)$/, async (ctx) => {
+bot.callbackQuery('pe:sizemode', async (ctx) => {
+  const s = await getStrategy(ctx.from.id);
+  const next = SIZE_MODE_NEXT[s.size_mode ?? 'pct'] ?? 'pct';
+  const updated = await updateStrategy(ctx.from.id, { size_mode: next });
+  await ctx.answerCallbackQuery({ text: next === 'fixed' ? 'Fixed $ sizing' : '% sizing' });
+  return ctx.editMessageText(buildStrategyText(updated), { ...HTML, reply_markup: strategyKb(updated) }).catch(() => {});
+});
+bot.callbackQuery(/^pe:(min_mcap_usd|max_mcap_usd|alloc_pct|alloc_usd|tp_pct|sl_pct|max_open|max_position_usd|daily_loss_limit_pct|agent_prompt|source_filter|partial_tp_pct|partial_tp_close_pct)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   paperEdit.set(ctx.from.id, ctx.match[1]);
   return ctx.reply(STRATEGY_PROMPT[ctx.match[1]]);
@@ -1421,8 +1513,13 @@ bot.on('message:text', async (ctx, next) => {
       const s = await updateStrategy(ctx.from.id, { agent_prompt: /^(clear|none|any)$/i.test(trimmed) ? null : trimmed.slice(0, 2000) });
       return ctx.reply(buildStrategyText(s), { ...HTML, reply_markup: strategyKb(s) });
     }
+    if (field === 'source_filter') {
+      const trimmed = text.trim();
+      const s = await updateStrategy(ctx.from.id, { source_filter: /^(clear|none|any)$/i.test(trimmed) ? null : trimmed.slice(0, 500) });
+      return ctx.reply(buildStrategyText(s), { ...HTML, reply_markup: strategyKb(s) });
+    }
     const raw = text.trim().toLowerCase();
-    if ((field === 'min_mcap_usd' || field === 'max_mcap_usd' || field === 'max_position_usd' || field === 'daily_loss_limit_pct') && (raw === 'any' || raw === 'none')) {
+    if ((field === 'min_mcap_usd' || field === 'max_mcap_usd' || field === 'max_position_usd' || field === 'daily_loss_limit_pct' || field === 'alloc_usd' || field === 'partial_tp_pct' || field === 'partial_tp_close_pct') && (raw === 'any' || raw === 'none' || raw === 'clear')) {
       const s = await updateStrategy(ctx.from.id, { [field]: null });
       return ctx.reply(buildStrategyText(s), { ...HTML, reply_markup: strategyKb(s) });
     }
@@ -1565,6 +1662,15 @@ async function checkCalls() {
   }
 }
 
+// Equity curve: equity = cash balance + the size of still-open positions (same figure /paper's "Equity" line
+// already shows) — a snapshot taken right after something happens to a user's account, not on a timer.
+async function snapshotEquity(telegramId) {
+  const [account, open] = await Promise.all([getPaperAccount(telegramId), listOpenPositions(telegramId)]);
+  if (!account) return;
+  const investedUsd = open.reduce((a, p) => a + Number(p.size_usd), 0);
+  await recordEquitySnapshot(telegramId, Number(account.balance_usd) + investedUsd);
+}
+
 // Paper trading: checks every open position's current price against its owner's take-profit / stop-loss and closes it, crediting the balance back.
 let checkingPaper = false;
 async function checkPaperPositions() {
@@ -1575,6 +1681,7 @@ async function checkPaperPositions() {
     if (!rows.length) return;
     const [prices, strategies] = await Promise.all([callPrices(rows.map((r) => r.mint)), listStrategiesByIds(rows.map((r) => r.telegram_id))]);
     let closed = 0;
+    const touchedUsers = new Set();
     for (const r of rows) {
       const strategy = strategies.get(String(r.telegram_id));
       if (!strategy) continue; // shouldn't happen: every account gets a strategy row on creation
@@ -1582,6 +1689,22 @@ async function checkPaperPositions() {
       const pct = pnlPct(Number(r.entry_price_usd), price);
       const reason = shouldClose(strategy, pct);
       if (!reason) {
+        // Partial take-profit: a single configurable tier peels off part of the position without closing it.
+        if (pct != null && partialTpHit(strategy, pct, r.partial_closed)) {
+          const sizeNowUsd = Number(r.size_usd);
+          const portionUsd = partialCloseSize(strategy, sizeNowUsd);
+          if (portionUsd > 0) {
+            const partPayoutUsd = Math.max(0, portionUsd * (1 + pct / 100));
+            const partPnlUsd = partPayoutUsd - portionUsd;
+            const ownerId = await closePartialPosition(r.id, { portionSizeUsd: portionUsd, payoutUsd: partPayoutUsd, pnlUsd: partPnlUsd });
+            if (ownerId) {
+              touchedUsers.add(ownerId);
+              bot.api.sendMessage(ownerId, buildPartialCloseNotice({ symbol: r.symbol, mint: r.mint, closedUsd: portionUsd, remainingUsd: sizeNowUsd - portionUsd, pnlUsd: partPnlUsd, pnlPct: pct }), {
+                ...HTML, ...(r.open_msg_id ? { reply_parameters: { message_id: Number(r.open_msg_id), allow_sending_without_reply: true } } : {}),
+              }).catch(() => {});
+            }
+          }
+        }
         // Phase 4: announce each new multiple once, as a reply under the original open/call message — the
         // same threading a real group call's multiplier posts use.
         const entry = Number(r.entry_price_usd);
@@ -1601,7 +1724,12 @@ async function checkPaperPositions() {
       const telegramId = await closePosition(r.id, { exitPriceUsd: price, exitMcapUsd, reason, payoutUsd, pnlUsd, pnlPct: pct });
       if (!telegramId) continue; // already closed elsewhere
       closed++;
+      touchedUsers.add(telegramId);
       await notifyPaperClose(telegramId, { ...r, status: 'closed', close_reason: reason, exit_price_usd: price, exit_mcap_usd: exitMcapUsd, pnl_usd: pnlUsd, pnl_pct: pct, closed_at: new Date() });
+    }
+    // Equity curve: an event-based snapshot per user touched this tick (full or partial close).
+    for (const telegramId of touchedUsers) {
+      snapshotEquity(telegramId).catch((e) => console.error('equity snapshot error:', e.message));
     }
     if (closed) console.log(`paper check: ${rows.length} open, ${closed} closed`);
   } catch (e) {
@@ -1676,7 +1804,7 @@ async function xCall(chatId, handle, tweet, mint) {
   await upsertUser({ id: xCallerId(handle), username: handle }); // calls.caller_id must point at a users row
   const r = await recordFirstCall({ chatId, mint, symbol: m.symbol, callerId: xCallerId(handle), callerName: `@${handle}`, priceUsd: m.priceUsd, mcapUsd: m.marketCapUsd, sourceUrl: `https://x.com/${handle}/status/${tweet.id}` });
   if (!r.first) return; // someone already called it in this group
-  tryPaperBuy({ mint, symbol: m.symbol, priceUsd: m.priceUsd, mcapUsd: m.marketCapUsd, source: 'X follow' }).catch((e) => console.error('paper buy error:', e.message));
+  tryPaperBuy({ mint, symbol: m.symbol, priceUsd: m.priceUsd, mcapUsd: m.marketCapUsd, source: 'X follow', sourceId: handle }).catch((e) => console.error('paper buy error:', e.message));
   const text = `${buildXCallHeader(handle, tweet.id)}\n\n${buildScanCard({ mint, market: m, security: card.security, intel: card.intel, callLine: buildCallLine(r.call, m.priceUsd), watched: false })}`;
   const url = m.headerUrl || m.imageUrl || null;
   const sent = await bot.api.sendMessage(chatId, text, { ...HTML, reply_markup: cardKeyboard(mint, false, true), ...(url ? { link_preview_options: { url, show_above_text: true, prefer_large_media: true } } : {}) });

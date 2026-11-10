@@ -4,6 +4,9 @@
 // constrained by hard risk limits (max_position_usd, daily_loss_limit_pct) that apply in every mode.
 // Phase 4 adds message threading (milestone/exit replies under the original call) and a signal_source
 // record. Phase 5 closes the "hard limits apply in every mode" gap and adds the stats needed to share results.
+// Post-plan polish adds: a source filter (specific X accounts/groups), fixed-$ sizing as an alternative to
+// %-of-balance, a single partial take-profit tier, fuller agent reasoning, equity snapshots for a performance
+// view, and account reset — all additive, lazy ALTER TABLEs, same convention as every prior phase.
 import { query } from './db.js';
 
 export const PAPER_START_USD = Number(process.env.PAPER_START_USD) || 500;
@@ -63,6 +66,29 @@ export function ensurePaperTables() {
     await query('ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS open_msg_id BIGINT');
     await query('ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS last_milestone_x NUMERIC');
     await query('ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS signal_source TEXT');
+    // Source filter: a comma list of X handles / group chat ids this strategy is restricted to (any mode) —
+    // the plan's own hybrid example ("only these 5 X accounts..."). Empty/null means no restriction.
+    await query('ALTER TABLE paper_strategy ADD COLUMN IF NOT EXISTS source_filter TEXT');
+    // Fixed-$ sizing as an alternative to %-of-balance. size_mode 'fixed' + alloc_usd together pick the size;
+    // the % fields stay as the default so every existing strategy keeps behaving exactly as before.
+    await query("ALTER TABLE paper_strategy ADD COLUMN IF NOT EXISTS size_mode TEXT NOT NULL DEFAULT 'pct'");
+    await query('ALTER TABLE paper_strategy ADD COLUMN IF NOT EXISTS alloc_usd NUMERIC');
+    // A single partial take-profit tier: close partial_tp_close_pct% of the position once pct reaches
+    // partial_tp_pct, then keep the remainder running toward the normal tp_pct/sl_pct. Null = no partial tier.
+    await query('ALTER TABLE paper_strategy ADD COLUMN IF NOT EXISTS partial_tp_pct NUMERIC');
+    await query('ALTER TABLE paper_strategy ADD COLUMN IF NOT EXISTS partial_tp_close_pct NUMERIC');
+    await query('ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS partial_closed BOOLEAN NOT NULL DEFAULT false');
+    // Deeper agent logging: decision_reason stays the short, shown-everywhere line; decision_detail is the
+    // agent's fuller reasoning, kept for audit/review via /paperwhy rather than cluttering every notice.
+    await query('ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS decision_detail TEXT');
+    // Equity snapshots for a performance view: one row per meaningful balance change (a trade closing).
+    await query(`CREATE TABLE IF NOT EXISTS paper_equity (
+      id            BIGSERIAL PRIMARY KEY,
+      telegram_id   BIGINT NOT NULL REFERENCES users(telegram_id),
+      equity_usd    NUMERIC NOT NULL,
+      recorded_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
+    await query('CREATE INDEX IF NOT EXISTS paper_equity_user_idx ON paper_equity (telegram_id, recorded_at)');
   })().catch((e) => { ready = null; throw e; });
   return ready;
 }
@@ -88,7 +114,7 @@ export async function ensurePaperAccount(telegramId) {
 }
 
 const STRATEGY_COLUMNS = 'telegram_id, enabled, min_mcap_usd, max_mcap_usd, alloc_pct, tp_pct, sl_pct, max_open, ' +
-  'mode, agent_prompt, max_position_usd, daily_loss_limit_pct';
+  'mode, agent_prompt, max_position_usd, daily_loss_limit_pct, source_filter, size_mode, alloc_usd, partial_tp_pct, partial_tp_close_pct';
 
 export async function getStrategy(telegramId) {
   await ensurePaperTables();
@@ -99,6 +125,7 @@ export async function getStrategy(telegramId) {
 const STRATEGY_FIELDS = [
   'enabled', 'min_mcap_usd', 'max_mcap_usd', 'alloc_pct', 'tp_pct', 'sl_pct', 'max_open',
   'mode', 'agent_prompt', 'max_position_usd', 'daily_loss_limit_pct',
+  'source_filter', 'size_mode', 'alloc_usd', 'partial_tp_pct', 'partial_tp_close_pct',
 ];
 export async function updateStrategy(telegramId, patch) {
   await ensurePaperTables();
@@ -122,7 +149,8 @@ export async function listEnabledStrategies() {
   await ensurePaperTables();
   const { rows } = await query(
     `SELECT s.telegram_id, s.enabled, s.min_mcap_usd, s.max_mcap_usd, s.alloc_pct, s.tp_pct, s.sl_pct, s.max_open,
-       s.mode, s.agent_prompt, s.max_position_usd, s.daily_loss_limit_pct, a.balance_usd,
+       s.mode, s.agent_prompt, s.max_position_usd, s.daily_loss_limit_pct,
+       s.source_filter, s.size_mode, s.alloc_usd, s.partial_tp_pct, s.partial_tp_close_pct, a.balance_usd,
        (SELECT count(*) FROM paper_positions p WHERE p.telegram_id = s.telegram_id AND p.status = 'open') AS open_count
      FROM paper_strategy s JOIN paper_accounts a ON a.telegram_id = s.telegram_id WHERE s.enabled = true`);
   return rows;
@@ -148,13 +176,14 @@ export async function hasOpenPosition(telegramId, mint) {
 // Opens a position and debits the account balance in one go.
 // openMode/decisionReason are the transparency record (plan section 7): how this trade was decided
 // ('rules' or 'agent'/'hybrid') and, in a sentence, why — a rule match or the agent's own reasoning.
+// decisionDetail is the agent's fuller reasoning (deeper logging, kept for /paperwhy, not shown everywhere).
 // source records where the signal came from (group call / X follow), for the PnL card and history.
-export async function openPosition({ telegramId, mint, symbol, entryPriceUsd, entryMcapUsd, sizeUsd, openMode = 'rules', decisionReason = null, source = null }) {
+export async function openPosition({ telegramId, mint, symbol, entryPriceUsd, entryMcapUsd, sizeUsd, openMode = 'rules', decisionReason = null, decisionDetail = null, source = null }) {
   await ensurePaperTables();
   const { rows } = await query(
-    `INSERT INTO paper_positions (telegram_id, mint, symbol, entry_price_usd, entry_mcap_usd, size_usd, open_mode, decision_reason, signal_source)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-    [telegramId, mint, symbol ?? null, entryPriceUsd, entryMcapUsd ?? null, sizeUsd, openMode, decisionReason, source]);
+    `INSERT INTO paper_positions (telegram_id, mint, symbol, entry_price_usd, entry_mcap_usd, size_usd, open_mode, decision_reason, decision_detail, signal_source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+    [telegramId, mint, symbol ?? null, entryPriceUsd, entryMcapUsd ?? null, sizeUsd, openMode, decisionReason, decisionDetail, source]);
   await query('UPDATE paper_accounts SET balance_usd = balance_usd - $2 WHERE telegram_id = $1', [telegramId, sizeUsd]);
   return rows[0].id;
 }
@@ -205,4 +234,43 @@ export async function closePosition(id, { exitPriceUsd, exitMcapUsd, reason, pay
   await query('UPDATE paper_accounts SET balance_usd = balance_usd + $2, realized_usd = realized_usd + $3 WHERE telegram_id = $1',
     [rows[0].telegram_id, payoutUsd, pnlUsd]);
   return rows[0].telegram_id;
+}
+
+// Partial take-profit: shrinks an OPEN position by portionSizeUsd and credits that slice's payout/PnL back to
+// the balance, same accounting as a full close, but the position stays open at its original entry price for
+// the remainder. Marks partial_closed so the tier only fires once per position.
+export async function closePartialPosition(id, { portionSizeUsd, payoutUsd, pnlUsd }) {
+  await ensurePaperTables();
+  const { rows } = await query(
+    `UPDATE paper_positions SET size_usd = size_usd - $2, partial_closed = true
+       WHERE id = $1 AND status = 'open' AND partial_closed = false RETURNING telegram_id`,
+    [id, portionSizeUsd]);
+  if (!rows[0]) return null; // already taken, or the position closed before this ran
+  await query('UPDATE paper_accounts SET balance_usd = balance_usd + $2, realized_usd = realized_usd + $3 WHERE telegram_id = $1',
+    [rows[0].telegram_id, payoutUsd, pnlUsd]);
+  return rows[0].telegram_id;
+}
+
+// Wipes a user's paper trading history back to a fresh start: balance reset, all positions gone. Strategy
+// settings (mode, filters, risk limits) are left alone — "reset account" means the money, not the config.
+export async function resetPaperAccount(telegramId) {
+  await ensurePaperTables();
+  await query('DELETE FROM paper_positions WHERE telegram_id = $1', [telegramId]);
+  await query('DELETE FROM paper_equity WHERE telegram_id = $1', [telegramId]);
+  await query('UPDATE paper_accounts SET balance_usd = $2, realized_usd = 0 WHERE telegram_id = $1', [telegramId, PAPER_START_USD]);
+}
+
+// Equity snapshots for a simple performance view (no real-time charting infra needed): one row per
+// meaningful balance change. Kept lightweight — bounded by trade count, not by a timer.
+export async function recordEquitySnapshot(telegramId, equityUsd) {
+  await ensurePaperTables();
+  await query('INSERT INTO paper_equity (telegram_id, equity_usd) VALUES ($1, $2)', [telegramId, equityUsd]);
+}
+
+export async function listEquitySnapshots(telegramId, { limit = 50 } = {}) {
+  await ensurePaperTables();
+  const { rows } = await query(
+    'SELECT equity_usd, recorded_at FROM paper_equity WHERE telegram_id = $1 ORDER BY recorded_at DESC LIMIT $2',
+    [telegramId, limit]);
+  return rows.reverse(); // oldest first, ready to plot or feed to a sparkline
 }

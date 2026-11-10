@@ -95,6 +95,7 @@ test('buildPaperJson: equity = cash + open positions at current value, unrealize
   assert.deepEqual(j.strategy, {
     enabled: true, minMcapUsd: 5000, maxMcapUsd: null, allocPct: 5, tpPct: 100, slPct: 40, maxOpen: 3,
     mode: 'rules', agentPrompt: null, maxPositionUsd: null, dailyLossLimitPct: null,
+    sourceFilter: null, sizeMode: 'pct', allocUsd: null, partialTpPct: null, partialTpClosePct: null,
   });
   assert.equal(j.positions.length, 2);
   assert.equal(j.positions[0].pnlUsd, 25);
@@ -103,6 +104,7 @@ test('buildPaperJson: equity = cash + open positions at current value, unrealize
   assert.equal(j.positions[1].pnlUsd, 0);
   assert.equal(j.positions[1].pnlPct, null); // no price: can't say a percent
   assert.deepEqual(j.history, [{ id: 9, mint: MINT, symbol: 'OLD', pnlUsd: -10, pnlPct: -40, reason: 'sl', closedAt: 't0', openMode: 'rules', decisionReason: null, source: null }]);
+  assert.deepEqual(j.equityCurve, []);
 });
 
 test('buildPaperJson: brand-new account, no strategy row, nothing open or closed', () => {
@@ -113,7 +115,23 @@ test('buildPaperJson: brand-new account, no strategy row, nothing open or closed
   assert.equal(j.strategy, null);
   assert.deepEqual(j.positions, []);
   assert.deepEqual(j.history, []);
-  assert.deepEqual(buildPaperJson({}), { balanceUsd: 0, realizedUsd: 0, investedUsd: 0, equityUsd: 0, strategy: null, positions: [], history: [] });
+  assert.deepEqual(buildPaperJson({}), { balanceUsd: 0, realizedUsd: 0, investedUsd: 0, equityUsd: 0, strategy: null, positions: [], history: [], equityCurve: [] });
+});
+
+test('buildPaperJson: exposes the equity curve and the post-plan-polish strategy fields', () => {
+  const account = { balance_usd: 100, realized_usd: 0 };
+  const strategy = {
+    enabled: true, min_mcap_usd: null, max_mcap_usd: null, alloc_pct: 5, tp_pct: 100, sl_pct: 40, max_open: 3,
+    source_filter: 'elonmusk,-100123', size_mode: 'fixed', alloc_usd: 25, partial_tp_pct: 50, partial_tp_close_pct: 50,
+  };
+  const equityHistory = [{ equityUsd: 100, recordedAt: 't0' }, { equityUsd: 120, recordedAt: 't1' }];
+  const j = buildPaperJson({ account, strategy, positions: [], prices: new Map(), history: [], equityHistory });
+  assert.equal(j.strategy.sourceFilter, 'elonmusk,-100123');
+  assert.equal(j.strategy.sizeMode, 'fixed');
+  assert.equal(j.strategy.allocUsd, 25);
+  assert.equal(j.strategy.partialTpPct, 50);
+  assert.equal(j.strategy.partialTpClosePct, 50);
+  assert.deepEqual(j.equityCurve, [{ equityUsd: 100, recordedAt: 't0' }, { equityUsd: 120, recordedAt: 't1' }]);
 });
 
 test('DASH_PAGE now has the Paper tab wired up: tab button, view, strategy fields, and the paper API calls', () => {

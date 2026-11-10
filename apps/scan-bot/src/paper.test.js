@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  matchesStrategy, hasRoom, sizeForTrade, capSize, withinDailyLimit, pnlPct, shouldClose,
+  matchesStrategy, matchesSourceFilter, hasRoom, sizeForTrade, capSize, withinDailyLimit, pnlPct, shouldClose,
+  partialTpHit, partialCloseSize, buildSparkline,
   buildPositionLine, buildPositionsText, buildHistoryText, buildOpenNotice, buildCloseNotice, buildStrategyText,
-  buildAgentCallNotice, buildMilestoneNotice, buildStatsText,
+  buildAgentCallNotice, buildMilestoneNotice, buildStatsText, buildPartialCloseNotice, buildWhyText,
 } from './paper.js';
 
 test('matchesStrategy', () => {
@@ -132,4 +133,72 @@ test('buildStatsText: win rate, realized PnL and the best trade', () => {
   assert.match(t, /Win rate: <b>50%<\/b> \(1\/2\)/);
   assert.match(t, /\+\$30\.00/); // net realized PnL
   assert.match(t, /Best trade: \$DOG \+100\.0%/);
+  assert.match(buildStatsText(rows, [100, 150, 80, 130]), /Equity curve: [▁▂▃▄▅▆▇█]+/);
+});
+
+// ---------- Post-plan: source filters ----------
+
+test('matchesSourceFilter: no filter allows everything; a filter restricts by handle/chat id', () => {
+  assert.equal(matchesSourceFilter({ source_filter: null }, 'elonmusk'), true);
+  assert.equal(matchesSourceFilter({ source_filter: '' }, null), true);
+  assert.equal(matchesSourceFilter({ source_filter: 'elonmusk, -100123' }, 'ElonMusk'), true); // case-insensitive
+  assert.equal(matchesSourceFilter({ source_filter: 'elonmusk,-100123' }, '-100123'), true);
+  assert.equal(matchesSourceFilter({ source_filter: 'elonmusk' }, 'someoneelse'), false);
+  assert.equal(matchesSourceFilter({ source_filter: 'elonmusk' }, null), false); // filter set, source unknown: don't guess
+});
+
+// ---------- Post-plan: fixed-$ sizing ----------
+
+test('capSize: fixed-$ sizing is used when size_mode is "fixed", still capped and bounded by balance', () => {
+  assert.equal(capSize({ size_mode: 'fixed', alloc_usd: 30, alloc_pct: 5 }, 500), 30);
+  assert.equal(capSize({ size_mode: 'fixed', alloc_usd: 1000, alloc_pct: 5 }, 500), 500); // never above balance
+  assert.equal(capSize({ size_mode: 'fixed', alloc_usd: 30, max_position_usd: 10 }, 500), 10); // hard cap still applies
+  assert.equal(capSize({ size_mode: 'pct', alloc_usd: 30, alloc_pct: 5 }, 500), 25); // pct mode ignores alloc_usd
+  assert.equal(capSize({ size_mode: 'fixed', alloc_usd: 30, alloc_pct: 5 }, 500, 10), 50); // agent's own sizePct still wins when given
+});
+
+// ---------- Post-plan: partial take-profit ----------
+
+test('partialTpHit fires once, at the configured tier', () => {
+  const s = { partial_tp_pct: 50, partial_tp_close_pct: 50 };
+  assert.equal(partialTpHit(s, 40, false), false); // not there yet
+  assert.equal(partialTpHit(s, 50, false), true);
+  assert.equal(partialTpHit(s, 80, false), true); // still fires even if it ran past the tier
+  assert.equal(partialTpHit(s, 80, true), false); // already taken
+  assert.equal(partialTpHit({ partial_tp_pct: null, partial_tp_close_pct: null }, 80, false), false); // no tier configured
+});
+
+test('partialCloseSize peels off the configured % of the current size', () => {
+  assert.equal(partialCloseSize({ partial_tp_close_pct: 50 }, 100), 50);
+  assert.equal(partialCloseSize({ partial_tp_close_pct: 33.333 }, 90), 29.99);
+});
+
+test('buildPartialCloseNotice', () => {
+  const n = buildPartialCloseNotice({ symbol: 'DOG', mint: 'x', closedUsd: 25, remainingUsd: 25, pnlUsd: 12.5, pnlPct: 50 });
+  assert.match(n, /Partial take-profit on \$DOG/);
+  assert.match(n, /\$25\.00/);
+  assert.match(n, /still running/);
+});
+
+// ---------- Post-plan: equity curve / sparkline ----------
+
+test('buildSparkline needs at least two points and scales between min/max', () => {
+  assert.equal(buildSparkline([100]), '');
+  assert.equal(buildSparkline([]), '');
+  const s = buildSparkline([100, 200]);
+  assert.equal(s.length, 2);
+  assert.notEqual(s[0], s[1]);
+});
+
+// ---------- Post-plan: deeper agent logging ----------
+
+test('buildWhyText shows the fuller reasoning, or says plainly there is none', () => {
+  assert.equal(buildWhyText(null), 'No paper trade with that id.');
+  assert.match(buildWhyText({ mint: 'x', symbol: 'DOG', open_mode: 'rules' }), /matched your rules/);
+  assert.match(buildWhyText({ mint: 'x', symbol: 'DOG', open_mode: 'agent', decision_reason: 'Strong volume', decision_detail: null }),
+    /Strong volume.*No fuller reasoning/s);
+  assert.match(
+    buildWhyText({ mint: 'x', symbol: 'DOG', open_mode: 'agent', decision_reason: 'Strong volume', decision_detail: 'Volume tripled and narrative is building.' }),
+    /Strong volume.*Volume tripled and narrative is building\./s,
+  );
 });

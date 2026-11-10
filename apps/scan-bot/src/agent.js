@@ -10,11 +10,14 @@ export const AGENT_SYSTEM_PROMPT =
   'SIMULATED paper position, just flag it to the user as worth watching (no capital risked), or skip it entirely. ' +
   'No real money ever moves. Follow the user\'s instructions and stay inside the stated limits. ' +
   'Reply with ONLY one line of compact JSON, no markdown, no commentary: ' +
-  '{"decision":"buy"|"call"|"skip","sizePct":0-100,"reason":"<one short sentence>"}. ' +
+  '{"decision":"buy"|"call"|"skip","sizePct":0-100,"reason":"<one short sentence>","detail":"<fuller reasoning>"}. ' +
   '"buy" opens a paper position now. "call" sends the user a heads-up with no trade (use this when the signal is ' +
   'interesting but you are not confident enough to size into it). "skip" does nothing. ' +
   '"sizePct" is how much of the user\'s available balance to risk, as a percentage, only used for "buy". ' +
-  'If you are unsure or the signal is weak, skip rather than buy. Keep "reason" under 140 characters.';
+  '"reason" is shown to the user everywhere (keep it under 140 characters); "detail" is logged for review only, ' +
+  'so it can be longer (up to a few sentences) — walk through what in the signal and the user\'s instructions drove ' +
+  'this call, omit it entirely if "reason" already says everything there is to say. ' +
+  'If you are unsure or the signal is weak, skip rather than buy.';
 
 // Builds the user-turn prompt: the call's context plus the user's own free-text instructions.
 // `instructions` is the strategy's agent_prompt; `hardLimits` describes the guards the agent cannot override
@@ -36,8 +39,10 @@ export function buildAgentPrompt({ instructions, mint, symbol, mcapUsd, liquidit
   return lines.join('\n');
 }
 
-// Pulls {decision, sizePct, reason} out of raw model text. Tolerates a code fence or stray prose around the
-// JSON (small models sometimes add either) but never guesses past what's actually there.
+// Pulls {decision, sizePct, reason, detail} out of raw model text. Tolerates a code fence or stray prose
+// around the JSON (small models sometimes add either) but never guesses past what's actually there.
+// `detail` is the deeper-logging field (plan section 7's transparency, extended): the short `reason` is what
+// gets shown everywhere, `detail` is the fuller version kept for /paperwhy and never shown unprompted.
 export function parseAgentDecision(text) {
   if (!text || typeof text !== 'string') return null;
   const match = text.match(/\{[^{}]*\}/s);
@@ -48,14 +53,18 @@ export function parseAgentDecision(text) {
   if (decision !== 'buy' && decision !== 'call' && decision !== 'skip') return null;
   const sizePct = Number(obj.sizePct);
   const reason = typeof obj.reason === 'string' ? obj.reason.trim().slice(0, 200) : '';
-  return { decision, sizePct: Number.isFinite(sizePct) ? Math.max(0, Math.min(100, sizePct)) : null, reason: reason || null };
+  const detail = typeof obj.detail === 'string' ? obj.detail.trim().slice(0, 1000) : '';
+  return {
+    decision, sizePct: Number.isFinite(sizePct) ? Math.max(0, Math.min(100, sizePct)) : null,
+    reason: reason || null, detail: detail || null,
+  };
 }
 
 // The one async entry point. Fails closed: any missing key, network error, timeout, or unparseable reply
 // comes back as a 'skip' with a reason saying so, never a silent 'buy' — matching the plan's own risk principle
 // that the agent is constrained, not a blank check.
 export async function decideWithAgent({ instructions, call, strategy, apiKey, generateTextImpl, now = Date.now }) {
-  if (!apiKey) return { decision: 'skip', sizePct: null, reason: 'agent unavailable (no AI key configured)' };
+  if (!apiKey) return { decision: 'skip', sizePct: null, reason: 'agent unavailable (no AI key configured)', detail: null };
   const prompt = buildAgentPrompt({
     instructions, ...call, balanceUsd: strategy.balance_usd, openCount: strategy.open_count, maxOpen: strategy.max_open,
     hardLimits: { maxPositionUsd: strategy.max_position_usd ?? null, allocPct: strategy.mode === 'agent' ? null : strategy.alloc_pct ?? null },
@@ -64,10 +73,10 @@ export async function decideWithAgent({ instructions, call, strategy, apiKey, ge
   try {
     text = await generateTextImpl({ system: AGENT_SYSTEM_PROMPT, prompt, apiKey, now: now() });
   } catch (e) {
-    return { decision: 'skip', sizePct: null, reason: `agent error: ${e.message}` };
+    return { decision: 'skip', sizePct: null, reason: `agent error: ${e.message}`, detail: null };
   }
   const parsed = parseAgentDecision(text);
-  if (!parsed) return { decision: 'skip', sizePct: null, reason: 'agent gave no usable answer' };
+  if (!parsed) return { decision: 'skip', sizePct: null, reason: 'agent gave no usable answer', detail: null };
   return parsed;
 }
 
