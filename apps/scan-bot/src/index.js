@@ -19,7 +19,7 @@ import {
 import { buildPaperPnlSvg, buildPaperPnlCaption } from './pnlcard.js';
 import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getTokenMeta, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
-import { loadBubbleCaption, loadBubbleData } from './bubbleload.js';
+import { loadBubbleData } from './bubbleload.js';
 import { renderPng, renderRaw } from './bubblemap.js';
 import { getArt, getMeme, refillArt, clearOldCache, OWN_DIR, sniffMime } from './memeart.js';
 import { usdFromQuote, quoteUsd, fetchLaunchMarket } from './curvemarket.js';
@@ -124,12 +124,12 @@ async function getMarket(mint) {
   return m;
 }
 
-// Bubblemap: with MINIAPP_URL set, private chats open our interactive map inside Telegram (hover, tap, copy).
-// Telegram only allows mini-app buttons in private chats; groups get the picture instead. The Bubblemaps.io link stays as an extra.
+// Bubblemap: tapping the button opens the real, interactive bubblemaps.io graph straight inside Telegram (no
+// extra message first). Telegram only allows that popup in private chats, so groups get a normal link instead
+// (a hard platform limit, not something this bot can change).
 const MINIAPP_URL = (process.env.MINIAPP_URL || '').trim().replace(/\/+$/, '');
-const miniMapUrl = (mint) => `${MINIAPP_URL}/map?mint=${mint}`;
 const bubbleUrl = (mint) => `https://v2.bubblemaps.io/map?address=${mint}&chain=solana`;
-const bubbleButton = (kb, mint, group = false) => (MINIAPP_URL && !group ? kb.webApp('🫧 Bubblemap', miniMapUrl(mint)) : kb.text('🫧 Bubblemap', `b:${mint}`));
+const bubbleButton = (kb, mint, group = false) => (group ? kb.url('🫧 Bubblemap', bubbleUrl(mint)) : kb.webApp('🫧 Bubblemap', bubbleUrl(mint)));
 
 // Data for the mini app: the same holders, funding groups and layout as the picture.
 async function loadMapData(mint) {
@@ -313,23 +313,16 @@ async function showDetail(ctx, kind, mint, build) {
   return sent;
 }
 
-// Bubblemap: the holder-concentration summary as text, plus a button straight into the real, interactive bubblemaps.io graph.
+// Bubblemap: one tap opens the real, interactive bubblemaps.io graph straight inside Telegram. No summary text first.
 async function sendBubblemap(ctx, mint) {
   if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
   const now = Date.now();
   if (now - (lastDetailAt.get(ctx.from.id) ?? 0) < 1500) return; // ignore rapid repeat taps
   lastDetailAt.set(ctx.from.id, now);
-  let caption = null;
-  try { caption = await withTyping(ctx, async () => loadBubbleCaption(mint, await cachedCard(mint))); }
-  catch (e) { console.error('bubblemap error:', e.message); }
   const origin = ctx.callbackQuery?.message?.message_id ?? ctx.message?.message_id;
   const reply = origin ? { reply_parameters: { message_id: origin, allow_sending_without_reply: true } } : {};
-  // The real bubblemaps.io, with its own zoom/pan graph: inside Telegram in a private chat, as a normal link in a group (Telegram only allows web_app popups in private chats).
-  const kb = new InlineKeyboard();
-  if (isGroup(ctx)) kb.url('🫧 Open interactive map', bubbleUrl(mint)); else kb.webApp('🫧 Open interactive map', bubbleUrl(mint));
-  kb.row().text('👥 Top holders', `h:${mint}`).text('👨‍💻 Dev', `d:${mint}`).row().text('🗑 Close', 'x');
-  const text = caption ?? 'Holder data was not available for the summary. You can still open the interactive map below.';
-  return ctx.reply(text, { ...HTML, reply_markup: kb, ...reply });
+  const kb = bubbleButton(new InlineKeyboard(), mint, isGroup(ctx)).row().text('🗑 Close', 'x');
+  return ctx.reply('🫧 <b>Bubble map</b>', { ...HTML, reply_markup: kb, ...reply });
 }
 
 async function buildHolders(mint) {
