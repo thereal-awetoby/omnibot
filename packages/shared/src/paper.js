@@ -122,6 +122,13 @@ export async function openPosition({ telegramId, mint, symbol, entryPriceUsd, en
   return rows[0].id;
 }
 
+// One position by id, scoped to its owner (used for sharing/recapping a specific trade).
+export async function getPaperPosition(telegramId, id) {
+  await ensurePaperTables();
+  const { rows } = await query('SELECT * FROM paper_positions WHERE telegram_id = $1 AND id = $2', [telegramId, id]);
+  return rows[0] ?? null;
+}
+
 export async function listOpenPositions(telegramId = null) {
   await ensurePaperTables();
   const { rows } = telegramId

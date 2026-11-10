@@ -67,6 +67,46 @@ export function buildPnlSvg({ symbol, callerName, entryMcap, peakMcap, x, ageTex
   ].join('');
 }
 
+// ---------- Paper trading recap card (Phase 2) ----------
+// Unlike the call brag card above, this one can show a loss: it is a personal trade recap, not a flex.
+const STATUS_TAG = { open: 'Open position', tp: 'Take-profit hit', sl: 'Stop-loss hit', manual: 'Closed manually' };
+
+export function buildPaperPnlSvg({ symbol, entryMcap, nowMcap, pct, status = 'open', ageText = null, sizeUsd = null }) {
+  const win = pct >= 0;
+  const col = win ? '#22c55e' : '#ef4444';
+  const sym = symbol ? `$${esc(plain(symbol))}` : 'Token';
+  const f = 'font-family="Arial, Helvetica, sans-serif"';
+  const symSize = sym.length > 11 ? 44 : sym.length > 8 ? 52 : 64;
+  const pctTxt = `${win ? '+' : ''}${Math.abs(pct) >= 100 ? pct.toFixed(0) : pct.toFixed(1)}%`;
+  const tag = STATUS_TAG[status] ?? 'Closed';
+  const nowLabel = status === 'open' ? 'Now' : 'Exit';
+  return [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="563" viewBox="0 0 1000 563">',
+    '<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1220"/><stop offset="1" stop-color="#111c33"/></linearGradient>',
+    `<radialGradient id="glow" cx="0.8" cy="0.1" r="0.7"><stop offset="0" stop-color="${col}" stop-opacity="0.28"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></radialGradient>`,
+    '<linearGradient id="sol" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#9945FF"/><stop offset="1" stop-color="#14F195"/></linearGradient></defs>',
+    '<g><rect width="1000" height="563" fill="url(#bg)"/><rect width="1000" height="563" fill="url(#glow)"/>',
+    `<text x="50" y="80" ${f} font-size="30" font-weight="700" fill="#e5e7eb">Omni Scan</text>`,
+    `<text x="950" y="80" text-anchor="end" ${f} font-size="22" font-weight="700" fill="#e5e7eb">📝 PAPER TRADE</text>`,
+    `<text x="50" y="190" ${f} font-size="${symSize}" font-weight="700" fill="#ffffff">${sym}</text>`,
+    `<text x="50" y="240" ${f} font-size="26" fill="#e5e7eb">${esc(tag)}${ageText ? ` · ${esc(ageText)}` : ''}</text>`,
+    `<text x="50" y="410" ${f} font-size="150" font-weight="700" fill="${col}">${pctTxt}</text>`,
+    '<rect x="50" y="450" width="900" height="2" fill="#ffffff" fill-opacity="0.25"/>',
+    `<text x="50" y="505" ${f} font-size="24" fill="#e5e7eb">Entry</text><text x="150" y="505" ${f} font-size="30" font-weight="700" fill="#e5e7eb">${formatUsd(entryMcap)}</text>`,
+    `<text x="380" y="505" ${f} font-size="24" fill="#e5e7eb">${esc(nowLabel)}</text><text x="470" y="505" ${f} font-size="30" font-weight="700" fill="${col}">${nowMcap != null ? formatUsd(nowMcap) : 'n/a'}</text>`,
+    sizeUsd != null ? `<text x="700" y="505" ${f} font-size="24" fill="#e5e7eb">Size</text><text x="765" y="505" ${f} font-size="30" font-weight="700" fill="#e5e7eb">${formatUsd(sizeUsd)}</text>` : '',
+    `<g transform="translate(892 469) scale(0.9)">${SOL_MARK}</g>`,
+    `<text x="50" y="545" ${f} font-size="17" fill="#9aa5b8">Paper trading — virtual balance, no real SOL moved.</text>`,
+    '</g></svg>',
+  ].join('');
+}
+
+export function buildPaperPnlCaption({ symbol, status = 'open', pct }) {
+  const sym = symbol ? `$${esc(symbol)}` : 'this token';
+  const tag = STATUS_TAG[status] ?? 'Closed';
+  return `📝 <b>Paper trade</b> · ${sym}\n${tag} · ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%\n<i>Virtual balance — not real money.</i>`;
+}
+
 export function buildPnlCaption({ symbol, callerName, callerId = null, sourceUrl = null, x, milestone = false }) {
   const name = symbol ? `$${esc(symbol)}` : 'This token';
   const who = callerName ? (callerHtml(callerName, callerId, { at: String(callerName).startsWith('@'), href: sourceUrl }) || 'someone') : 'someone';

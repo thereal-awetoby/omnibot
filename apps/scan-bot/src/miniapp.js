@@ -58,8 +58,11 @@ export function buildMapPayload({ symbol = null, name = null, market = null, loa
 
 // loadData(mint) -> payload (or null). Answers are cached for a minute; each IP gets 30 data requests a minute.
 // dash (optional): the dashboard Mini App. { botToken, search(q), trending(), getWatchlist(telegramId),
-// addWatch(telegramId, mint, pct), removeWatch(telegramId, mint), getToken(mint) } — all return dashboard-shaped
-// JSON already (see dashboard.js's buildDash*Json helpers). Omitted: /app and /api/dash/* answer 404.
+// addWatch(telegramId, mint, pct), removeWatch(telegramId, mint), getToken(mint),
+// getPaper(telegramId), updatePaperStrategy(telegramId, patch), sharePaperCard(telegramId, id) } — all return
+// dashboard-shaped JSON already (see dashboard.js's buildDash*Json / buildPaperJson). sharePaperCard sends the
+// card as a Telegram photo itself and resolves {ok:true} or {ok:false, error}; there is nothing to stream here.
+// Omitted: /app and /api/dash/* answer 404.
 export function startMiniApp({ port, loadData, log = console, dash = null }) {
   const cache = new Map();
   const hits = new Map();
@@ -139,6 +142,26 @@ export function startMiniApp({ port, loadData, log = console, dash = null }) {
         if (!ADDR_RE.test(body.mint ?? '')) return sendJson(res, 400, { error: 'bad address' });
         await dash.removeWatch(user.id, body.mint);
         return sendJson(res, 200, { ok: true });
+      }
+      if (url.pathname === '/api/dash/paper' && req.method === 'GET') {
+        const user = authUser(req);
+        if (!user) return sendJson(res, 401, { error: 'sign in through Telegram to see your paper account' });
+        return sendJson(res, 200, await dash.getPaper(user.id));
+      }
+      if (url.pathname === '/api/dash/paper/strategy' && req.method === 'POST') {
+        const user = authUser(req);
+        if (!user) return sendJson(res, 401, { error: 'sign in through Telegram to edit your strategy' });
+        const body = await readJsonBody(req);
+        return sendJson(res, 200, await dash.updatePaperStrategy(user.id, body));
+      }
+      if (url.pathname === '/api/dash/paper/share' && req.method === 'POST') {
+        const user = authUser(req);
+        if (!user) return sendJson(res, 401, { error: 'sign in through Telegram to share a trade' });
+        const body = await readJsonBody(req);
+        const id = Number(body.id);
+        if (!Number.isInteger(id)) return sendJson(res, 400, { error: 'bad id' });
+        const r = await dash.sharePaperCard(user.id, id);
+        return sendJson(res, r.ok ? 200 : 404, r);
       }
       return send(res, 404, 'text/plain', 'not found');
     } catch (e) {

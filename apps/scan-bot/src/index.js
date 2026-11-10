@@ -5,7 +5,7 @@ import {
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, setWatchAlertPct, listAllWatches, updateWatchBase, removeAllWatches, markCurveAlerted, setVolBaseline, setWatchOnCurve, countAllWatches,
   recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, setCallMessage, getMilestoneSetting, setMilestoneSetting, findCallerByName, callerRecord, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, getWorkerHeartbeat, query, MAX_X_FOLLOWS,
   MAX_WATCHES,
-  ensurePaperAccount, getPaperAccount, getStrategy, updateStrategy, listEnabledStrategies, listStrategiesByIds, hasOpenPosition, openPosition, listOpenPositions, listClosedPositions, closePosition,
+  ensurePaperAccount, getPaperAccount, getStrategy, updateStrategy, listEnabledStrategies, listStrategiesByIds, hasOpenPosition, openPosition, listOpenPositions, listClosedPositions, closePosition, getPaperPosition,
 } from '@omnibot/shared';
 import {
   parseMintInput, extractMint, looksLikeMint, parseAlertPct, shouldAlert,
@@ -16,9 +16,10 @@ import {
   matchesStrategy, hasRoom, sizeForTrade, MIN_TRADE_USD, pnlPct, shouldClose,
   buildAccountText, buildStrategyText, buildPositionsText, buildHistoryText, buildOpenNotice, buildCloseNotice,
 } from './paper.js';
+import { buildPaperPnlSvg, buildPaperPnlCaption } from './pnlcard.js';
 import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getTokenMeta, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
-import { loadBubbleCaption, loadBubbleData } from './bubbleload.js';
+import { loadBubbleData } from './bubbleload.js';
 import { renderPng, renderRaw } from './bubblemap.js';
 import { getArt, getMeme, refillArt, clearOldCache, OWN_DIR, sniffMime } from './memeart.js';
 import { usdFromQuote, quoteUsd, fetchLaunchMarket } from './curvemarket.js';
@@ -30,7 +31,7 @@ import { mkdir, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildPnlSvg, buildPnlCaption, newMilestone, peakMultiple } from './pnlcard.js';
 import { startMiniApp, buildMapPayload } from './miniapp.js';
-import { buildDashSearchJson, buildDashTrendingJson, buildDashWatchlistJson, buildDashTokenJson } from './dashboard.js';
+import { buildDashSearchJson, buildDashTrendingJson, buildDashWatchlistJson, buildDashTokenJson, buildPaperJson } from './dashboard.js';
 import { livePrices, parseMilestoneArg, buildMilestoneSettingText, buildMilestoneCaption } from './milestones.js';
 import { callMapRows, buildCallMapSvg, buildCallMapCaption } from './callmap.js';
 import { fetchLoreStory, fetchNews, fetchTweetText, getLastLoreError, searchTokens, fetchDexPaid, fetchPriceSeries, buildChartUrl, fetchPeakSince, fetchCandles, generateText, rugCheckStatus } from './sources.js';
@@ -123,12 +124,12 @@ async function getMarket(mint) {
   return m;
 }
 
-// Bubblemap: with MINIAPP_URL set, private chats open our interactive map inside Telegram (hover, tap, copy).
-// Telegram only allows mini-app buttons in private chats; groups get the picture instead. The Bubblemaps.io link stays as an extra.
+// Bubblemap: tapping the button opens the real, interactive bubblemaps.io graph straight inside Telegram (no
+// extra message first). Telegram only allows that popup in private chats, so groups get a normal link instead
+// (a hard platform limit, not something this bot can change).
 const MINIAPP_URL = (process.env.MINIAPP_URL || '').trim().replace(/\/+$/, '');
-const miniMapUrl = (mint) => `${MINIAPP_URL}/map?mint=${mint}`;
 const bubbleUrl = (mint) => `https://v2.bubblemaps.io/map?address=${mint}&chain=solana`;
-const bubbleButton = (kb, mint, group = false) => (MINIAPP_URL && !group ? kb.webApp('🫧 Bubblemap', miniMapUrl(mint)) : kb.text('🫧 Bubblemap', `b:${mint}`));
+const bubbleButton = (kb, mint, group = false) => (group ? kb.url('🫧 Bubblemap', bubbleUrl(mint)) : kb.webApp('🫧 Bubblemap', bubbleUrl(mint)));
 
 // Data for the mini app: the same holders, funding groups and layout as the picture.
 async function loadMapData(mint) {
@@ -151,6 +152,21 @@ const dash = {
     try { prices = await fetchPairsByTokens(rows.map((r) => r.mint)); } catch (e) { console.error('dashboard watchlist prices error:', e.message); }
     return buildDashWatchlistJson(rows, prices);
   },
+  getPaper: async (telegramId) => {
+    await ensurePaperAccount(telegramId);
+    const [account, strategy, positions, history] = await Promise.all([
+      getPaperAccount(telegramId), getStrategy(telegramId), listOpenPositions(telegramId), listClosedPositions(telegramId, { limit: 20 }),
+    ]);
+    let prices = new Map();
+    if (positions.length) { try { prices = await callPrices(positions.map((p) => p.mint)); } catch (e) { console.error('dashboard paper prices error:', e.message); } }
+    return buildPaperJson({ account, strategy, positions, prices, history });
+  },
+  updatePaperStrategy: async (telegramId, patch) => {
+    await ensurePaperAccount(telegramId);
+    await updateStrategy(telegramId, cleanStrategyPatch(patch));
+    return dash.getPaper(telegramId);
+  },
+  sharePaperCard: (telegramId, id) => buildAndSharePaperCard(telegramId, id),
   addWatch: async (telegramId, mint, customPct, username = null) => {
     // The Mini App talks straight to this server, bypassing the bot middleware that otherwise keeps the
     // users row up to date — watchlist.telegram_id is a foreign key to it, so make sure it exists first.
@@ -297,23 +313,16 @@ async function showDetail(ctx, kind, mint, build) {
   return sent;
 }
 
-// Bubblemap: the holder-concentration summary as text, plus a button straight into the real, interactive bubblemaps.io graph.
+// Bubblemap: one tap opens the real, interactive bubblemaps.io graph straight inside Telegram. No summary text first.
 async function sendBubblemap(ctx, mint) {
   if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
   const now = Date.now();
   if (now - (lastDetailAt.get(ctx.from.id) ?? 0) < 1500) return; // ignore rapid repeat taps
   lastDetailAt.set(ctx.from.id, now);
-  let caption = null;
-  try { caption = await withTyping(ctx, async () => loadBubbleCaption(mint, await cachedCard(mint))); }
-  catch (e) { console.error('bubblemap error:', e.message); }
   const origin = ctx.callbackQuery?.message?.message_id ?? ctx.message?.message_id;
   const reply = origin ? { reply_parameters: { message_id: origin, allow_sending_without_reply: true } } : {};
-  // The real bubblemaps.io, with its own zoom/pan graph: inside Telegram in a private chat, as a normal link in a group (Telegram only allows web_app popups in private chats).
-  const kb = new InlineKeyboard();
-  if (isGroup(ctx)) kb.url('🫧 Open interactive map', bubbleUrl(mint)); else kb.webApp('🫧 Open interactive map', bubbleUrl(mint));
-  kb.row().text('👥 Top holders', `h:${mint}`).text('👨‍💻 Dev', `d:${mint}`).row().text('🗑 Close', 'x');
-  const text = caption ?? 'Holder data was not available for the summary. You can still open the interactive map below.';
-  return ctx.reply(text, { ...HTML, reply_markup: kb, ...reply });
+  const kb = bubbleButton(new InlineKeyboard(), mint, isGroup(ctx)).row().text('🗑 Close', 'x');
+  return ctx.reply('🫧 <b>Bubble map</b>', { ...HTML, reply_markup: kb, ...reply });
 }
 
 async function buildHolders(mint) {
@@ -1164,6 +1173,65 @@ async function showStrategy(ctx) {
   return ctx.reply(buildStrategyText(s), { ...HTML, reply_markup: strategyKb(s) });
 }
 
+// Only well-formed numbers in sane ranges make it through — a bad or missing field is left untouched
+// rather than guessed, same as every other write in this bot.
+function cleanStrategyPatch(body) {
+  const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : v === null ? null : undefined);
+  const clamp = (v, lo, hi) => (v == null ? v : Math.max(lo, Math.min(hi, v)));
+  const out = {};
+  if (typeof body?.enabled === 'boolean') out.enabled = body.enabled;
+  if (n(body?.minMcapUsd) !== undefined) out.min_mcap_usd = clamp(n(body.minMcapUsd), 0, 1e12);
+  if (n(body?.maxMcapUsd) !== undefined) out.max_mcap_usd = clamp(n(body.maxMcapUsd), 0, 1e12);
+  if (n(body?.allocPct) !== undefined && n(body.allocPct) != null) out.alloc_pct = clamp(n(body.allocPct), 1, 100);
+  if (n(body?.tpPct) !== undefined) out.tp_pct = n(body.tpPct) == null ? 100 : clamp(n(body.tpPct), 1, 100_000);
+  if (n(body?.slPct) !== undefined) out.sl_pct = n(body.slPct) == null ? 40 : clamp(n(body.slPct), 1, 100);
+  if (n(body?.maxOpen) !== undefined && n(body.maxOpen) != null) out.max_open = Math.max(1, Math.min(50, Math.round(n(body.maxOpen))));
+  if (out.min_mcap_usd != null && out.max_mcap_usd != null && out.min_mcap_usd >= out.max_mcap_usd) delete out.max_mcap_usd;
+  return out;
+}
+
+// Builds a share-ready PNG recap of one paper trade (open or closed) and DMs it to its owner.
+// Used by both /paperhistory's Share buttons and the Mini App's Paper tab.
+async function buildAndSharePaperCard(telegramId, id) {
+  try {
+    const p = await getPaperPosition(telegramId, id);
+    if (!p) return { ok: false, error: 'not found' };
+    const entryMcap = Number(p.entry_mcap_usd) || null;
+    const entryPrice = Number(p.entry_price_usd);
+    let nowMcap, pct, status, ageText;
+    if (p.status === 'open') {
+      const price = (await callPrices([p.mint])).get(p.mint)?.priceUsd ?? null;
+      pct = pnlPct(entryPrice, price);
+      nowMcap = price != null && entryMcap != null ? entryMcap * (price / entryPrice) : null;
+      status = 'open';
+      ageText = `${formatDuration(Date.now() - new Date(p.opened_at).getTime())} open`;
+    } else {
+      pct = Number(p.pnl_pct);
+      nowMcap = p.exit_mcap_usd != null ? Number(p.exit_mcap_usd) : (entryMcap != null && p.exit_price_usd ? entryMcap * (Number(p.exit_price_usd) / entryPrice) : null);
+      status = p.close_reason;
+      ageText = `closed ${formatDuration(Date.now() - new Date(p.closed_at).getTime())} ago`;
+    }
+    if (pct == null || !Number.isFinite(pct)) return { ok: false, error: 'no price available for this trade right now' };
+    const svg = buildPaperPnlSvg({ symbol: p.symbol, entryMcap, nowMcap, pct, status, ageText, sizeUsd: Number(p.size_usd) });
+    const png = await renderPng(svg, CARD_W, { fast: true });
+    await bot.api.sendPhoto(telegramId, new InputFile(png, 'paper-pnl.png'), { caption: buildPaperPnlCaption({ symbol: p.symbol, status, pct }), parse_mode: 'HTML' });
+    return { ok: true };
+  } catch (e) {
+    console.error('paper card error:', e.message);
+    return { ok: false, error: 'could not build that card right now' };
+  }
+}
+
+// Up to 8 Share buttons, two per row, plus Close — one per closed trade shown in the history text.
+const historyKeyboard = (rows) => {
+  const kb = new InlineKeyboard();
+  rows.slice(0, 8).forEach((r, i) => {
+    kb.text(`📤 ${r.symbol ? '$' + r.symbol.slice(0, 10) : 'Share'}`, `pc:${r.id}`);
+    if (i % 2 === 1) kb.row();
+  });
+  return kb.row().text('🗑', 'x');
+};
+
 bot.command('paper', async (ctx) => {
   if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
   await ensurePaperAccount(ctx.from.id);
@@ -1182,7 +1250,8 @@ bot.command('positions', async (ctx) => {
 });
 bot.command('paperhistory', async (ctx) => {
   if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
-  return ctx.reply(buildHistoryText(await listClosedPositions(ctx.from.id)), HTML);
+  const rows = await listClosedPositions(ctx.from.id);
+  return ctx.reply(buildHistoryText(rows), { ...HTML, reply_markup: historyKeyboard(rows) });
 });
 
 bot.callbackQuery('pe:show', async (ctx) => { await ctx.answerCallbackQuery(); return showStrategy(ctx); });
@@ -1192,7 +1261,16 @@ bot.callbackQuery('pe:pos', async (ctx) => {
   const prices = rows.length ? await callPrices(rows.map((r) => r.mint)) : new Map();
   return ctx.reply(buildPositionsText(rows, prices), HTML);
 });
-bot.callbackQuery('pe:hist', async (ctx) => { await ctx.answerCallbackQuery(); return ctx.reply(buildHistoryText(await listClosedPositions(ctx.from.id)), HTML); });
+bot.callbackQuery('pe:hist', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const rows = await listClosedPositions(ctx.from.id);
+  return ctx.reply(buildHistoryText(rows), { ...HTML, reply_markup: historyKeyboard(rows) });
+});
+bot.callbackQuery(/^pc:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery({ text: 'Sending card…' });
+  const r = await buildAndSharePaperCard(ctx.from.id, Number(ctx.match[1]));
+  if (!r.ok) await ctx.reply(`Could not build that card (${r.error}).`).catch(() => {});
+});
 bot.callbackQuery('pe:tog', async (ctx) => {
   const s = await getStrategy(ctx.from.id);
   const updated = await updateStrategy(ctx.from.id, { enabled: !s.enabled });
