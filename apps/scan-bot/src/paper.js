@@ -22,6 +22,30 @@ export function sizeForTrade(strategy, balanceUsd) {
 }
 export const MIN_TRADE_USD = 1;
 
+// Hard risk guards (Phase 3, plan section 7): apply in every mode, including pure Agent Mode, and the
+// agent's own suggestion can never push past them.
+
+// Clamps a proposed trade to the strategy's absolute per-trade cap (if any) and to what's actually in the
+// balance. sizePct, when given, is the agent's own suggested slice of the balance (0-100); it still passes
+// through the same ceiling as a rule-mode trade.
+export function capSize(strategy, balanceUsd, sizePct = null) {
+  const bal = Number(balanceUsd) || 0;
+  const pct = sizePct != null ? Math.max(0, Math.min(100, Number(sizePct) || 0)) : Math.max(0, Math.min(100, Number(strategy.alloc_pct) || 0));
+  let size = bal * (pct / 100);
+  if (strategy.max_position_usd != null) size = Math.min(size, Number(strategy.max_position_usd));
+  size = Math.min(size, bal);
+  return Math.floor(Math.max(0, size) * 100) / 100;
+}
+
+// Has today's realized loss already hit the strategy's daily stop? No limit set (null) means no stop.
+// todayPnlUsd is realized PnL only (closed trades) — unrealized moves on open positions don't count against it.
+export function withinDailyLimit(strategy, todayPnlUsd, equityUsd) {
+  if (strategy.daily_loss_limit_pct == null) return true;
+  if (!(Number(equityUsd) > 0)) return true; // nothing to measure a % loss against yet
+  const lossPct = (-Number(todayPnlUsd) / Number(equityUsd)) * 100;
+  return lossPct < Number(strategy.daily_loss_limit_pct);
+}
+
 export function pnlPct(entryPriceUsd, currentPriceUsd) {
   if (!(entryPriceUsd > 0) || typeof currentPriceUsd !== 'number' || !Number.isFinite(currentPriceUsd) || currentPriceUsd < 0) return null;
   return ((currentPriceUsd - entryPriceUsd) / entryPriceUsd) * 100;
@@ -49,26 +73,38 @@ export function buildAccountText({ account, strategy, openCount, investedUsd }) 
   );
 }
 
+const MODE_LABEL = { rules: '📏 Rules', agent: '🤖 Agent', hybrid: '🤝 Hybrid' };
+const MODE_BLURB = {
+  rules: 'Opens a paper trade on every new call inside your market-cap range.',
+  agent: 'Your market-cap range is ignored. An AI reads every new call plus your instructions below and decides buy or skip.',
+  hybrid: 'Your market-cap range is a hard filter first — only calls inside it reach the AI, which then decides buy or skip using your instructions.',
+};
+
 export function buildStrategyText(strategy) {
   const r = (n) => (n == null ? 'any' : formatUsd(Number(n)));
-  return (
-    `⚙️ <b>Your paper strategy</b>\n\n` +
-    `Status: ${strategy.enabled ? '🟢 on — opens a paper trade on every new call in range' : '⚪ off — matches nothing'}\n` +
-    `Market cap: ${r(strategy.min_mcap_usd)} – ${r(strategy.max_mcap_usd)}\n` +
-    `Size per trade: ${strategy.alloc_pct}% of balance\n` +
-    `Take-profit: +${strategy.tp_pct}%\n` +
-    `Stop-loss: -${strategy.sl_pct}%\n` +
-    `Max open at once: ${strategy.max_open}\n\n` +
-    `v1 matches every tracked call (any group, any followed X account) in your market-cap range. Picking specific sources comes later.`
-  );
+  const mode = strategy.mode ?? 'rules';
+  const lines = [
+    `⚙️ <b>Your paper strategy</b>\n`,
+    `Status: ${strategy.enabled ? '🟢 on' : '⚪ off — matches nothing'} · Mode: <b>${MODE_LABEL[mode] ?? mode}</b>`,
+    `Market cap: ${r(strategy.min_mcap_usd)} – ${r(strategy.max_mcap_usd)}`,
+    `Size per trade: ${strategy.alloc_pct}% of balance${strategy.max_position_usd != null ? ` (capped at ${formatUsd(Number(strategy.max_position_usd))})` : ''}`,
+    `Take-profit: +${strategy.tp_pct}%`,
+    `Stop-loss: -${strategy.sl_pct}%`,
+    `Max open at once: ${strategy.max_open}`,
+    `Daily loss stop: ${strategy.daily_loss_limit_pct != null ? `-${strategy.daily_loss_limit_pct}% of equity` : 'none'}`,
+  ];
+  if (mode !== 'rules') lines.push(`Instructions: ${strategy.agent_prompt ? esc(strategy.agent_prompt) : '<i>none set — the AI will use its own judgment, favoring caution</i>'}`);
+  lines.push('', MODE_BLURB[mode] ?? MODE_BLURB.rules);
+  return lines.join('\n');
 }
 
-export function buildPositionLine({ mint, symbol, entry_price_usd, size_usd, opened_at }, currentPriceUsd) {
+export function buildPositionLine({ mint, symbol, entry_price_usd, size_usd, opened_at, open_mode, decision_reason }, currentPriceUsd) {
   const pct = pnlPct(Number(entry_price_usd), currentPriceUsd);
   const sym = symbol ? `$${esc(symbol)}` : esc(mint.slice(0, 4) + '…' + mint.slice(-4));
   const pctTxt = pct == null ? 'price n/a' : `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
   const age = Math.max(1, Math.round((Date.now() - new Date(opened_at).getTime()) / 60000));
-  return `${pct > 0 ? '🟢' : pct < 0 ? '🔴' : '⚪'} ${sym} · ${formatUsd(Number(size_usd))} · ${pctTxt} · ${age}m ago`;
+  const why = open_mode && open_mode !== 'rules' && decision_reason ? `\n   <i>${esc(decision_reason)}</i>` : '';
+  return `${pct > 0 ? '🟢' : pct < 0 ? '🔴' : '⚪'} ${sym} · ${formatUsd(Number(size_usd))} · ${pctTxt} · ${age}m ago${why}`;
 }
 
 export function buildPositionsText(rows, prices) {
@@ -81,14 +117,16 @@ export function buildHistoryText(rows) {
   const lines = rows.map((r) => {
     const sym = r.symbol ? `$${esc(r.symbol)}` : esc(r.mint.slice(0, 4) + '…' + r.mint.slice(-4));
     const pnl = Number(r.pnl_usd);
-    return `${pnl >= 0 ? '🟢' : '🔴'} ${sym} · ${pnl >= 0 ? '+' : ''}${formatUsd(pnl)} (${Number(r.pnl_pct).toFixed(1)}%) · ${REASON_LABEL[r.close_reason] ?? r.close_reason}`;
+    const why = r.open_mode && r.open_mode !== 'rules' && r.decision_reason ? `\n   <i>bought because: ${esc(r.decision_reason)}</i>` : '';
+    return `${pnl >= 0 ? '🟢' : '🔴'} ${sym} · ${pnl >= 0 ? '+' : ''}${formatUsd(pnl)} (${Number(r.pnl_pct).toFixed(1)}%) · ${REASON_LABEL[r.close_reason] ?? r.close_reason}${why}`;
   });
   return '📜 <b>Paper trade history</b>\n\n' + lines.join('\n');
 }
 
-export function buildOpenNotice({ symbol, mint, sizeUsd, mcapUsd }) {
+export function buildOpenNotice({ symbol, mint, sizeUsd, mcapUsd, openMode = 'rules', decisionReason = null }) {
   const sym = symbol ? `$${esc(symbol)}` : esc(mint.slice(0, 4) + '…' + mint.slice(-4));
-  return `📝 Paper-bought ${sym}\n${formatUsd(sizeUsd)} at ${mcapUsd ? formatUsd(mcapUsd) + ' mcap' : 'entry'} — matched your strategy.`;
+  const why = openMode !== 'rules' && decisionReason ? esc(decisionReason) : 'matched your strategy';
+  return `📝 Paper-bought ${sym}\n${formatUsd(sizeUsd)} at ${mcapUsd ? formatUsd(mcapUsd) + ' mcap' : 'entry'} — ${why}.`;
 }
 
 export function buildCloseNotice({ symbol, mint, reason, pnlUsd, pnlPct: pct }) {

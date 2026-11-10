@@ -59,13 +59,14 @@ export function buildPaperJson({ account, strategy, positions, prices, history }
     return {
       id: p.id, mint: p.mint, symbol: p.symbol ?? null, sizeUsd: size,
       pnlUsd: num(pnlUsd), pnlPct: price > 0 ? ((value - size) / size) * 100 : null,
-      openedAt: p.opened_at,
+      openedAt: p.opened_at, openMode: p.open_mode ?? 'rules', decisionReason: p.decision_reason ?? null,
     };
   });
   const balanceUsd = num(account?.balance_usd) ?? 0;
   const historyRows = (history ?? []).map((r) => ({
     id: r.id, mint: r.mint, symbol: r.symbol ?? null,
     pnlUsd: num(r.pnl_usd), pnlPct: num(r.pnl_pct), reason: r.close_reason, closedAt: r.closed_at,
+    openMode: r.open_mode ?? 'rules', decisionReason: r.decision_reason ?? null,
   }));
   return {
     balanceUsd, realizedUsd: num(account?.realized_usd) ?? 0,
@@ -75,6 +76,9 @@ export function buildPaperJson({ account, strategy, positions, prices, history }
       minMcapUsd: num(strategy.min_mcap_usd), maxMcapUsd: num(strategy.max_mcap_usd),
       allocPct: num(strategy.alloc_pct), tpPct: num(strategy.tp_pct), slPct: num(strategy.sl_pct),
       maxOpen: num(strategy.max_open),
+      // Phase 3: Agent Mode.
+      mode: strategy.mode ?? 'rules', agentPrompt: strategy.agent_prompt ?? null,
+      maxPositionUsd: num(strategy.max_position_usd), dailyLossLimitPct: num(strategy.daily_loss_limit_pct),
     } : null,
     positions: openRows,
     history: historyRows,
