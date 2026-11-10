@@ -1,15 +1,20 @@
-// Phase 3 of the Hybrid Agent plan: Agent Mode (basic).
+// Phase 3 of the Hybrid Agent plan: Agent Mode (basic). Phase 4 adds the 'call' decision: the agent can flag
+// a token worth watching without committing any paper capital (plan section 3.2: "decide whether to
+// paper-buy, call in Telegram, or wait").
 // Pure prompt-building and response-parsing live here with no network calls, so they're unit-testable;
 // decideWithAgent is the one async entry point and takes its AI call as an injectable dependency.
 import { esc } from '@omnibot/shared';
 
 export const AGENT_SYSTEM_PROMPT =
-  'You are a trading assistant inside a Telegram bot, deciding whether to open a SIMULATED paper position on a ' +
-  'newly-called token. No real money ever moves. Follow the user\'s instructions and stay inside the stated limits. ' +
+  'You are a trading assistant inside a Telegram bot, deciding what to do about a newly-called token: open a ' +
+  'SIMULATED paper position, just flag it to the user as worth watching (no capital risked), or skip it entirely. ' +
+  'No real money ever moves. Follow the user\'s instructions and stay inside the stated limits. ' +
   'Reply with ONLY one line of compact JSON, no markdown, no commentary: ' +
-  '{"decision":"buy"|"skip","sizePct":0-100,"reason":"<one short sentence>"}. ' +
-  '"sizePct" is how much of the user\'s available balance to risk, as a percentage, if buying (ignored if skipping). ' +
-  'If you are unsure or the signal is weak, skip. Keep "reason" under 140 characters.';
+  '{"decision":"buy"|"call"|"skip","sizePct":0-100,"reason":"<one short sentence>"}. ' +
+  '"buy" opens a paper position now. "call" sends the user a heads-up with no trade (use this when the signal is ' +
+  'interesting but you are not confident enough to size into it). "skip" does nothing. ' +
+  '"sizePct" is how much of the user\'s available balance to risk, as a percentage, only used for "buy". ' +
+  'If you are unsure or the signal is weak, skip rather than buy. Keep "reason" under 140 characters.';
 
 // Builds the user-turn prompt: the call's context plus the user's own free-text instructions.
 // `instructions` is the strategy's agent_prompt; `hardLimits` describes the guards the agent cannot override
@@ -40,7 +45,7 @@ export function parseAgentDecision(text) {
   let obj;
   try { obj = JSON.parse(match[0]); } catch { return null; }
   const decision = String(obj.decision ?? '').toLowerCase();
-  if (decision !== 'buy' && decision !== 'skip') return null;
+  if (decision !== 'buy' && decision !== 'call' && decision !== 'skip') return null;
   const sizePct = Number(obj.sizePct);
   const reason = typeof obj.reason === 'string' ? obj.reason.trim().slice(0, 200) : '';
   return { decision, sizePct: Number.isFinite(sizePct) ? Math.max(0, Math.min(100, sizePct)) : null, reason: reason || null };
