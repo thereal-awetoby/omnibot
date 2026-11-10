@@ -14,6 +14,17 @@ export function hasRoom(strategy) {
   return Number(strategy.open_count) < Number(strategy.max_open);
 }
 
+// Source filter: restricts a strategy to specific X accounts / group chats, in every mode — the plan's own
+// hybrid example ("only these 5 X accounts..."). sourceId is whatever identifies the signal (an X handle, a
+// group chat id); an unset filter (null/empty) allows everything, so every existing strategy is unaffected.
+export function matchesSourceFilter(strategy, sourceId) {
+  const filter = (strategy.source_filter ?? '').trim();
+  if (!filter) return true;
+  if (!sourceId) return false; // a filter is set but this signal has no identifiable source: don't guess
+  const allowed = filter.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return allowed.includes(String(sourceId).trim().toLowerCase());
+}
+
 // Trade size: a slice of the current balance, never more than the balance itself, with a $1 floor below which it's not worth opening.
 export function sizeForTrade(strategy, balanceUsd) {
   const pct = Math.max(0, Math.min(100, Number(strategy.alloc_pct) || 0));
@@ -27,11 +38,18 @@ export const MIN_TRADE_USD = 1;
 
 // Clamps a proposed trade to the strategy's absolute per-trade cap (if any) and to what's actually in the
 // balance. sizePct, when given, is the agent's own suggested slice of the balance (0-100); it still passes
-// through the same ceiling as a rule-mode trade.
+// through the same ceiling as a rule-mode trade. With no sizePct, the base size comes from the strategy's own
+// sizing: a fixed $ amount (size_mode 'fixed' + alloc_usd) or the default %-of-balance (alloc_pct).
 export function capSize(strategy, balanceUsd, sizePct = null) {
   const bal = Number(balanceUsd) || 0;
-  const pct = sizePct != null ? Math.max(0, Math.min(100, Number(sizePct) || 0)) : Math.max(0, Math.min(100, Number(strategy.alloc_pct) || 0));
-  let size = bal * (pct / 100);
+  let size;
+  if (sizePct != null) {
+    size = bal * (Math.max(0, Math.min(100, Number(sizePct) || 0)) / 100);
+  } else if (strategy.size_mode === 'fixed' && strategy.alloc_usd != null) {
+    size = Math.max(0, Number(strategy.alloc_usd) || 0);
+  } else {
+    size = bal * (Math.max(0, Math.min(100, Number(strategy.alloc_pct) || 0)) / 100);
+  }
   if (strategy.max_position_usd != null) size = Math.min(size, Number(strategy.max_position_usd));
   size = Math.min(size, bal);
   return Math.floor(Math.max(0, size) * 100) / 100;
@@ -59,15 +77,42 @@ export function shouldClose(strategy, pct) {
   return null;
 }
 
-const REASON_LABEL = { tp: '🎯 take-profit', sl: '🛑 stop-loss', manual: 'closed manually' };
+// Partial take-profit: has this position crossed its one partial-close tier, and not taken it yet? Checked
+// before the full TP/SL above so a partial can fire on its way to the final target rather than being skipped.
+export function partialTpHit(strategy, pct, alreadyTaken) {
+  if (alreadyTaken || pct == null) return false;
+  if (strategy.partial_tp_pct == null || strategy.partial_tp_close_pct == null) return false;
+  return pct >= Number(strategy.partial_tp_pct);
+}
 
-export function buildAccountText({ account, strategy, openCount, investedUsd }) {
+// How much of the position's current size to peel off for that partial tier, in dollars.
+export function partialCloseSize(strategy, sizeUsd) {
+  const pct = Math.max(0, Math.min(100, Number(strategy.partial_tp_close_pct) || 0));
+  return Math.floor(Number(sizeUsd) * (pct / 100) * 100) / 100;
+}
+
+const REASON_LABEL = { tp: '🎯 take-profit', sl: '🛑 stop-loss', manual: 'closed manually', partial: '🎯 partial take-profit' };
+
+// A tiny equity-curve-as-text: one block character per snapshot, scaled between the series' own min and max.
+// Good enough for a Telegram line without any charting infra; the Mini App gets the same numbers to draw a
+// real line chart from (dashboard.js's equityCurve).
+const SPARK_BARS = '▁▂▃▄▅▆▇█';
+export function buildSparkline(values) {
+  const nums = values.filter((v) => Number.isFinite(v));
+  if (nums.length < 2) return '';
+  const min = Math.min(...nums), max = Math.max(...nums);
+  const span = max - min || 1;
+  return nums.map((v) => SPARK_BARS[Math.min(SPARK_BARS.length - 1, Math.max(0, Math.floor(((v - min) / span) * (SPARK_BARS.length - 1))))]).join('');
+}
+
+export function buildAccountText({ account, strategy, openCount, investedUsd, equityHistory = null }) {
   const equity = Number(account.balance_usd) + investedUsd;
+  const spark = equityHistory ? buildSparkline(equityHistory) : '';
   return (
     `📝 <b>Paper account</b> (virtual, no real money)\n\n` +
     `Cash: <b>${formatUsd(Number(account.balance_usd))}</b>\n` +
     `In open positions: ${formatUsd(investedUsd)} (${openCount})\n` +
-    `Equity: <b>${formatUsd(equity)}</b>\n` +
+    `Equity: <b>${formatUsd(equity)}</b>${spark ? `  ${spark}` : ''}\n` +
     `Realized so far: ${Number(account.realized_usd) >= 0 ? '+' : ''}${formatUsd(Number(account.realized_usd))}\n\n` +
     `Strategy: ${strategy.enabled ? '🟢 on' : '⚪ off'} · /strategy to edit`
   );
@@ -83,15 +128,19 @@ const MODE_BLURB = {
 export function buildStrategyText(strategy) {
   const r = (n) => (n == null ? 'any' : formatUsd(Number(n)));
   const mode = strategy.mode ?? 'rules';
+  const sizeLine = strategy.size_mode === 'fixed' && strategy.alloc_usd != null
+    ? `Size per trade: ${formatUsd(Number(strategy.alloc_usd))} fixed`
+    : `Size per trade: ${strategy.alloc_pct}% of balance`;
   const lines = [
     `⚙️ <b>Your paper strategy</b>\n`,
     `Status: ${strategy.enabled ? '🟢 on' : '⚪ off — matches nothing'} · Mode: <b>${MODE_LABEL[mode] ?? mode}</b>`,
     `Market cap: ${r(strategy.min_mcap_usd)} – ${r(strategy.max_mcap_usd)}`,
-    `Size per trade: ${strategy.alloc_pct}% of balance${strategy.max_position_usd != null ? ` (capped at ${formatUsd(Number(strategy.max_position_usd))})` : ''}`,
-    `Take-profit: +${strategy.tp_pct}%`,
+    `${sizeLine}${strategy.max_position_usd != null ? ` (capped at ${formatUsd(Number(strategy.max_position_usd))})` : ''}`,
+    `Take-profit: +${strategy.tp_pct}%${strategy.partial_tp_pct != null ? ` · partial: close ${strategy.partial_tp_close_pct}% at +${strategy.partial_tp_pct}%` : ''}`,
     `Stop-loss: -${strategy.sl_pct}%`,
     `Max open at once: ${strategy.max_open}`,
     `Daily loss stop: ${strategy.daily_loss_limit_pct != null ? `-${strategy.daily_loss_limit_pct}% of equity` : 'none'}`,
+    `Sources: ${strategy.source_filter ? esc(strategy.source_filter) : 'any (every group/X follow)'}`,
   ];
   if (mode !== 'rules') lines.push(`Instructions: ${strategy.agent_prompt ? esc(strategy.agent_prompt) : '<i>none set — the AI will use its own judgment, favoring caution</i>'}`);
   lines.push('', MODE_BLURB[mode] ?? MODE_BLURB.rules);
@@ -155,7 +204,26 @@ export function buildMilestoneNotice({ symbol, mint, x }) {
 }
 
 // ---------- Phase 5: a shareable performance summary (plan section 8 — proof the system is live) ----------
-export function buildStatsText(rows) {
+// Partial take-profit notice: part of the position was closed, the rest keeps running.
+export function buildPartialCloseNotice({ symbol, mint, closedUsd, remainingUsd, pnlUsd, pnlPct: pct }) {
+  const sym = symbol ? `$${esc(symbol)}` : esc(mint.slice(0, 4) + '…' + mint.slice(-4));
+  const sign = pnlUsd >= 0 ? '+' : '';
+  return `🎯 Partial take-profit on ${sym}\nClosed ${formatUsd(closedUsd)} (${sign}${formatUsd(pnlUsd)}, ${sign}${pct.toFixed(1)}%) · ${formatUsd(remainingUsd)} still running.`;
+}
+
+// /paperwhy: the agent's fuller reasoning for one trade (deeper logging) — falls back plainly when there is
+// none to show (a rule-mode trade, or an agent trade from before this was tracked).
+export function buildWhyText(position) {
+  if (!position) return 'No paper trade with that id.';
+  const sym = position.symbol ? `$${esc(position.symbol)}` : esc(position.mint.slice(0, 4) + '…' + position.mint.slice(-4));
+  if (position.open_mode === 'rules' || !position.decision_reason) return `${sym}: matched your rules — no AI reasoning to show.`;
+  return (
+    `${sym}\n<b>Reason shown to you:</b> ${esc(position.decision_reason)}\n\n` +
+    (position.decision_detail ? `<b>Full reasoning:</b> ${esc(position.decision_detail)}` : '<i>No fuller reasoning was recorded for this trade.</i>')
+  );
+}
+
+export function buildStatsText(rows, equityHistory = null) {
   if (!rows.length) return 'No closed paper trades yet — stats show up once you have some history.';
   const wins = rows.filter((r) => Number(r.pnl_usd) >= 0);
   const totalPnl = rows.reduce((a, r) => a + Number(r.pnl_usd), 0);
@@ -163,12 +231,14 @@ export function buildStatsText(rows) {
   const best = rows.reduce((a, r) => (Number(r.pnl_pct) > Number(a?.pnl_pct ?? -Infinity) ? r : a), null);
   const avgPct = rows.reduce((a, r) => a + Number(r.pnl_pct), 0) / rows.length;
   const bestSym = best?.symbol ? `$${esc(best.symbol)}` : best ? esc(best.mint.slice(0, 4) + '…' + best.mint.slice(-4)) : null;
+  const spark = equityHistory ? buildSparkline(equityHistory) : '';
   return (
     `📊 <b>Paper trading stats</b> (${rows.length} closed trade${rows.length === 1 ? '' : 's'})\n\n` +
     `Win rate: <b>${((wins.length / rows.length) * 100).toFixed(0)}%</b> (${wins.length}/${rows.length})\n` +
     `Realized PnL: ${totalPnl >= 0 ? '+' : ''}${formatUsd(totalPnl)}${totalSize > 0 ? ` (${totalPnl >= 0 ? '+' : ''}${((totalPnl / totalSize) * 100).toFixed(1)}% on capital deployed)` : ''}\n` +
     `Average trade: ${avgPct >= 0 ? '+' : ''}${avgPct.toFixed(1)}%\n` +
     (best ? `Best trade: ${bestSym} ${Number(best.pnl_pct) >= 0 ? '+' : ''}${Number(best.pnl_pct).toFixed(1)}%\n` : '') +
+    (spark ? `Equity curve: ${spark}\n` : '') +
     `\n<i>Virtual balance — not real money.</i>`
   );
 }

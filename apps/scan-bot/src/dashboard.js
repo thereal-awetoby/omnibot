@@ -47,7 +47,8 @@ export function buildDashTokenJson(mint, { market, security, intel } = {}) {
 
 // Paper trading: account + strategy + live open positions + recent history, for the Mini App's Paper tab.
 // positions: listOpenPositions() rows. prices: Map(mint -> market). history: listClosedPositions() rows.
-export function buildPaperJson({ account, strategy, positions, prices, history }) {
+// equityHistory (post-plan polish): [{ equityUsd, recordedAt }], oldest first, for a real line chart.
+export function buildPaperJson({ account, strategy, positions, prices, history, equityHistory = [] }) {
   let investedUsd = 0, unrealizedUsd = 0;
   const openRows = (positions ?? []).map((p) => {
     const size = Number(p.size_usd);
@@ -80,9 +81,13 @@ export function buildPaperJson({ account, strategy, positions, prices, history }
       // Phase 3: Agent Mode.
       mode: strategy.mode ?? 'rules', agentPrompt: strategy.agent_prompt ?? null,
       maxPositionUsd: num(strategy.max_position_usd), dailyLossLimitPct: num(strategy.daily_loss_limit_pct),
+      // Post-plan polish: source filter, fixed-$ sizing, a single partial take-profit tier.
+      sourceFilter: strategy.source_filter ?? null, sizeMode: strategy.size_mode ?? 'pct', allocUsd: num(strategy.alloc_usd),
+      partialTpPct: num(strategy.partial_tp_pct), partialTpClosePct: num(strategy.partial_tp_close_pct),
     } : null,
     positions: openRows,
     history: historyRows,
+    equityCurve: (equityHistory ?? []).map((e) => ({ equityUsd: num(e.equityUsd), recordedAt: e.recordedAt })),
   };
 }
 

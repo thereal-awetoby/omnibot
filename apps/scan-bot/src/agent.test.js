@@ -23,15 +23,27 @@ test('buildAgentPrompt falls back to a neutral line when no instructions are set
 
 test('parseAgentDecision reads clean JSON', () => {
   assert.deepEqual(parseAgentDecision('{"decision":"buy","sizePct":5,"reason":"Strong momentum"}'),
-    { decision: 'buy', sizePct: 5, reason: 'Strong momentum' });
+    { decision: 'buy', sizePct: 5, reason: 'Strong momentum', detail: null });
   assert.deepEqual(parseAgentDecision('{"decision":"skip","sizePct":0,"reason":"Too thin"}'),
-    { decision: 'skip', sizePct: 0, reason: 'Too thin' });
+    { decision: 'skip', sizePct: 0, reason: 'Too thin', detail: null });
 });
 
 // Phase 4: the agent can flag a token without risking paper capital.
 test('parseAgentDecision reads a "call" decision (no trade, just a heads-up)', () => {
   assert.deepEqual(parseAgentDecision('{"decision":"call","sizePct":0,"reason":"Interesting but too early to size in"}'),
-    { decision: 'call', sizePct: 0, reason: 'Interesting but too early to size in' });
+    { decision: 'call', sizePct: 0, reason: 'Interesting but too early to size in', detail: null });
+});
+
+// Deeper agent logging: a "detail" field is kept separately from the short, always-shown "reason".
+test('parseAgentDecision reads the fuller "detail" field when the model gives one', () => {
+  const r = parseAgentDecision('{"decision":"buy","sizePct":5,"reason":"Strong setup","detail":"Volume tripled in the last hour and the caller has a good track record on similar launches."}');
+  assert.equal(r.reason, 'Strong setup');
+  assert.equal(r.detail, 'Volume tripled in the last hour and the caller has a good track record on similar launches.');
+});
+
+test('parseAgentDecision caps the detail length too', () => {
+  const r = parseAgentDecision(`{"decision":"buy","sizePct":5,"reason":"x","detail":"${'y'.repeat(2000)}"}`);
+  assert.equal(r.detail.length, 1000);
 });
 
 test('parseAgentDecision tolerates a markdown fence or stray prose around the JSON', () => {
@@ -66,7 +78,7 @@ test('decideWithAgent returns the parsed decision on a good reply', async () => 
     strategy: { balance_usd: 200, open_count: 0, max_open: 3 }, apiKey: 'fake-key',
     generateTextImpl: async ({ system, prompt }) => { assert.equal(system, AGENT_SYSTEM_PROMPT); assert.match(prompt, /\$DOG/); return '{"decision":"buy","sizePct":8,"reason":"Volume picking up"}'; },
   });
-  assert.deepEqual(r, { decision: 'buy', sizePct: 8, reason: 'Volume picking up' });
+  assert.deepEqual(r, { decision: 'buy', sizePct: 8, reason: 'Volume picking up', detail: null });
 });
 
 test('decideWithAgent passes through a "call" decision unchanged', async () => {
@@ -75,7 +87,7 @@ test('decideWithAgent passes through a "call" decision unchanged', async () => {
     strategy: { balance_usd: 200, open_count: 0, max_open: 3 }, apiKey: 'fake-key',
     generateTextImpl: async () => '{"decision":"call","sizePct":0,"reason":"Worth watching, not buying yet"}',
   });
-  assert.deepEqual(r, { decision: 'call', sizePct: 0, reason: 'Worth watching, not buying yet' });
+  assert.deepEqual(r, { decision: 'call', sizePct: 0, reason: 'Worth watching, not buying yet', detail: null });
 });
 
 test('decideWithAgent fails closed on a network/provider error', async () => {
