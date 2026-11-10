@@ -102,7 +102,7 @@ test('buildPaperJson: equity = cash + open positions at current value, unrealize
   assert.equal(j.positions[0].openMode, 'rules');
   assert.equal(j.positions[1].pnlUsd, 0);
   assert.equal(j.positions[1].pnlPct, null); // no price: can't say a percent
-  assert.deepEqual(j.history, [{ id: 9, mint: MINT, symbol: 'OLD', pnlUsd: -10, pnlPct: -40, reason: 'sl', closedAt: 't0', openMode: 'rules', decisionReason: null }]);
+  assert.deepEqual(j.history, [{ id: 9, mint: MINT, symbol: 'OLD', pnlUsd: -10, pnlPct: -40, reason: 'sl', closedAt: 't0', openMode: 'rules', decisionReason: null, source: null }]);
 });
 
 test('buildPaperJson: brand-new account, no strategy row, nothing open or closed', () => {

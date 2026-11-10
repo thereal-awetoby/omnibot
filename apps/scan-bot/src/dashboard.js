@@ -60,13 +60,14 @@ export function buildPaperJson({ account, strategy, positions, prices, history }
       id: p.id, mint: p.mint, symbol: p.symbol ?? null, sizeUsd: size,
       pnlUsd: num(pnlUsd), pnlPct: price > 0 ? ((value - size) / size) * 100 : null,
       openedAt: p.opened_at, openMode: p.open_mode ?? 'rules', decisionReason: p.decision_reason ?? null,
+      source: p.signal_source ?? null,
     };
   });
   const balanceUsd = num(account?.balance_usd) ?? 0;
   const historyRows = (history ?? []).map((r) => ({
     id: r.id, mint: r.mint, symbol: r.symbol ?? null,
     pnlUsd: num(r.pnl_usd), pnlPct: num(r.pnl_pct), reason: r.close_reason, closedAt: r.closed_at,
-    openMode: r.open_mode ?? 'rules', decisionReason: r.decision_reason ?? null,
+    openMode: r.open_mode ?? 'rules', decisionReason: r.decision_reason ?? null, source: r.signal_source ?? null,
   }));
   return {
     balanceUsd, realizedUsd: num(account?.realized_usd) ?? 0,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   matchesStrategy, hasRoom, sizeForTrade, capSize, withinDailyLimit, pnlPct, shouldClose,
   buildPositionLine, buildPositionsText, buildHistoryText, buildOpenNotice, buildCloseNotice, buildStrategyText,
+  buildAgentCallNotice, buildMilestoneNotice, buildStatsText,
 } from './paper.js';
 
 test('matchesStrategy', () => {
@@ -63,6 +64,7 @@ test('buildHistoryText', () => {
 test('open/close notices', () => {
   assert.match(buildOpenNotice({ symbol: 'DOG', mint: 'x', sizeUsd: 25, mcapUsd: 12000 }), /\$DOG/);
   assert.match(buildOpenNotice({ symbol: 'DOG', mint: 'x', sizeUsd: 25, mcapUsd: 12000 }), /matched your strategy/);
+  assert.match(buildOpenNotice({ symbol: 'DOG', mint: 'x', sizeUsd: 25, mcapUsd: 12000, source: 'group call' }), /via group call/);
   const c = buildCloseNotice({ symbol: 'DOG', mint: 'x', reason: 'tp', pnlUsd: 25, pnlPct: 100 });
   assert.match(c, /take-profit/);
   assert.match(c, /\+\$25\.00/);
@@ -99,4 +101,35 @@ test('buildStrategyText shows the mode and, outside Rules mode, the instructions
 
   const noPrompt = { ...rules, mode: 'hybrid', agent_prompt: null };
   assert.match(buildStrategyText(noPrompt), /none set — the AI will use its own judgment/);
+});
+
+// ---------- Phase 4: Telegram calls & threading ----------
+
+test('buildAgentCallNotice: a heads-up with no trade', () => {
+  const n = buildAgentCallNotice({ symbol: 'DOG', mint: 'x', mcapUsd: 15000, reason: 'Interesting narrative forming', source: 'X follow' });
+  assert.match(n, /\$DOG/);
+  assert.match(n, /no paper trade/);
+  assert.match(n, /Interesting narrative forming/);
+  assert.match(n, /via X follow/);
+  assert.match(buildAgentCallNotice({ symbol: 'DOG', mint: 'x', mcapUsd: 15000 }), /worth watching/);
+});
+
+test('buildMilestoneNotice formats the multiple', () => {
+  assert.match(buildMilestoneNotice({ symbol: 'DOG', mint: 'x', x: 2 }), /\$DOG.*2\.00x/s);
+  assert.match(buildMilestoneNotice({ symbol: 'DOG', mint: 'x', x: 25 }), /25x/);
+});
+
+// ---------- Phase 5: shareable stats ----------
+
+test('buildStatsText: win rate, realized PnL and the best trade', () => {
+  assert.equal(buildStatsText([]), 'No closed paper trades yet — stats show up once you have some history.');
+  const rows = [
+    { mint: 'Aa1', symbol: 'DOG', pnl_usd: 50, pnl_pct: 100, size_usd: 50 },
+    { mint: 'Bb2', symbol: 'CAT', pnl_usd: -20, pnl_pct: -40, size_usd: 50 },
+  ];
+  const t = buildStatsText(rows);
+  assert.match(t, /2 closed trades/);
+  assert.match(t, /Win rate: <b>50%<\/b> \(1\/2\)/);
+  assert.match(t, /\+\$30\.00/); // net realized PnL
+  assert.match(t, /Best trade: \$DOG \+100\.0%/);
 });

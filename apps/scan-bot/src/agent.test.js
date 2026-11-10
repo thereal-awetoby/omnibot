@@ -28,6 +28,12 @@ test('parseAgentDecision reads clean JSON', () => {
     { decision: 'skip', sizePct: 0, reason: 'Too thin' });
 });
 
+// Phase 4: the agent can flag a token without risking paper capital.
+test('parseAgentDecision reads a "call" decision (no trade, just a heads-up)', () => {
+  assert.deepEqual(parseAgentDecision('{"decision":"call","sizePct":0,"reason":"Interesting but too early to size in"}'),
+    { decision: 'call', sizePct: 0, reason: 'Interesting but too early to size in' });
+});
+
 test('parseAgentDecision tolerates a markdown fence or stray prose around the JSON', () => {
   const r = parseAgentDecision('Sure, here you go:\n```json\n{"decision": "buy", "sizePct": 10, "reason": "ok"}\n```\nHope that helps!');
   assert.equal(r.decision, 'buy');
@@ -61,6 +67,15 @@ test('decideWithAgent returns the parsed decision on a good reply', async () => 
     generateTextImpl: async ({ system, prompt }) => { assert.equal(system, AGENT_SYSTEM_PROMPT); assert.match(prompt, /\$DOG/); return '{"decision":"buy","sizePct":8,"reason":"Volume picking up"}'; },
   });
   assert.deepEqual(r, { decision: 'buy', sizePct: 8, reason: 'Volume picking up' });
+});
+
+test('decideWithAgent passes through a "call" decision unchanged', async () => {
+  const r = await decideWithAgent({
+    instructions: null, call: { mint: 'x', symbol: 'DOG', mcapUsd: 5000 },
+    strategy: { balance_usd: 200, open_count: 0, max_open: 3 }, apiKey: 'fake-key',
+    generateTextImpl: async () => '{"decision":"call","sizePct":0,"reason":"Worth watching, not buying yet"}',
+  });
+  assert.deepEqual(r, { decision: 'call', sizePct: 0, reason: 'Worth watching, not buying yet' });
 });
 
 test('decideWithAgent fails closed on a network/provider error', async () => {

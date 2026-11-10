@@ -2,6 +2,8 @@
 // Phase 1 of the Hybrid Agent plan: rule-based only, personal (DM) use. No real money ever moves.
 // Phase 3 adds Agent Mode: a strategy can hand some or all of the buy/skip decision to an LLM,
 // constrained by hard risk limits (max_position_usd, daily_loss_limit_pct) that apply in every mode.
+// Phase 4 adds message threading (milestone/exit replies under the original call) and a signal_source
+// record. Phase 5 closes the "hard limits apply in every mode" gap and adds the stats needed to share results.
 import { query } from './db.js';
 
 export const PAPER_START_USD = Number(process.env.PAPER_START_USD) || 500;
@@ -54,6 +56,13 @@ export function ensurePaperTables() {
     // agent's own short reasoning — plus which mode opened it, shown back to the user later.
     await query("ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS open_mode TEXT NOT NULL DEFAULT 'rules'");
     await query('ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS decision_reason TEXT');
+    // Phase 4: Telegram threading. open_msg_id is the DM message id of the open/call notice; milestone and
+    // exit updates reply to it, the same way a real group call's multiplier posts reply to its own card.
+    // last_milestone_x is the biggest multiple already announced, so each one (2x, 3x, 5x...) is sent once.
+    // signal_source records where the call came from (group call / X follow), shown on the PnL card (section 4).
+    await query('ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS open_msg_id BIGINT');
+    await query('ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS last_milestone_x NUMERIC');
+    await query('ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS signal_source TEXT');
   })().catch((e) => { ready = null; throw e; });
   return ready;
 }
@@ -139,14 +148,27 @@ export async function hasOpenPosition(telegramId, mint) {
 // Opens a position and debits the account balance in one go.
 // openMode/decisionReason are the transparency record (plan section 7): how this trade was decided
 // ('rules' or 'agent'/'hybrid') and, in a sentence, why — a rule match or the agent's own reasoning.
-export async function openPosition({ telegramId, mint, symbol, entryPriceUsd, entryMcapUsd, sizeUsd, openMode = 'rules', decisionReason = null }) {
+// source records where the signal came from (group call / X follow), for the PnL card and history.
+export async function openPosition({ telegramId, mint, symbol, entryPriceUsd, entryMcapUsd, sizeUsd, openMode = 'rules', decisionReason = null, source = null }) {
   await ensurePaperTables();
   const { rows } = await query(
-    `INSERT INTO paper_positions (telegram_id, mint, symbol, entry_price_usd, entry_mcap_usd, size_usd, open_mode, decision_reason)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-    [telegramId, mint, symbol ?? null, entryPriceUsd, entryMcapUsd ?? null, sizeUsd, openMode, decisionReason]);
+    `INSERT INTO paper_positions (telegram_id, mint, symbol, entry_price_usd, entry_mcap_usd, size_usd, open_mode, decision_reason, signal_source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+    [telegramId, mint, symbol ?? null, entryPriceUsd, entryMcapUsd ?? null, sizeUsd, openMode, decisionReason, source]);
   await query('UPDATE paper_accounts SET balance_usd = balance_usd - $2 WHERE telegram_id = $1', [telegramId, sizeUsd]);
   return rows[0].id;
+}
+
+// Phase 4: lets the background checker thread milestone and exit replies under the original call/open message.
+export async function setPositionMessage(id, msgId) {
+  await ensurePaperTables();
+  await query('UPDATE paper_positions SET open_msg_id = $2 WHERE id = $1', [id, msgId]);
+}
+
+// Records the biggest milestone (2x, 3x, 5x...) already announced for an open position, so each is sent once.
+export async function setPositionMilestone(id, x) {
+  await ensurePaperTables();
+  await query('UPDATE paper_positions SET last_milestone_x = $2 WHERE id = $1', [id, x]);
 }
 
 // One position by id, scoped to its owner (used for sharing/recapping a specific trade).

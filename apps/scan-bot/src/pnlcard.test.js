@@ -99,3 +99,12 @@ test('buildPaperPnlCaption', () => {
   assert.match(buildPaperPnlCaption({ symbol: 'DOG', status: 'tp', pct: 150 }), /\$DOG.*Take-profit hit.*\+150\.0%/s);
   assert.match(buildPaperPnlCaption({ symbol: null, status: 'open', pct: -5 }), /this token.*Open position.*-5\.0%/s);
 });
+
+// Phase 5: the card and caption also show the multiplier and the signal's source (plan section 4).
+test('paper PnL card and caption show the multiplier and the source when given', () => {
+  const svg = buildPaperPnlSvg({ symbol: 'DOG', entryMcap: 10_000, nowMcap: 25_000, pct: 150, status: 'tp', source: 'group call' });
+  assert.match(svg, /2\.50x/);
+  assert.match(svg, /group call/);
+  const caption = buildPaperPnlCaption({ symbol: 'DOG', status: 'tp', pct: 150, source: 'X follow' });
+  assert.match(caption, /via X follow/);
+});

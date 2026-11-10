@@ -5,7 +5,7 @@ import {
   addWatch, removeWatch, isWatching, listWatches, setAlertPct, setWatchAlertPct, listAllWatches, updateWatchBase, removeAllWatches, markCurveAlerted, setVolBaseline, setWatchOnCurve, countAllWatches,
   recordFirstCall, getFirstCall, addTargets, listTargets, removeTargets, listActiveTargets, markTargetFired, addReminder, listReminders, removeReminder, dueReminders, markReminderDone, listChatCalls, listUserCalls, listLiveCalls, setCallMilestone, setCallPeak, setCallMessage, getMilestoneSetting, setMilestoneSetting, findCallerByName, callerRecord, keepDbWarm, listCallChats, moveChatData, addXFollow, removeXFollow, listXFollows, listAllXFollows, setXCursor, setXPoll, ensureXTables, getWorkerHeartbeat, query, MAX_X_FOLLOWS,
   MAX_WATCHES,
-  ensurePaperAccount, getPaperAccount, getStrategy, updateStrategy, listEnabledStrategies, listStrategiesByIds, hasOpenPosition, openPosition, listOpenPositions, listClosedPositions, closePosition, getPaperPosition, getRealizedPnlToday,
+  ensurePaperAccount, getPaperAccount, getStrategy, updateStrategy, listEnabledStrategies, listStrategiesByIds, hasOpenPosition, openPosition, listOpenPositions, listClosedPositions, closePosition, getPaperPosition, getRealizedPnlToday, setPositionMessage, setPositionMilestone,
 } from '@omnibot/shared';
 import {
   parseMintInput, extractMint, looksLikeMint, parseAlertPct, shouldAlert,
@@ -13,8 +13,9 @@ import {
   multiple, buildCallLine, buildLeaderboard, buildLeaderboardText, parsePeriod, buildGroupBoard, buildGroupBoardText, buildUserCallsText, buildSocialLine, formatPriceCard, formatCount, shortPct,
 } from './scan.js';
 import {
-  matchesStrategy, hasRoom, sizeForTrade, capSize, withinDailyLimit, MIN_TRADE_USD, pnlPct, shouldClose,
+  matchesStrategy, hasRoom, capSize, withinDailyLimit, MIN_TRADE_USD, pnlPct, shouldClose,
   buildAccountText, buildStrategyText, buildPositionsText, buildHistoryText, buildOpenNotice, buildCloseNotice,
+  buildAgentCallNotice, buildMilestoneNotice, buildStatsText,
 } from './paper.js';
 import { decideWithAgent } from './agent.js';
 import { buildPaperPnlSvg, buildPaperPnlCaption } from './pnlcard.js';
@@ -214,42 +215,61 @@ function agentAllowed(id) {
   return true;
 }
 
+// Phase 5: a one-time-per-day heads-up when the daily loss stop trips, instead of silently doing nothing on
+// every signal — transparency (plan section 7) applies to being paused, not just to why a trade was taken.
+const dailyStopNotified = new Map(); // telegram_id -> 'YYYY-MM-DD' already notified today
+function notifyDailyStopOnce(telegramId) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (dailyStopNotified.get(telegramId) === today) return;
+  dailyStopNotified.set(telegramId, today);
+  bot.api.sendMessage(telegramId,
+    '🛑 Paper trading paused for today — your daily loss stop was hit. New trades resume tomorrow (UTC); any open positions still get checked for take-profit/stop-loss.',
+    HTML).catch(() => {});
+}
+
 // Paper trading: a new, first-anywhere call just appeared. Open a paper position for every user whose strategy
-// matches (or, in Agent/Hybrid mode, every user whose AI agent decides to buy). Fire-and-forget from the
-// caller's point of view — never slows down or fails a real call/card.
+// matches (or, in Agent/Hybrid mode, every user whose AI agent decides to buy or just call it out). Fire-and-
+// forget from the caller's point of view — never slows down or fails a real call/card.
 //
 // Phase 3 (Agent Mode): mode 'rules' is unchanged v1 behavior. 'agent' skips the market-cap filter entirely and
 // lets the AI decide from the call context plus the user's own instructions. 'hybrid' applies the market-cap
 // filter as a hard pre-filter first, then still asks the AI to decide — rules are the risk guard, the agent
-// operates inside them (plan section 3.3). hasRoom, the daily-loss stop and the per-trade size cap are hard
-// limits that apply in every mode, including pure Agent Mode (plan section 7) — the agent's own suggestion
-// never overrides them.
+// operates inside them (plan section 3.3).
+// Phase 4: the agent's decision can be 'call' — flag the token to the user with no paper trade, no capital risked.
+// Phase 5: the daily-loss stop and the per-trade size cap (capSize) are hard limits that now apply in EVERY
+// mode, not just Agent/Hybrid — "hard risk limits always apply" (plan section 7) covers rule-based trades too.
 async function tryPaperBuy({ mint, symbol, priceUsd, mcapUsd, source = null }) {
   const strategies = await listEnabledStrategies();
   for (const s of strategies) {
     if (!hasRoom(s)) continue;
     if (await hasOpenPosition(s.telegram_id, mint)) continue; // already holding this one
     const mode = s.mode ?? 'rules';
+    const todayPnl = await getRealizedPnlToday(s.telegram_id).catch(() => 0);
+    if (!withinDailyLimit(s, todayPnl, Number(s.balance_usd))) { notifyDailyStopOnce(s.telegram_id); continue; }
+
     let decisionReason = null, sizePct = null;
     if (mode === 'rules') {
       if (!matchesStrategy(s, { mcapUsd })) continue;
     } else {
       if (mode === 'hybrid' && !matchesStrategy(s, { mcapUsd })) continue; // hard filter before the agent sees it
-      const todayPnl = await getRealizedPnlToday(s.telegram_id).catch(() => 0);
-      if (!withinDailyLimit(s, todayPnl, Number(s.balance_usd))) continue; // today's loss stop already hit
       if (!process.env.GEMINI_API_KEY || !agentAllowed(s.telegram_id)) continue; // fail closed — never a silent buy
       const decision = await decideWithAgent({
         instructions: s.agent_prompt, strategy: s, call: { mint, symbol, mcapUsd, source },
         apiKey: process.env.GEMINI_API_KEY,
         generateTextImpl: (args) => generateText({ ...args, models: process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : null }),
       }).catch((e) => { console.error('agent decide error:', e.message); return { decision: 'skip', sizePct: null, reason: null }; });
-      if (decision.decision !== 'buy') continue;
+      if (decision.decision === 'skip') continue;
+      if (decision.decision === 'call') { // a heads-up only — no paper trade, no capital at risk
+        bot.api.sendMessage(s.telegram_id, buildAgentCallNotice({ symbol, mint, mcapUsd, reason: decision.reason, source }), HTML).catch(() => {});
+        continue;
+      }
       decisionReason = decision.reason; sizePct = decision.sizePct;
     }
-    const size = mode === 'rules' ? sizeForTrade(s, Number(s.balance_usd)) : capSize(s, Number(s.balance_usd), sizePct);
+    const size = capSize(s, Number(s.balance_usd), sizePct); // hard per-trade cap in every mode (section 7)
     if (size < MIN_TRADE_USD) continue; // balance too low to bother
-    await openPosition({ telegramId: s.telegram_id, mint, symbol, entryPriceUsd: priceUsd, entryMcapUsd: mcapUsd, sizeUsd: size, openMode: mode, decisionReason });
-    bot.api.sendMessage(s.telegram_id, buildOpenNotice({ symbol, mint, sizeUsd: size, mcapUsd, openMode: mode, decisionReason }), HTML).catch(() => {}); // user may have blocked the bot
+    const id = await openPosition({ telegramId: s.telegram_id, mint, symbol, entryPriceUsd: priceUsd, entryMcapUsd: mcapUsd, sizeUsd: size, openMode: mode, decisionReason, source });
+    const sent = await bot.api.sendMessage(s.telegram_id, buildOpenNotice({ symbol, mint, sizeUsd: size, mcapUsd, openMode: mode, decisionReason, source }), HTML).catch(() => null); // user may have blocked the bot
+    if (sent?.message_id) setPositionMessage(id, sent.message_id).catch(() => {}); // lets milestone/exit replies thread under this call
   }
 }
 
@@ -1243,11 +1263,11 @@ function cleanStrategyPatch(body) {
   return out;
 }
 
-// Builds a share-ready PNG recap of one paper trade (open or closed) and DMs it to its owner.
-// Used by both /paperhistory's Share buttons and the Mini App's Paper tab.
-async function buildAndSharePaperCard(telegramId, id) {
+// Builds a share-ready PNG recap of one paper trade (open or closed) and sends it. Used by the share buttons
+// (via buildAndSharePaperCard below), the Mini App's Paper tab, and — threaded under the original open notice —
+// automatically when a position closes (Phase 4). replyToMessageId threads the photo under that message.
+async function sendPaperPnlCard(telegramId, p, { replyToMessageId = null } = {}) {
   try {
-    const p = await getPaperPosition(telegramId, id);
     if (!p) return { ok: false, error: 'not found' };
     const entryMcap = Number(p.entry_mcap_usd) || null;
     const entryPrice = Number(p.entry_price_usd);
@@ -1262,17 +1282,38 @@ async function buildAndSharePaperCard(telegramId, id) {
       pct = Number(p.pnl_pct);
       nowMcap = p.exit_mcap_usd != null ? Number(p.exit_mcap_usd) : (entryMcap != null && p.exit_price_usd ? entryMcap * (Number(p.exit_price_usd) / entryPrice) : null);
       status = p.close_reason;
-      ageText = `closed ${formatDuration(Date.now() - new Date(p.closed_at).getTime())} ago`;
+      ageText = `closed ${formatDuration(Date.now() - new Date(p.closed_at ?? Date.now()).getTime())} ago`;
     }
     if (pct == null || !Number.isFinite(pct)) return { ok: false, error: 'no price available for this trade right now' };
-    const svg = buildPaperPnlSvg({ symbol: p.symbol, entryMcap, nowMcap, pct, status, ageText, sizeUsd: Number(p.size_usd) });
+    const svg = buildPaperPnlSvg({ symbol: p.symbol, entryMcap, nowMcap, pct, status, ageText, sizeUsd: Number(p.size_usd), source: p.signal_source ?? null });
     const png = await renderPng(svg, CARD_W, { fast: true });
-    await bot.api.sendPhoto(telegramId, new InputFile(png, 'paper-pnl.png'), { caption: buildPaperPnlCaption({ symbol: p.symbol, status, pct }), parse_mode: 'HTML' });
+    const opts = { caption: buildPaperPnlCaption({ symbol: p.symbol, status, pct, source: p.signal_source ?? null }), parse_mode: 'HTML' };
+    if (replyToMessageId) opts.reply_parameters = { message_id: replyToMessageId };
+    await bot.api.sendPhoto(telegramId, new InputFile(png, 'paper-pnl.png'), opts);
     return { ok: true };
   } catch (e) {
     console.error('paper card error:', e.message);
     return { ok: false, error: 'could not build that card right now' };
   }
+}
+
+async function buildAndSharePaperCard(telegramId, id) {
+  const p = await getPaperPosition(telegramId, id).catch(() => null);
+  if (!p) return { ok: false, error: 'not found' };
+  return sendPaperPnlCard(telegramId, p);
+}
+
+// Phase 4: when a position closes, its exit card lands as a reply in the same thread as the original call/open
+// notice — one tap from your entry message to the result. Falls back to the plain close notice when there is
+// no thread to reply to, or the card itself fails.
+async function notifyPaperClose(telegramId, closedRow) {
+  const replyTo = closedRow.open_msg_id ? Number(closedRow.open_msg_id) : null;
+  if (replyTo) {
+    const r = await sendPaperPnlCard(telegramId, closedRow, { replyToMessageId: replyTo });
+    if (r.ok) return;
+  }
+  const opts = replyTo ? { ...HTML, reply_parameters: { message_id: replyTo } } : HTML;
+  bot.api.sendMessage(telegramId, buildCloseNotice({ symbol: closedRow.symbol, mint: closedRow.mint, reason: closedRow.close_reason, pnlUsd: Number(closedRow.pnl_usd), pnlPct: Number(closedRow.pnl_pct) }), opts).catch(() => {});
 }
 
 // Up to 8 Share buttons, two per row, plus Close — one per closed trade shown in the history text.
@@ -1305,6 +1346,15 @@ bot.command('paperhistory', async (ctx) => {
   if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
   const rows = await listClosedPositions(ctx.from.id);
   return ctx.reply(buildHistoryText(rows), { ...HTML, reply_markup: historyKeyboard(rows) });
+});
+
+// A shareable performance summary — win rate, realized PnL, best trade. Pulled from a wide history so the
+// numbers cover the whole record, not just the recent handful the inline-buttons can share.
+bot.command('paperstats', async (ctx) => {
+  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
+  await ensurePaperAccount(ctx.from.id);
+  const rows = await listClosedPositions(ctx.from.id, { limit: 500 });
+  return ctx.reply(buildStatsText(rows), HTML);
 });
 
 bot.callbackQuery('pe:show', async (ctx) => { await ctx.answerCallbackQuery(); return showStrategy(ctx); });
@@ -1531,14 +1581,27 @@ async function checkPaperPositions() {
       const price = prices.get(r.mint)?.priceUsd ?? null;
       const pct = pnlPct(Number(r.entry_price_usd), price);
       const reason = shouldClose(strategy, pct);
-      if (!reason) continue;
+      if (!reason) {
+        // Phase 4: announce each new multiple once, as a reply under the original open/call message — the
+        // same threading a real group call's multiplier posts use.
+        const entry = Number(r.entry_price_usd);
+        const x = entry > 0 && price != null ? price / entry : null;
+        const ms = x != null ? newMilestone(Number(r.last_milestone_x) || 1, x) : null;
+        if (ms && r.open_msg_id) {
+          await setPositionMilestone(r.id, ms).catch(() => {});
+          bot.api.sendMessage(r.telegram_id, buildMilestoneNotice({ symbol: r.symbol, mint: r.mint, x: ms }),
+            { ...HTML, reply_parameters: { message_id: Number(r.open_msg_id) } }).catch(() => {});
+        }
+        continue;
+      }
       const sizeUsd = Number(r.size_usd);
       const payoutUsd = Math.max(0, sizeUsd * (1 + pct / 100));
       const pnlUsd = payoutUsd - sizeUsd;
-      const telegramId = await closePosition(r.id, { exitPriceUsd: price, exitMcapUsd: prices.get(r.mint)?.marketCapUsd ?? null, reason, payoutUsd, pnlUsd, pnlPct: pct });
+      const exitMcapUsd = prices.get(r.mint)?.marketCapUsd ?? null;
+      const telegramId = await closePosition(r.id, { exitPriceUsd: price, exitMcapUsd, reason, payoutUsd, pnlUsd, pnlPct: pct });
       if (!telegramId) continue; // already closed elsewhere
       closed++;
-      bot.api.sendMessage(telegramId, buildCloseNotice({ symbol: r.symbol, mint: r.mint, reason, pnlUsd, pnlPct: pct }), HTML).catch(() => {});
+      await notifyPaperClose(telegramId, { ...r, status: 'closed', close_reason: reason, exit_price_usd: price, exit_mcap_usd: exitMcapUsd, pnl_usd: pnlUsd, pnl_pct: pct, closed_at: new Date() });
     }
     if (closed) console.log(`paper check: ${rows.length} open, ${closed} closed`);
   } catch (e) {
@@ -1742,6 +1805,8 @@ bot.start({
       { command: 'paper', description: 'Paper trading: balance & positions' },
       { command: 'strategy', description: 'Paper trading: edit your rules' },
       { command: 'positions', description: 'Paper trading: open positions' },
+      { command: 'paperhistory', description: 'Paper trading: closed trades' },
+      { command: 'paperstats', description: 'Paper trading: your stats' },
       { command: 'c', description: 'Open a chart' },
       { command: 's', description: 'Search for a token' },
       { command: 'i', description: 'Get top coins' },

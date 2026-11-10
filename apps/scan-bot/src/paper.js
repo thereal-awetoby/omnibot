@@ -118,19 +118,57 @@ export function buildHistoryText(rows) {
     const sym = r.symbol ? `$${esc(r.symbol)}` : esc(r.mint.slice(0, 4) + '…' + r.mint.slice(-4));
     const pnl = Number(r.pnl_usd);
     const why = r.open_mode && r.open_mode !== 'rules' && r.decision_reason ? `\n   <i>bought because: ${esc(r.decision_reason)}</i>` : '';
-    return `${pnl >= 0 ? '🟢' : '🔴'} ${sym} · ${pnl >= 0 ? '+' : ''}${formatUsd(pnl)} (${Number(r.pnl_pct).toFixed(1)}%) · ${REASON_LABEL[r.close_reason] ?? r.close_reason}${why}`;
+    const via = r.signal_source ? ` · via ${esc(r.signal_source)}` : '';
+    return `${pnl >= 0 ? '🟢' : '🔴'} ${sym} · ${pnl >= 0 ? '+' : ''}${formatUsd(pnl)} (${Number(r.pnl_pct).toFixed(1)}%) · ${REASON_LABEL[r.close_reason] ?? r.close_reason}${via}${why}`;
   });
   return '📜 <b>Paper trade history</b>\n\n' + lines.join('\n');
 }
 
-export function buildOpenNotice({ symbol, mint, sizeUsd, mcapUsd, openMode = 'rules', decisionReason = null }) {
+export function buildOpenNotice({ symbol, mint, sizeUsd, mcapUsd, openMode = 'rules', decisionReason = null, source = null }) {
   const sym = symbol ? `$${esc(symbol)}` : esc(mint.slice(0, 4) + '…' + mint.slice(-4));
   const why = openMode !== 'rules' && decisionReason ? esc(decisionReason) : 'matched your strategy';
-  return `📝 Paper-bought ${sym}\n${formatUsd(sizeUsd)} at ${mcapUsd ? formatUsd(mcapUsd) + ' mcap' : 'entry'} — ${why}.`;
+  const via = source ? ` · via ${esc(source)}` : '';
+  return `📝 Paper-bought ${sym}\n${formatUsd(sizeUsd)} at ${mcapUsd ? formatUsd(mcapUsd) + ' mcap' : 'entry'} — ${why}${via}.`;
 }
 
 export function buildCloseNotice({ symbol, mint, reason, pnlUsd, pnlPct: pct }) {
   const sym = symbol ? `$${esc(symbol)}` : esc(mint.slice(0, 4) + '…' + mint.slice(-4));
   const sign = pnlUsd >= 0 ? '+' : '';
   return `${pnlUsd >= 0 ? '🎉' : '💀'} Paper-closed ${sym} (${REASON_LABEL[reason] ?? reason})\n${sign}${formatUsd(pnlUsd)} (${sign}${pct.toFixed(1)}%)`;
+}
+
+// ---------- Phase 4: Agent "call" (a heads-up with no paper trade — no capital risked) ----------
+export function buildAgentCallNotice({ symbol, mint, mcapUsd, reason = null, source = null }) {
+  const sym = symbol ? `$${esc(symbol)}` : esc(mint.slice(0, 4) + '…' + mint.slice(-4));
+  const via = source ? ` · via ${esc(source)}` : '';
+  return (
+    `📣 <b>Agent call</b> (no paper trade)\n` +
+    `${sym} at ${mcapUsd ? formatUsd(mcapUsd) + ' mcap' : 'current price'}${via}\n` +
+    (reason ? `<i>${esc(reason)}</i>` : 'Flagged as worth watching.')
+  );
+}
+
+// A milestone reply, threaded under the original open/call message — mirrors a real group call's multiplier post.
+export function buildMilestoneNotice({ symbol, mint, x }) {
+  const sym = symbol ? `$${esc(symbol)}` : esc(mint.slice(0, 4) + '…' + mint.slice(-4));
+  return `🚀 ${sym} just hit <b>${(x >= 10 ? x.toFixed(0) : x.toFixed(2))}x</b> on your paper trade.`;
+}
+
+// ---------- Phase 5: a shareable performance summary (plan section 8 — proof the system is live) ----------
+export function buildStatsText(rows) {
+  if (!rows.length) return 'No closed paper trades yet — stats show up once you have some history.';
+  const wins = rows.filter((r) => Number(r.pnl_usd) >= 0);
+  const totalPnl = rows.reduce((a, r) => a + Number(r.pnl_usd), 0);
+  const totalSize = rows.reduce((a, r) => a + Number(r.size_usd), 0);
+  const best = rows.reduce((a, r) => (Number(r.pnl_pct) > Number(a?.pnl_pct ?? -Infinity) ? r : a), null);
+  const avgPct = rows.reduce((a, r) => a + Number(r.pnl_pct), 0) / rows.length;
+  const bestSym = best?.symbol ? `$${esc(best.symbol)}` : best ? esc(best.mint.slice(0, 4) + '…' + best.mint.slice(-4)) : null;
+  return (
+    `📊 <b>Paper trading stats</b> (${rows.length} closed trade${rows.length === 1 ? '' : 's'})\n\n` +
+    `Win rate: <b>${((wins.length / rows.length) * 100).toFixed(0)}%</b> (${wins.length}/${rows.length})\n` +
+    `Realized PnL: ${totalPnl >= 0 ? '+' : ''}${formatUsd(totalPnl)}${totalSize > 0 ? ` (${totalPnl >= 0 ? '+' : ''}${((totalPnl / totalSize) * 100).toFixed(1)}% on capital deployed)` : ''}\n` +
+    `Average trade: ${avgPct >= 0 ? '+' : ''}${avgPct.toFixed(1)}%\n` +
+    (best ? `Best trade: ${bestSym} ${Number(best.pnl_pct) >= 0 ? '+' : ''}${Number(best.pnl_pct).toFixed(1)}%\n` : '') +
+    `\n<i>Virtual balance — not real money.</i>`
+  );
 }
