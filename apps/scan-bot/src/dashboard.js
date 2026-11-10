@@ -45,6 +45,42 @@ export function buildDashTokenJson(mint, { market, security, intel } = {}) {
   };
 }
 
+// Paper trading: account + strategy + live open positions + recent history, for the Mini App's Paper tab.
+// positions: listOpenPositions() rows. prices: Map(mint -> market). history: listClosedPositions() rows.
+export function buildPaperJson({ account, strategy, positions, prices, history }) {
+  let investedUsd = 0, unrealizedUsd = 0;
+  const openRows = (positions ?? []).map((p) => {
+    const size = Number(p.size_usd);
+    const price = num(prices?.get(p.mint)?.priceUsd);
+    const value = price > 0 ? size * (price / Number(p.entry_price_usd)) : size;
+    const pnlUsd = value - size;
+    investedUsd += size;
+    unrealizedUsd += pnlUsd;
+    return {
+      id: p.id, mint: p.mint, symbol: p.symbol ?? null, sizeUsd: size,
+      pnlUsd: num(pnlUsd), pnlPct: price > 0 ? ((value - size) / size) * 100 : null,
+      openedAt: p.opened_at,
+    };
+  });
+  const balanceUsd = num(account?.balance_usd) ?? 0;
+  const historyRows = (history ?? []).map((r) => ({
+    id: r.id, mint: r.mint, symbol: r.symbol ?? null,
+    pnlUsd: num(r.pnl_usd), pnlPct: num(r.pnl_pct), reason: r.close_reason, closedAt: r.closed_at,
+  }));
+  return {
+    balanceUsd, realizedUsd: num(account?.realized_usd) ?? 0,
+    investedUsd, equityUsd: balanceUsd + investedUsd + unrealizedUsd,
+    strategy: strategy ? {
+      enabled: Boolean(strategy.enabled),
+      minMcapUsd: num(strategy.min_mcap_usd), maxMcapUsd: num(strategy.max_mcap_usd),
+      allocPct: num(strategy.alloc_pct), tpPct: num(strategy.tp_pct), slPct: num(strategy.sl_pct),
+      maxOpen: num(strategy.max_open),
+    } : null,
+    positions: openRows,
+    history: historyRows,
+  };
+}
+
 export const DASH_PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
@@ -78,6 +114,16 @@ body{display:flex;flex-direction:column}
 .btn{display:block;width:100%;text-align:center;border:1px solid var(--line);background:#1a2a4d;color:var(--fg);padding:12px;border-radius:10px;font-size:14px;text-decoration:none;cursor:pointer;margin-top:10px}
 .btn.pri{background:var(--acc);border-color:var(--acc);font-weight:700}
 #back{background:none;border:none;color:var(--acc);font-size:14px;padding:4px 0 10px;cursor:pointer}
+#paper{display:none}
+.pbox{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
+.peq{font-size:26px;font-weight:800}
+.prow{display:flex;justify-content:space-between;color:var(--mut);font-size:12px;margin-top:4px}
+.pfield{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--line);gap:10px}
+.pfield label{font-size:13px;color:var(--mut)}
+.pfield input{width:90px;background:#0b1220;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 8px;font-size:13px;text-align:right}
+#psave{margin-top:10px}
+.plist .row{cursor:default}
+.pshare{flex:none;border:1px solid var(--line);background:#1a2a4d;color:var(--fg);border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer}
 </style></head><body>
 <div id="head">⭐ Omni Scan</div>
 <div id="search"><input id="q" placeholder="Search token or paste address"></div>
@@ -92,8 +138,23 @@ body{display:flex;flex-direction:column}
     <button class="btn pri" id="t-watch"></button>
     <a class="btn" id="t-map" href="#">🫧 Bubblemap</a>
   </div>
+  <div id="paper">
+    <div class="pbox"><div class="peq" id="p-equity"></div><div class="prow"><span id="p-cash"></span><span id="p-real"></span></div></div>
+    <div class="pbox">
+      <div class="pfield"><label>Strategy</label><button class="btn pri" id="p-tog" style="width:auto;margin:0;padding:6px 14px"></button></div>
+      <div class="pfield"><label>Min market cap $</label><input id="p-min" placeholder="any"></div>
+      <div class="pfield"><label>Max market cap $</label><input id="p-max" placeholder="any"></div>
+      <div class="pfield"><label>Size % per trade</label><input id="p-alloc"></div>
+      <div class="pfield"><label>Take-profit %</label><input id="p-tp"></div>
+      <div class="pfield"><label>Stop-loss %</label><input id="p-sl"></div>
+      <div class="pfield"><label>Max open</label><input id="p-maxopen"></div>
+      <button class="btn pri" id="psave">Save strategy</button>
+    </div>
+    <div class="pbox"><div style="font-weight:700;margin-bottom:6px">Open positions</div><div class="plist" id="p-open"></div></div>
+    <div class="pbox"><div style="font-weight:700;margin-bottom:6px">History</div><div class="plist" id="p-hist"></div></div>
+  </div>
 </div>
-<div id="tabs"><button id="tab-home" class="on">🔥 Home</button><button id="tab-watch">⭐ Watchlist</button></div>
+<div id="tabs"><button id="tab-home" class="on">🔥 Home</button><button id="tab-watch">⭐ Watchlist</button><button id="tab-paper">📝 Paper</button></div>
 <script>
 (function(){
 var tg=window.Telegram&&window.Telegram.WebApp; if(tg){try{tg.ready();tg.expand();}catch(e){}}
@@ -107,7 +168,8 @@ function api(path,opts){
   return fetch(path,opts).then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error(j.error||'request failed');return j;});});
 }
 var list=document.getElementById('list'),tokView=document.getElementById('tok'),qEl=document.getElementById('q');
-var tabHome=document.getElementById('tab-home'),tabWatch=document.getElementById('tab-watch');
+var tabHome=document.getElementById('tab-home'),tabWatch=document.getElementById('tab-watch'),tabPaper=document.getElementById('tab-paper');
+var paperView=document.getElementById('paper');
 var mode='home';
 function rowHtml(r,onClick){
   var d=document.createElement('div');d.className='row';
@@ -131,6 +193,62 @@ function loadWatch(){
     j.results.forEach(function(r){list.appendChild(rowHtml(r,function(){openToken(r.mint);}));});
   }).catch(function(e){list.innerHTML='<div class="empty">'+(String(e.message).indexOf('sign')>=0?'Open this from inside Telegram to see your watchlist.':'Could not load your watchlist.')+'</div>';});
 }
+function fmtPct2(n){if(n==null)return 'n/a';return (n>=0?'+':'')+n.toFixed(1)+'%';}
+function paperRow(label,pnlUsd,pnlPct,shareId){
+  var d=document.createElement('div');d.className='row';
+  var left=(label.symbol?'$'+esc(label.symbol):label.mint.slice(0,4)+'…'+label.mint.slice(-4));
+  var pnlTxt=(pnlUsd==null?'n/a':(pnlUsd>=0?'+':'')+'$'+Math.abs(pnlUsd).toFixed(2))+' ('+fmtPct2(pnlPct)+')';
+  d.innerHTML='<span class="sym">'+left+'<div class="mc">'+pnlTxt+'</div></span>';
+  if(shareId!=null){
+    var btn=document.createElement('button');btn.className='pshare';btn.textContent='Share';
+    btn.onclick=function(e){e.stopPropagation();shareCard(shareId,btn);};
+    d.appendChild(btn);
+  }
+  return d;
+}
+function shareCard(id,btn){
+  var t=btn.textContent;btn.textContent='...';btn.disabled=true;
+  api('/api/dash/paper/share',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})
+    .then(function(){btn.textContent='Sent ✓';setTimeout(function(){btn.textContent=t;btn.disabled=false;},1800);
+      if(tg&&tg.showAlert)tg.showAlert('Card sent to your chat with the bot.');})
+    .catch(function(e){btn.textContent=t;btn.disabled=false;alert(String(e.message||'Could not send the card.'));});
+}
+var pLoaded=false;
+function loadPaper(){
+  document.getElementById('p-equity').textContent='Loading…';
+  api('/api/dash/paper').then(function(j){
+    document.getElementById('p-equity').textContent=abbr(j.equityUsd);
+    document.getElementById('p-cash').textContent='Cash '+abbr(j.balanceUsd)+' · In trades '+abbr(j.investedUsd);
+    document.getElementById('p-real').textContent='Realized '+(j.realizedUsd>=0?'+':'')+abbr(j.realizedUsd);
+    var s=j.strategy||{enabled:false,allocPct:5,tpPct:100,slPct:40,maxOpen:3};
+    var tog=document.getElementById('p-tog');tog.textContent=s.enabled?'🟢 On':'⚪ Off';
+    document.getElementById('p-min').value=s.minMcapUsd==null?'':s.minMcapUsd;
+    document.getElementById('p-max').value=s.maxMcapUsd==null?'':s.maxMcapUsd;
+    document.getElementById('p-alloc').value=s.allocPct==null?'':s.allocPct;
+    document.getElementById('p-tp').value=s.tpPct==null?'':s.tpPct;
+    document.getElementById('p-sl').value=s.slPct==null?'':s.slPct;
+    document.getElementById('p-maxopen').value=s.maxOpen==null?'':s.maxOpen;
+    tog.onclick=function(){saveStrategy({enabled:!s.enabled});};
+    var openEl=document.getElementById('p-open');openEl.innerHTML='';
+    if(!j.positions.length)openEl.innerHTML='<div class="empty">No open paper positions.</div>';
+    j.positions.forEach(function(p){openEl.appendChild(paperRow(p,p.pnlUsd,p.pnlPct,null));});
+    var histEl=document.getElementById('p-hist');histEl.innerHTML='';
+    if(!j.history.length)histEl.innerHTML='<div class="empty">No closed paper trades yet.</div>';
+    j.history.forEach(function(p){histEl.appendChild(paperRow(p,p.pnlUsd,p.pnlPct,p.id));});
+    pLoaded=true;
+  }).catch(function(e){document.getElementById('p-equity').textContent=(String(e.message).indexOf('sign')>=0?'Open this from inside Telegram.':'Could not load your paper account.');});
+}
+function saveStrategy(patch){
+  if(!patch){
+    var v=function(id){var s=document.getElementById(id).value.trim();return s===''?null:Number(s);};
+    patch={minMcapUsd:v('p-min'),maxMcapUsd:v('p-max'),allocPct:v('p-alloc'),tpPct:v('p-tp'),slPct:v('p-sl'),maxOpen:v('p-maxopen')};
+  }
+  var btn=document.getElementById('psave');var t=btn.textContent;btn.textContent='Saving…';btn.disabled=true;
+  api('/api/dash/paper/strategy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)})
+    .then(function(){btn.textContent=t;btn.disabled=false;loadPaper();})
+    .catch(function(e){btn.textContent=t;btn.disabled=false;alert(String(e.message||'Could not save your strategy.'));});
+}
+document.getElementById('psave').onclick=function(){saveStrategy(null);};
 function doSearch(q){
   if(!q){mode==='watch'?loadWatch():loadHome();return;}
   list.innerHTML='<div class="empty">Searching…</div>';
@@ -142,8 +260,9 @@ function doSearch(q){
 }
 var qTimer=null;
 qEl.addEventListener('input',function(){clearTimeout(qTimer);var v=qEl.value.trim();qTimer=setTimeout(function(){doSearch(v);},300);});
-tabHome.onclick=function(){mode='home';tabHome.className='on';tabWatch.className='';qEl.value='';tokView.style.display='none';list.style.display='block';loadHome();};
-tabWatch.onclick=function(){mode='watch';tabWatch.className='on';tabHome.className='';qEl.value='';tokView.style.display='none';list.style.display='block';loadWatch();};
+tabHome.onclick=function(){mode='home';tabHome.className='on';tabWatch.className='';tabPaper.className='';qEl.value='';tokView.style.display='none';paperView.style.display='none';list.style.display='block';loadHome();};
+tabWatch.onclick=function(){mode='watch';tabWatch.className='on';tabHome.className='';tabPaper.className='';qEl.value='';tokView.style.display='none';paperView.style.display='none';list.style.display='block';loadWatch();};
+tabPaper.onclick=function(){mode='paper';tabPaper.className='on';tabHome.className='';tabWatch.className='';qEl.value='';tokView.style.display='none';list.style.display='none';paperView.style.display='block';loadPaper();};
 document.getElementById('back').onclick=function(){tokView.style.display='none';list.style.display='block';};
 var curMint=null,curWatching=false;
 function openToken(mint){

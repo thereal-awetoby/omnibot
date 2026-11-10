@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDashSearchJson, buildDashTrendingJson, buildDashWatchlistJson, buildDashTokenJson, DASH_PAGE } from './dashboard.js';
+import { buildDashSearchJson, buildDashTrendingJson, buildDashWatchlistJson, buildDashTokenJson, buildPaperJson, DASH_PAGE } from './dashboard.js';
 
 const MINT = 'So11111111111111111111111111111111111111112';
 
@@ -77,4 +77,49 @@ test('DASH_PAGE is a self-contained HTML document with the Telegram WebApp scrip
   assert.match(DASH_PAGE, /\/api\/dash\/unwatch/);
   assert.match(DASH_PAGE, /\/api\/dash\/token/);
   assert.match(DASH_PAGE, /X-Init-Data/);
+});
+
+const PMINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+
+test('buildPaperJson: equity = cash + open positions at current value, unrealized folded in', () => {
+  const account = { balance_usd: 400, realized_usd: 20 };
+  const strategy = { enabled: true, min_mcap_usd: 5000, max_mcap_usd: null, alloc_pct: 5, tp_pct: 100, sl_pct: 40, max_open: 3 };
+  const positions = [{ id: 1, mint: MINT, symbol: 'SOL', size_usd: 50, entry_price_usd: 2, opened_at: 't1' }, { id: 2, mint: PMINT, symbol: 'USDC', size_usd: 50, entry_price_usd: 1, opened_at: 't2' }];
+  const prices = new Map([[MINT, { priceUsd: 3 }]]); // +50%; PMINT has no price
+  const history = [{ id: 9, mint: MINT, symbol: 'OLD', pnl_usd: -10, pnl_pct: -40, close_reason: 'sl', closed_at: 't0' }];
+  const j = buildPaperJson({ account, strategy, positions, prices, history });
+  assert.equal(j.balanceUsd, 400);
+  assert.equal(j.realizedUsd, 20);
+  assert.equal(j.investedUsd, 100);
+  assert.equal(j.equityUsd, 400 + 100 + 25); // cash + size + unrealized (25 gain on the priced one, 0 on the other)
+  assert.deepEqual(j.strategy, { enabled: true, minMcapUsd: 5000, maxMcapUsd: null, allocPct: 5, tpPct: 100, slPct: 40, maxOpen: 3 });
+  assert.equal(j.positions.length, 2);
+  assert.equal(j.positions[0].pnlUsd, 25);
+  assert.equal(j.positions[0].pnlPct, 50);
+  assert.equal(j.positions[1].pnlUsd, 0);
+  assert.equal(j.positions[1].pnlPct, null); // no price: can't say a percent
+  assert.deepEqual(j.history, [{ id: 9, mint: MINT, symbol: 'OLD', pnlUsd: -10, pnlPct: -40, reason: 'sl', closedAt: 't0' }]);
+});
+
+test('buildPaperJson: brand-new account, no strategy row, nothing open or closed', () => {
+  const j = buildPaperJson({ account: { balance_usd: 500, realized_usd: 0 }, strategy: null, positions: [], prices: new Map(), history: [] });
+  assert.equal(j.balanceUsd, 500);
+  assert.equal(j.investedUsd, 0);
+  assert.equal(j.equityUsd, 500);
+  assert.equal(j.strategy, null);
+  assert.deepEqual(j.positions, []);
+  assert.deepEqual(j.history, []);
+  assert.deepEqual(buildPaperJson({}), { balanceUsd: 0, realizedUsd: 0, investedUsd: 0, equityUsd: 0, strategy: null, positions: [], history: [] });
+});
+
+test('DASH_PAGE now has the Paper tab wired up: tab button, view, strategy fields, and the paper API calls', () => {
+  assert.match(DASH_PAGE, /id="tab-paper"/);
+  assert.match(DASH_PAGE, /id="paper"/);
+  assert.match(DASH_PAGE, /id="p-tog"/);
+  assert.match(DASH_PAGE, /id="p-alloc"/);
+  assert.match(DASH_PAGE, /id="p-tp"/);
+  assert.match(DASH_PAGE, /id="p-sl"/);
+  assert.match(DASH_PAGE, /\/api\/dash\/paper(?!\/)/);
+  assert.match(DASH_PAGE, /\/api\/dash\/paper\/strategy/);
+  assert.match(DASH_PAGE, /\/api\/dash\/paper\/share/);
 });

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { newMilestone, buildPnlSvg, buildPnlCaption, fmtMult, peakMultiple } from './pnlcard.js';
+import { newMilestone, buildPnlSvg, buildPnlCaption, fmtMult, peakMultiple, buildPaperPnlSvg, buildPaperPnlCaption } from './pnlcard.js';
 
 test('newMilestone announces each multiple once', () => {
   assert.equal(newMilestone(1, 1.9), null);
@@ -57,4 +57,45 @@ test('captions', () => {
   assert.equal(fmtMult(25), '25x');
   assert.match(buildPnlCaption({ symbol: 'ABC', callerName: '@t', x: 3, milestone: true }), /🚀.*3\.00x/);
   assert.match(buildPnlCaption({ symbol: 'ABC', callerName: '@t', x: 1.5 }), /📊.*peaked/);
+});
+
+test('paper PnL card: a win is green, shows entry/exit market cap, size, and a paper-trading disclaimer', () => {
+  const svg = buildPaperPnlSvg({ symbol: 'DOG', entryMcap: 10_000, nowMcap: 25_000, pct: 150, status: 'tp', ageText: 'closed 2h ago', sizeUsd: 50 });
+  assert.match(svg, /\$DOG/);
+  assert.match(svg, /\+150%/);
+  assert.match(svg, /#22c55e/);
+  assert.doesNotMatch(svg, /#ef4444/);
+  assert.match(svg, />Take-profit hit · closed 2h ago</);
+  assert.match(svg, />Entry</);
+  assert.match(svg, />Exit</);
+  assert.match(svg, />\$10\.00K</);
+  assert.match(svg, />\$25\.00K</);
+  assert.match(svg, />\$50\.00</);
+  assert.match(svg, /PAPER TRADE/);
+  assert.match(svg, /no real SOL moved/);
+  assert.doesNotMatch(svg, /undefined|NaN/);
+});
+
+test('paper PnL card: a loss is red, an open position says Now and has no size in the row if omitted', () => {
+  const svg = buildPaperPnlSvg({ symbol: 'CAT', entryMcap: 50_000, nowMcap: 30_000, pct: -40, status: 'sl' });
+  assert.match(svg, /-40\.0%/);
+  assert.match(svg, /#ef4444/);
+  assert.doesNotMatch(svg, /#22c55e/);
+  assert.match(svg, />Stop-loss hit</);
+  const open = buildPaperPnlSvg({ symbol: 'FOX', entryMcap: 1000, nowMcap: 1200, pct: 20, status: 'open' });
+  assert.match(open, />Open position</);
+  assert.match(open, />Now</);
+  assert.doesNotMatch(open, />Size</);
+});
+
+test('paper PnL card: no current price available shows n/a, never crashes', () => {
+  const svg = buildPaperPnlSvg({ symbol: null, entryMcap: 1000, nowMcap: null, pct: 0, status: 'open' });
+  assert.match(svg, />n\/a</);
+  assert.match(svg, />Token</);
+  assert.doesNotMatch(svg, /undefined|NaN/);
+});
+
+test('buildPaperPnlCaption', () => {
+  assert.match(buildPaperPnlCaption({ symbol: 'DOG', status: 'tp', pct: 150 }), /\$DOG.*Take-profit hit.*\+150\.0%/s);
+  assert.match(buildPaperPnlCaption({ symbol: null, status: 'open', pct: -5 }), /this token.*Open position.*-5\.0%/s);
 });
