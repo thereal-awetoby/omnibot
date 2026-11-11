@@ -73,7 +73,10 @@ const STATUS_TAG = { open: 'Open position', tp: 'Take-profit hit', sl: 'Stop-los
 
 // source: where the signal came from (group call / X follow) — section 4's card feature bullet asks for it
 // alongside the numbers below ("entry MC -> current/exit MC, multiplier, source, time").
-export function buildPaperPnlSvg({ symbol, entryMcap, nowMcap, pct, status = 'open', ageText = null, sizeUsd = null, source = null }) {
+// art: an optional { buf, mime } background picture (the owner's backgrounds/mine rotation, picked by the
+// caller via memeart's pickOwnImage) — drawn full-bleed with shade overlays, same as the call brag card.
+// Without it the card keeps the plain gradient, so nothing changes when no picture is available.
+export function buildPaperPnlSvg({ symbol, entryMcap, nowMcap, pct, status = 'open', ageText = null, sizeUsd = null, source = null, art = null }) {
   const win = pct >= 0;
   const col = win ? '#22c55e' : '#ef4444';
   const sym = symbol ? `$${esc(plain(symbol))}` : 'Token';
@@ -85,18 +88,28 @@ export function buildPaperPnlSvg({ symbol, entryMcap, nowMcap, pct, status = 'op
   const tag = STATUS_TAG[status] ?? 'Closed';
   const nowLabel = status === 'open' ? 'Now' : 'Exit';
   const srcLine = source ? plain(source) : null;
+  const thin = art ? ' stroke="#000" stroke-opacity="0.6" stroke-width="4" paint-order="stroke"' : '';
+  const stroke = art ? ' stroke="#000" stroke-opacity="0.55" stroke-width="7" paint-order="stroke"' : '';
+  const bgLayer = art
+    ? [
+      `<image xlink:href="data:${art.mime};base64,${art.buf.toString('base64')}" x="0" y="0" width="1000" height="563" preserveAspectRatio="xMidYMid slice"/>`,
+      '<rect width="1000" height="563" fill="url(#shade)"/><rect y="330" width="1000" height="233" fill="url(#shadeb)"/>',
+    ]
+    : ['<rect width="1000" height="563" fill="url(#bg)"/><rect width="1000" height="563" fill="url(#glow)"/>'];
   return [
     '<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="563" viewBox="0 0 1000 563">',
     '<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1220"/><stop offset="1" stop-color="#111c33"/></linearGradient>',
     `<radialGradient id="glow" cx="0.8" cy="0.1" r="0.7"><stop offset="0" stop-color="${col}" stop-opacity="0.28"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></radialGradient>`,
+    '<linearGradient id="shade" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#000" stop-opacity="0.78"/><stop offset="0.6" stop-color="#000" stop-opacity="0.4"/><stop offset="1" stop-color="#000" stop-opacity="0.1"/></linearGradient>',
+    '<linearGradient id="shadeb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.8"/></linearGradient>',
     '<linearGradient id="sol" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#9945FF"/><stop offset="1" stop-color="#14F195"/></linearGradient></defs>',
-    '<g><rect width="1000" height="563" fill="url(#bg)"/><rect width="1000" height="563" fill="url(#glow)"/>',
+    '<g>', ...bgLayer,
     `<text x="50" y="80" ${f} font-size="30" font-weight="700" fill="#e5e7eb">Omni Scan</text>`,
     `<text x="950" y="80" text-anchor="end" ${f} font-size="22" font-weight="700" fill="#e5e7eb">📝 PAPER TRADE</text>`,
     `<text x="50" y="190" ${f} font-size="${symSize}" font-weight="700" fill="#ffffff">${sym}</text>`,
-    `<text x="50" y="240" ${f} font-size="26" fill="#e5e7eb">${esc(tag)}${ageText ? ` · ${esc(ageText)}` : ''}${srcLine ? ` · ${esc(srcLine)}` : ''}</text>`,
-    `<text x="50" y="410" ${f} font-size="150" font-weight="700" fill="${col}">${pctTxt}</text>`,
-    multTxt ? `<text x="950" y="410" text-anchor="end" ${f} font-size="64" font-weight="700" fill="${col}">${multTxt}</text>` : '',
+    `<text x="50" y="240" ${f} font-size="26" fill="#e5e7eb"${thin}>${esc(tag)}${ageText ? ` · ${esc(ageText)}` : ''}${srcLine ? ` · ${esc(srcLine)}` : ''}</text>`,
+    `<text x="50" y="410" ${f} font-size="150" font-weight="700" fill="${col}"${stroke}>${pctTxt}</text>`,
+    multTxt ? `<text x="950" y="410" text-anchor="end" ${f} font-size="64" font-weight="700" fill="${col}"${stroke}>${multTxt}</text>` : '',
     '<rect x="50" y="450" width="900" height="2" fill="#ffffff" fill-opacity="0.25"/>',
     `<text x="50" y="505" ${f} font-size="24" fill="#e5e7eb">Entry</text><text x="150" y="505" ${f} font-size="30" font-weight="700" fill="#e5e7eb">${formatUsd(entryMcap)}</text>`,
     `<text x="380" y="505" ${f} font-size="24" fill="#e5e7eb">${esc(nowLabel)}</text><text x="470" y="505" ${f} font-size="30" font-weight="700" fill="${col}">${nowMcap != null ? formatUsd(nowMcap) : 'n/a'}</text>`,

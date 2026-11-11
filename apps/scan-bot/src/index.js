@@ -27,7 +27,7 @@ import { startIntel, gatherIntel, within, hedge } from './intel.js';
 import { getSolBalance, getSolBalances, getHolderTokens, scanCreatedTokens, getTokenMeta, getCreatorOnChain, getDeployerOnChain, getHoldingPct, getWalletFunding, scanDevLaunches, getTokenNames, getTokenImage, rpcStats } from './chain.js';
 import { loadBubbleData } from './bubbleload.js';
 import { renderPng, renderRaw } from './bubblemap.js';
-import { getArt, getMeme, refillArt, clearOldCache, OWN_DIR, sniffMime } from './memeart.js';
+import { getArt, getMeme, refillArt, clearOldCache, OWN_DIR, sniffMime, pickOwnImage } from './memeart.js';
 import { usdFromQuote, quoteUsd, fetchLaunchMarket } from './curvemarket.js';
 import { buildCandleSvg, defaultTf, parseTf, TFS } from './chartimg.js';
 import { shrinkArt, cardToJpeg, rawToJpeg, hasSharp } from './imgfast.js';
@@ -1321,7 +1321,8 @@ async function sendPaperPnlCard(telegramId, p, { replyToMessageId = null } = {})
       ageText = `closed ${formatDuration(Date.now() - new Date(p.closed_at ?? Date.now()).getTime())} ago`;
     }
     if (pct == null || !Number.isFinite(pct)) return { ok: false, error: 'no price available for this trade right now' };
-    const svg = buildPaperPnlSvg({ symbol: p.symbol, entryMcap, nowMcap, pct, status, ageText, sizeUsd: Number(p.size_usd), source: p.signal_source ?? null });
+    const art = await pickOwnImage().catch(() => null); // owner's backgrounds/mine picture, or null (plain card)
+    const svg = buildPaperPnlSvg({ symbol: p.symbol, entryMcap, nowMcap, pct, status, ageText, sizeUsd: Number(p.size_usd), source: p.signal_source ?? null, art });
     const png = await renderPng(svg, CARD_W, { fast: true });
     const opts = { caption: buildPaperPnlCaption({ symbol: p.symbol, status, pct, source: p.signal_source ?? null }), parse_mode: 'HTML' };
     if (replyToMessageId) opts.reply_parameters = { message_id: replyToMessageId };
@@ -1380,7 +1381,9 @@ bot.command('strategy', async (ctx) => {
   return showStrategy(ctx);
 });
 // Better position view: one card per open position, with Refresh / Share PnL / partial-close buttons.
-bot.command('pos', async (ctx) => {
+// /positions now shows the detailed Trojan-style cards (the compact one-line list still backs the
+// Paper-account Positions button). /pos stays as a working alias for the same view.
+async function showPositionCards(ctx) {
   if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
   const open = await listOpenPositions(ctx.from.id);
   if (!open.length) return ctx.reply('No open paper positions.');
@@ -1389,7 +1392,9 @@ bot.command('pos', async (ctx) => {
     const price = prices.get(p.mint)?.priceUsd;
     await ctx.reply(buildPositionCard(p, price), { ...HTML, reply_markup: positionKeyboard(p.id) });
   }
-});
+}
+bot.command('pos', showPositionCards);
+bot.command('positions', showPositionCards);
 
 bot.callbackQuery(/^pp:(refresh|share|close):(\d+)(?::(\d+))?$/, async (ctx) => {
   const [, action, idStr, pctStr] = ctx.match;
@@ -1435,12 +1440,6 @@ bot.callbackQuery(/^pp:(refresh|share|close):(\d+)(?::(\d+))?$/, async (ctx) => 
   return ctx.answerCallbackQuery({ text: `Closed ${pctClose}%` });
 });
 
-bot.command('positions', async (ctx) => {
-  if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
-  const rows = await listOpenPositions(ctx.from.id);
-  const prices = rows.length ? await callPrices(rows.map((r) => r.mint)) : new Map();
-  return ctx.reply(buildPositionsText(rows, prices), HTML);
-});
 bot.command('paperhistory', async (ctx) => {
   if (isGroup(ctx)) return ctx.reply('Paper trading is personal — DM the bot instead.');
   const rows = await listClosedPositions(ctx.from.id);

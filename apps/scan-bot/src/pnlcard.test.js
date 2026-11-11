@@ -108,3 +108,13 @@ test('paper PnL card and caption show the multiplier and the source when given',
   const caption = buildPaperPnlCaption({ symbol: 'DOG', status: 'tp', pct: 150, source: 'X follow' });
   assert.match(caption, /via X follow/);
 });
+
+// Random stored background (backgrounds/mine) on the paper card, when the caller supplies one.
+test('paper PnL card draws a supplied background picture full-bleed, plain gradient without one', () => {
+  const art = { buf: Buffer.from('fakejpeg'), mime: 'image/jpeg' };
+  const withArt = buildPaperPnlSvg({ symbol: 'DOG', entryMcap: 10_000, nowMcap: 25_000, pct: 150, status: 'tp', art });
+  assert.match(withArt, /<image xlink:href="data:image\/jpeg;base64,ZmFrZWpwZWc="/);
+  assert.match(withArt, /fill="url\(#shade\)"/);
+  const plain = buildPaperPnlSvg({ symbol: 'DOG', entryMcap: 10_000, nowMcap: 25_000, pct: 150, status: 'tp' });
+  assert.doesNotMatch(plain, /<image/);
+});
