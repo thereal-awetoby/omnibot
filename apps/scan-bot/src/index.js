@@ -2013,6 +2013,23 @@ health.listen(HEALTH_PORT, '0.0.0.0', () => {
   console.log(`Health server listening on port ${HEALTH_PORT}`);
 });
 
+// Keep-alive: Render's free Web Services spin down after ~15 minutes without INBOUND HTTP traffic —
+// Telegram long-polling is outbound, so the bot would sleep even while actively polling, then take a
+// slow cold start on the next wake-up. Pinging our own public /health every 10 minutes turns that into
+// inbound traffic and keeps the instance warm. Render sets RENDER_EXTERNAL_URL automatically on Web
+// Services; KEEP_ALIVE_URL overrides it (also usable on any host with a public URL). A single free
+// instance kept awake 24/7 uses ~720 of the 750 free instance-hours/month, so this fits the free tier.
+// This is best-effort: if a ping fails (or a host ignores self-traffic), an external uptime pinger on
+// /health is the belt-and-braces alternative — see the log line below.
+const KEEP_ALIVE_URL = (process.env.KEEP_ALIVE_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+if (KEEP_ALIVE_URL) {
+  const keepAlive = () => fetch(`${KEEP_ALIVE_URL}/health`)
+    .then((r) => { if (!r.ok) console.error(`keep-alive ping: HTTP ${r.status}`); })
+    .catch((e) => console.error('keep-alive ping error:', e.message));
+  setInterval(keepAlive, 10 * 60_000);
+  console.log(`Keep-alive: pinging ${KEEP_ALIVE_URL}/health every 10 minutes`);
+}
+
 bot.start({
   onStart: async (me) => {
     await ensureOwnerAgentMode();
